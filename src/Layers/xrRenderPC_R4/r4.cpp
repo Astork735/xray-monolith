@@ -19,6 +19,54 @@
 
 #include "D3DX10Core.h"
 
+namespace
+{
+bool vr_previous_graphics_mode = false;
+void ConfigureOutputOptions(CRender::_options& o)
+{
+	// HDR10
+	o.dx11_hdr10 = !!ps_r4_hdr10_on;
+
+	//	MSAA option dependencies
+	o.dx10_msaa = ps_r3_msaa && !o.dx11_hdr10;
+	o.dx10_msaa_samples = o.dx11_hdr10 ? 1 : (1 << ps_r3_msaa);
+
+	o.dx10_msaa_opt = ps_r2_ls_flags.test(R3FLAG_MSAA_OPT);
+	o.dx10_msaa_opt = o.dx10_msaa_opt && o.dx10_msaa && (HW.FeatureLevel >= D3D_FEATURE_LEVEL_10_1)
+		|| o.dx10_msaa && (HW.FeatureLevel >= D3D_FEATURE_LEVEL_11_0);
+
+	//o.dx10_msaa_hybrid	= ps_r2_ls_flags.test(R3FLAG_MSAA_HYBRID);
+	o.dx10_msaa_hybrid = ps_r2_ls_flags.test((u32)R3FLAG_USE_DX10_1);
+	o.dx10_msaa_hybrid &= !o.dx10_msaa_opt && o.dx10_msaa && (HW.FeatureLevel >= D3D_FEATURE_LEVEL_10_1);
+
+	//	Allow alpha test MSAA for DX10.0
+
+	//o.dx10_msaa_alphatest= ps_r2_ls_flags.test((u32)R3FLAG_MSAA_ALPHATEST);
+	//o.dx10_msaa_alphatest= o.dx10_msaa_alphatest && o.dx10_msaa;
+
+	//o.dx10_msaa_alphatest_atoc= (o.dx10_msaa_alphatest && !o.dx10_msaa_opt && !o.dx10_msaa_hybrid);
+
+	o.dx10_msaa_alphatest = 0;
+	if (o.dx10_msaa)
+	{
+		if (o.dx10_msaa_opt || o.dx10_msaa_hybrid)
+		{
+			if (ps_r3_msaa_atest == 1)
+				o.dx10_msaa_alphatest = CRender::MSAA_ATEST_DX10_1_ATOC;
+			else if (ps_r3_msaa_atest == 2)
+				o.dx10_msaa_alphatest = CRender::MSAA_ATEST_DX10_1_NATIVE;
+		}
+		else
+		{
+			if (ps_r3_msaa_atest)
+				o.dx10_msaa_alphatest = CRender::MSAA_ATEST_DX10_0_ATOC;
+		}
+	}
+
+
+}
+}
+
 CRender RImplementation;
 
 //////////////////////////////////////////////////////////////////////////
@@ -122,6 +170,14 @@ static class cl_pos_decompress_params : public R_constant_setup
 {
 	virtual void setup(R_constant* C)
 	{
+        if (g_vr_rendering_eye)
+        {
+            const Fmatrix& projection = Device.mProject;
+            RCache.set_c(C, (1 + projection._31) / projection._11,
+                (projection._32 - 1) / projection._22,
+                2 / (projection._11 * Device.dwWidth), -2 / (projection._22 * Device.dwHeight));
+            return;
+        }
 		float VertTan = -1.0f * tanf(deg2rad(Device.fFOV / 2.0f));
 		float HorzTan = - VertTan / Device.fASPECT;
 
@@ -398,45 +454,8 @@ void CRender::create()
 	o.dx10_sm4_1 = ps_r2_ls_flags.test((u32)R3FLAG_USE_DX10_1);
 	o.dx10_sm4_1 = o.dx10_sm4_1 && (HW.FeatureLevel >= D3D_FEATURE_LEVEL_10_1);
 
-	// HDR10
-	o.dx11_hdr10 = !!ps_r4_hdr10_on;
-
-	//	MSAA option dependencies
-	o.dx10_msaa = ps_r3_msaa && !o.dx11_hdr10;
-	o.dx10_msaa_samples = o.dx11_hdr10 ? 1 : (1 << ps_r3_msaa);
-
-	o.dx10_msaa_opt = ps_r2_ls_flags.test(R3FLAG_MSAA_OPT);
-	o.dx10_msaa_opt = o.dx10_msaa_opt && o.dx10_msaa && (HW.FeatureLevel >= D3D_FEATURE_LEVEL_10_1)
-		|| o.dx10_msaa && (HW.FeatureLevel >= D3D_FEATURE_LEVEL_11_0);
-
-	//o.dx10_msaa_hybrid	= ps_r2_ls_flags.test(R3FLAG_MSAA_HYBRID);
-	o.dx10_msaa_hybrid = ps_r2_ls_flags.test((u32)R3FLAG_USE_DX10_1);
-	o.dx10_msaa_hybrid &= !o.dx10_msaa_opt && o.dx10_msaa && (HW.FeatureLevel >= D3D_FEATURE_LEVEL_10_1);
-
-	//	Allow alpha test MSAA for DX10.0
-
-	//o.dx10_msaa_alphatest= ps_r2_ls_flags.test((u32)R3FLAG_MSAA_ALPHATEST);
-	//o.dx10_msaa_alphatest= o.dx10_msaa_alphatest && o.dx10_msaa;
-
-	//o.dx10_msaa_alphatest_atoc= (o.dx10_msaa_alphatest && !o.dx10_msaa_opt && !o.dx10_msaa_hybrid);
-
-	o.dx10_msaa_alphatest = 0;
-	if (o.dx10_msaa)
-	{
-		if (o.dx10_msaa_opt || o.dx10_msaa_hybrid)
-		{
-			if (ps_r3_msaa_atest == 1)
-				o.dx10_msaa_alphatest = MSAA_ATEST_DX10_1_ATOC;
-			else if (ps_r3_msaa_atest == 2)
-				o.dx10_msaa_alphatest = MSAA_ATEST_DX10_1_NATIVE;
-		}
-		else
-		{
-			if (ps_r3_msaa_atest)
-				o.dx10_msaa_alphatest = MSAA_ATEST_DX10_0_ATOC;
-		}
-	}
-
+	ConfigureOutputOptions(o);
+	vr_previous_graphics_mode = g_vr_owns_present;
 
 	o.dx10_minmax_sm = ps_r3_minmax_sm;
 	o.dx10_minmax_sm_screenarea_threshold = 1600 * 1200;
@@ -617,6 +636,13 @@ void CRender::reset_begin()
 
 void CRender::reset_end()
 {
+    if (vr_previous_graphics_mode != g_vr_owns_present)
+    {
+        // Rebuild the output target variants from restored desktop preferences
+        // when leaving VR (or from the VR overrides on re-entry).
+        ConfigureOutputOptions(o);
+        vr_previous_graphics_mode = g_vr_owns_present;
+    }
 	D3D_QUERY_DESC qdesc;
 	qdesc.MiscFlags = 0;
 	qdesc.Query = D3D_QUERY_EVENT;
@@ -653,7 +679,7 @@ void CRender::reset_end()
 void CRender::OnFrame()
 {
 Models->DeleteQueue			();
-if (ps_r2_ls_flags.test(R2FLAG_EXP_MT_CALC))	{
+if (!g_vr_owns_present && ps_r2_ls_flags.test(R2FLAG_EXP_MT_CALC))	{
 Device.seqParallel.insert	(Device.seqParallel.begin(),
 fastdelegate::FastDelegate0<>(&HOM,&CHOM::MT_RENDER));
 }
@@ -662,7 +688,7 @@ void CRender::OnFrame()
 {
 	PROF_EVENT("CRender::OnFrame()");
 	Models->DeleteQueue();
-	if (ps_r2_ls_flags.test(R2FLAG_EXP_MT_CALC))
+	if (!g_vr_owns_present && ps_r2_ls_flags.test(R2FLAG_EXP_MT_CALC))
 	{
 		// MT-details (@front)
 		if (Details)

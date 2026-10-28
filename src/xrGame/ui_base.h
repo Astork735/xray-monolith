@@ -104,6 +104,8 @@ public:
 
 	IUIRender::ePointType m_currentPointType;
 	bool m_bAspectNeutral = false;
+	// Glyph width factor for the VR UI panel (1 on the desktop).
+	static float VrGlyphWidth();
 };
 
 

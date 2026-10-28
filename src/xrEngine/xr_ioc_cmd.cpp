@@ -16,6 +16,20 @@
 #include "xr_object.h"
 #include "MonitorList.h"
 
+#ifdef VR_ENABLED
+#include "Vr/vr_config.h"
+#include "Vr/vr_stereo.h"
+#endif
+
+#ifdef VR_ENABLED
+class CCC_VrRecenter : public IConsole_Command
+{
+public:
+    explicit CCC_VrRecenter(LPCSTR name) : IConsole_Command(name) { bEmptyArgsHandled = TRUE; }
+    void Execute(LPCSTR) override { vr::Recenter(); }
+};
+#endif
+
 xr_token* vid_quality_token = NULL;
 
 u32 g_screenmode = 1;
@@ -1040,6 +1054,51 @@ void CCC_Register()
 	CMD1(CCC_LoadCFG, "cfg_load");
 	CMD1(CCC_DumpCVars, "dump_cvar");
     CMD4(CCC_Integer, "dump_cvar_enable", &dump_cvar_enable, 0, 1);
+
+#ifdef VR_ENABLED
+	// Native OpenXR VR (see docs/VR.md). Persisted to user.ltx; the "-vr"/"-novr"
+	// command line flags override these for a single run.
+	CMD1(CCC_VrRecenter, "vr_recenter");
+	CMD4(CCC_Integer, "vr_enabled", &vr_enabled, 0, 2);            // 0 off, 1 prefer, 2 force
+	CMD4(CCC_Integer, "vr_tracking_origin", &vr_tracking_origin, 0, 1); // 0 seated, 1 standing
+	CMD4(CCC_Float, "vr_world_scale", &vr_world_scale, 0.1f, 10.0f);
+	CMD4(CCC_Float, "vr_near_plane", &vr_near_plane, 0.01f, 0.2f);
+	CMD4(CCC_Integer, "vr_animated_grip", &vr_animated_grip, 0, 1);
+	CMD4(CCC_Integer, "vr_hand_physics", &vr_physical_hands, 0, 2);
+	CMD4(CCC_Integer, "vr_weapon_physics", &vr_physical_weapon, 0, 1);
+	CMD4(CCC_Float, "vr_scope_zoom", &vr_scope_zoom, 0.2f, 4.0f);
+	CMD4(CCC_Float, "vr_scope_size", &vr_scope_size, 1.0f, 2.0f);
+	CMD4(CCC_Integer, "vr_debug", &vr_debug, 0, 1);
+	CMD4(CCC_Integer, "vr_snap_turn", &vr_snap_turn, 0, 1);
+	CMD4(CCC_Float, "vr_snap_turn_angle", &vr_snap_turn_angle, 1.0f, 90.0f);
+	CMD4(CCC_Integer, "vr_smooth_turn", &vr_smooth_turn, 0, 1);
+    CMD4(CCC_Integer, "vr_controller_movement", &vr_controller_movement, 0, 1);
+    CMD4(CCC_Integer, "vr_hands", &vr_hands, 0, 1);
+    CMD4(CCC_Integer, "vr_hand_rays", &vr_hand_rays, 0, 1);
+    CMD4(CCC_Float, "vr_move_deadzone", &vr_move_deadzone, 0.05f, 0.8f);
+    CMD4(CCC_Float, "vr_turn_speed", &vr_turn_speed, 15.f, 180.f);
+    CMD4(CCC_Float, "vr_max_head_offset", &vr_max_head_offset, 0.1f, 1.5f);
+    CMD4(CCC_Integer, "vr_physical_crouch", &vr_physical_crouch, 0, 1);
+    CMD4(CCC_Float, "vr_crouch_depth", &vr_crouch_depth, 0.1f, 0.8f);
+    CMD4(CCC_Float, "vr_low_crouch_depth", &vr_low_crouch_depth, 0.2f, 1.2f);
+    CMD4(CCC_Integer, "vr_body_slots", &vr_body_slots, 0, 1);
+    CMD4(CCC_Integer, "vr_slot_rings", &vr_slot_rings, 0, 1);
+    CMD4(CCC_Float, "vr_slot_radius", &vr_slot_radius, 0.06f, 0.3f);
+    CMD4(CCC_Float, "vr_hip_height", &vr_hip_height, 0.4f, 1.0f);
+    CMD4(CCC_Float, "vr_hip_width", &vr_hip_width, 0.1f, 0.4f);
+    CMD4(CCC_Float, "vr_vignette", &vr_vignette, 0.f, 1.f);
+    CMD4(CCC_Integer, "vr_wrist_display", &vr_wrist_display, 0, 1);
+    CMD4(CCC_Integer, "vr_hide_hud", &vr_hide_hud, 0, 1);
+    CMD4(CCC_Integer, "vr_left_handed", &vr_left_handed, 0, 1);
+    CMD4(CCC_Float, "vr_throw_scale", &vr_throw_scale, 0.5f, 4.f);
+    CMD4(CCC_Float, "vr_recoil", &vr_recoil, 0.f, 3.f);
+    CMD4(CCC_Float, "vr_controller_smoothing", &vr_controller_smoothing, 0.f, 10.f);
+    CMD4(CCC_Integer, "vr_shared_shadows", &vr_shared_shadows, 0, 1);
+    CMD4(CCC_Float, "vr_scope_quality", &vr_scope_quality, 0.f, 2.f);
+    CMD4(CCC_Integer, "vr_roomscale", &vr_roomscale, 0, 1);
+    CMD4(CCC_Float, "vr_torso_deadband", &vr_torso_deadband, 10.f, 120.f);
+	CMD4(CCC_Float, "vr_render_scale", &vr_render_scale, 0.5f, 2.0f);
+#endif
 
 #ifdef DEBUG
     CMD1(CCC_MotionsStat, "stat_motions");

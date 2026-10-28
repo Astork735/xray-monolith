@@ -1297,13 +1297,174 @@ CRenderTarget::CRenderTarget()
 	s_menu.create("distort");
 	g_menu.create(FVF::F_TL, RCache.Vertex.Buffer(), RCache.QuadIB);
 
+	// VR: the targets sized from the screen (whole, or a fraction of it),
+	// which the scope's view swaps for smaller twins. Listed by name rather
+	// than found by size: an eye can be as wide as the shadow map.
+	for (ref_rt* rt : {&rt_Position, &rt_MSAADepth, &rt_tempzb, &rt_Color, &rt_Accumulator,
+		&rt_Accumulator_temp, &rt_Generic_0, &rt_Generic_1, &rt_Generic, &rt_fakescope, &rt_Heat,
+		&rt_Generic_temp, &rt_dof, &rt_secondVP, &rt_ui_pda, &rt_sunshafts_0, &rt_sunshafts_1, &rt_pp_bloom,
+		&rt_ssfx_taa, &rt_ssfx_prev_frame, &rt_ssfx_motion_vectors, &rt_ssfx, &rt_ssfx_temp, &rt_ssfx_temp2,
+		&rt_ssfx_temp3, &rt_ssfx_accum, &rt_ssfx_ssr, &rt_ssfx_water, &rt_ssfx_ao, &rt_ssfx_il, &rt_ssfx_sss,
+		&rt_ssfx_sss_ext, &rt_ssfx_sss_ext2, &rt_ssfx_sss_tmp, &rt_ssfx_bloom_emissive, &rt_ssfx_prevPos,
+		&rt_Generic_0_r, &rt_Generic_1_r, &rt_Generic_2, &rt_smaa_edgetex, &rt_smaa_blendtex, &rt_ssao_temp})
+		vr_register_screen_target(*rt, 1);
+	for (ref_rt* rt : {&rt_HDR10_HalfRes[0], &rt_HDR10_HalfRes[1], &rt_blur_h_2, &rt_blur_2, &rt_ssfx_bloom1,
+		&rt_ssfx_bloom_tmp2})
+		vr_register_screen_target(*rt, 2);
+	for (ref_rt* rt : {&rt_blur_h_4, &rt_blur_4, &rt_ssfx_bloom_lens, &rt_ssfx_bloom_tmp4, &rt_ssfx_bloom_tmp4_2})
+		vr_register_screen_target(*rt, 4);
+	for (ref_rt* rt : {&rt_blur_h_8, &rt_blur_8, &rt_ssfx_bloom_tmp8, &rt_ssfx_bloom_tmp8_2, &rt_ssfx_volumetric,
+		&rt_ssfx_volumetric_tmp, &rt_ssfx_rain})
+		vr_register_screen_target(*rt, 8);
+	for (ref_rt* rt : {&rt_ssfx_bloom_tmp16, &rt_ssfx_bloom_tmp16_2})
+		vr_register_screen_target(*rt, 16);
+	for (ref_rt* rt : {&rt_ssfx_bloom_tmp32, &rt_ssfx_bloom_tmp32_2})
+		vr_register_screen_target(*rt, 32);
+	vr_register_screen_target(rt_ssfx_bloom_tmp64, 64);
+	vr_register_screen_target(rt_half_depth, RImplementation.o.ssao_half_data ? 2 : 1);
+
 	//
 	dwWidth = Device.dwWidth;
 	dwHeight = Device.dwHeight;
 }
 
+void CRenderTarget::vr_register_screen_target(ref_rt& rt, u32 divisor)
+{
+	if (rt._get() && rt->pSurface) vr_screen_targets.push_back({&rt, divisor});
+}
+
+bool CRenderTarget::vr_make_twins(u32 size)
+{
+	if (vr_twin_size == size) return true;
+	// A size that failed is not retried (and logged) every scope frame.
+	if (vr_twin_failed == size) return false;
+	vr_release_twins();
+	for (auto& target : vr_screen_targets)
+	{
+		CRT* rt = target.rt->_get();
+		D3D11_TEXTURE2D_DESC desc;
+		rt->pSurface->GetDesc(&desc);
+		desc.Width = desc.Height = _max(1u, size / target.divisor);
+		bool ok = SUCCEEDED(HW.pDevice->CreateTexture2D(&desc, NULL, &target.surface));
+		// The twin's views copy the original's descriptions; only the
+		// resource under them differs.
+		if (ok && rt->pRT)
+		{
+			D3D11_RENDER_TARGET_VIEW_DESC view;
+			rt->pRT->GetDesc(&view);
+			ok = SUCCEEDED(HW.pDevice->CreateRenderTargetView(target.surface, &view, &target.rtv));
+		}
+		if (ok && rt->pZRT)
+		{
+			D3D11_DEPTH_STENCIL_VIEW_DESC view;
+			rt->pZRT->GetDesc(&view);
+			ok = SUCCEEDED(HW.pDevice->CreateDepthStencilView(target.surface, &view, &target.dsv));
+		}
+		if (ok && rt->pUAView)
+		{
+			D3D11_UNORDERED_ACCESS_VIEW_DESC view;
+			rt->pUAView->GetDesc(&view);
+			ok = SUCCEEDED(HW.pDevice->CreateUnorderedAccessView(target.surface, &view, &target.uav));
+		}
+		if (ok && rt->pTexture._get() && rt->pTexture->get_SRView())
+		{
+			D3D11_SHADER_RESOURCE_VIEW_DESC view;
+			rt->pTexture->get_SRView()->GetDesc(&view);
+			ok = SUCCEEDED(HW.pDevice->CreateShaderResourceView(target.surface, &view, &target.srv));
+		}
+		if (!ok)
+		{
+			Msg("! [VR] scope view: no %ux%u twin for %s; rendering it at eye size", desc.Width, desc.Height,
+				rt->cName.c_str());
+			vr_release_twins();
+			vr_twin_failed = size;
+			return false;
+		}
+		target.texture_surface = target.surface;
+		target.texture_surface->AddRef();
+		target.width = target.height = desc.Width;
+	}
+	vr_twin_size = size;
+	// A screen-sized target missing from the list above keeps its full size
+	// while the rest shrink: name any (a new or third-party effect), once.
+	static bool checked = false;
+	if (!checked)
+	{
+		checked = true;
+		for (const auto& entry : DEV->RenderTargets())
+		{
+			const CRT* rt = entry.second;
+			if (!rt || !rt->pSurface || rt->dwWidth != Device.dwWidth || rt->dwHeight != Device.dwHeight) continue;
+			const bool listed = std::any_of(vr_screen_targets.begin(), vr_screen_targets.end(),
+				[&](const VrScreenTarget& target) { return target.rt->_get() == rt; });
+			if (!listed)
+				Msg("! [VR] scope view: screen-sized target %s is not resized with the others; add it to the list in "
+					"the CRenderTarget constructor", entry.first);
+		}
+	}
+	return true;
+}
+
+void CRenderTarget::vr_release_twins()
+{
+	VERIFY(!vr_twins_in);
+	for (auto& target : vr_screen_targets)
+	{
+		_RELEASE(target.srv);
+		_RELEASE(target.uav);
+		_RELEASE(target.dsv);
+		_RELEASE(target.rtv);
+		_RELEASE(target.texture_surface);
+		_RELEASE(target.surface);
+		target.width = target.height = 0;
+	}
+	vr_twin_size = 0;
+}
+
+void CRenderTarget::vr_swap_twins()
+{
+	for (auto& target : vr_screen_targets)
+	{
+		CRT* rt = target.rt->_get();
+		std::swap(rt->pSurface, target.surface);
+		std::swap(rt->pRT, target.rtv);
+		std::swap(rt->pZRT, target.dsv);
+		std::swap(rt->pUAView, target.uav);
+		std::swap(rt->dwWidth, target.width);
+		std::swap(rt->dwHeight, target.height);
+		if (rt->pTexture._get()) rt->pTexture->surface_swap(target.texture_surface, target.srv);
+	}
+	vr_twins_in = !vr_twins_in;
+	// Nothing cached may keep a view of the other size bound.
+	RCache.ResetExternalState();
+}
+
+bool CRenderTarget::vr_scope_begin(u32 size)
+{
+	if (vr_twins_in || !size || !vr_make_twins(size)) return false;
+	vr_swap_twins();
+	// The device's own size is kept here meanwhile; this target's always
+	// equals it outside the scope's view.
+	vr_saved_size[0] = Device.dwWidth; vr_saved_size[1] = Device.dwHeight;
+	vr_saved_half[0] = Device.fWidth_2; vr_saved_half[1] = Device.fHeight_2;
+	Device.dwWidth = Device.dwHeight = dwWidth = dwHeight = size;
+	Device.fWidth_2 = Device.fHeight_2 = float(size / 2);
+	return true;
+}
+
+void CRenderTarget::vr_scope_end()
+{
+	if (!vr_twins_in) return;
+	vr_swap_twins();
+	Device.dwWidth = dwWidth = vr_saved_size[0]; Device.dwHeight = dwHeight = vr_saved_size[1];
+	Device.fWidth_2 = vr_saved_half[0]; Device.fHeight_2 = vr_saved_half[1];
+}
+
 CRenderTarget::~CRenderTarget()
 {
+	vr_scope_end();
+	vr_release_twins();
+	for (auto& map : vr_sun_maps) _RELEASE(map);
 	_RELEASE(t_ss_async);
 
 	// Textures

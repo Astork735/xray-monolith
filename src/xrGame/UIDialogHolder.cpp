@@ -35,13 +35,40 @@ bool operator ==(const recvItem& i1, const recvItem& i2)
 	return i1.m_item == i2.m_item;
 }
 
+static xr_vector<const CDialogHolder*> g_live_dialog_holders;
+
 CDialogHolder::CDialogHolder()
 {
 	m_b_in_update = false;
+	g_live_dialog_holders.push_back(this);
 }
 
 CDialogHolder::~CDialogHolder()
 {
+	g_live_dialog_holders.erase(std::remove(g_live_dialog_holders.begin(), g_live_dialog_holders.end(), this),
+	                            g_live_dialog_holders.end());
+}
+
+bool CDialogHolder::IsAlive(const CDialogHolder* holder)
+{
+	return std::find(g_live_dialog_holders.begin(), g_live_dialog_holders.end(), holder) !=
+		g_live_dialog_holders.end();
+}
+
+void CDialogHolder::ForgetDialog(CUIDialogWnd* pDialog)
+{
+	m_input_receivers.erase(std::remove_if(m_input_receivers.begin(), m_input_receivers.end(),
+	                                       [pDialog](const recvItem& item) { return item.m_item == pDialog; }),
+	                        m_input_receivers.end());
+	// Render lists may be iterated right now (OnFrame); mark the entry
+	// disabled instead of erasing it. OnFrame drops disabled entries.
+	for (xr_vector<dlgItem>* list : {&m_dialogsToRender, &m_dialogsToRender_new})
+		for (dlgItem& item : *list)
+			if (item.wnd == pDialog)
+			{
+				item.wnd = nullptr;
+				item.enabled = false;
+			}
 }
 
 #include "player_hud.h"

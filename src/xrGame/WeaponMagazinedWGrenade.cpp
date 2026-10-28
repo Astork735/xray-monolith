@@ -214,6 +214,9 @@ extern BOOL useSeparateUBGLKeybind;
 extern BOOL g_launcher_dynamic_range_zoom;
 void CWeaponMagazinedWGrenade::PerformSwitchGL()
 {
+	// Normalize any detached rifle magazine before swapping m_magazine with the
+	// launcher's separate cartridge vector. VR data never enters grenade state.
+	if (VrMode()) VrPrepareSave();
 	m_bGrenadeMode = !m_bGrenadeMode;
 
 	if (useSeparateUBGLKeybind) {
@@ -420,6 +423,9 @@ void CWeaponMagazinedWGrenade::LaunchGrenade()
 		}
 		if (IsGameTypeSingle())
 			p1.set(get_LastFP2());
+		// VR: along the tracked weapon, not the body camera's pick.
+		Fmatrix vr_world;
+		if (VrAimTransform(vr_world)) { p1.set(get_LastFP2()); d.set(get_LastFD()); }
 
 		Fmatrix launch_matrix;
 		launch_matrix.identity();

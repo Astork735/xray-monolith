@@ -229,6 +229,7 @@ void CWeaponMagazined::Load(LPCSTR section)
 
 void CWeaponMagazined::FireStart()
 {
+	if (!VrCanFire()) { OnEmptyClick(); return; }
 	if (!IsMisfire())
 	{
 		if (IsValid())
@@ -281,7 +282,7 @@ void CWeaponMagazined::FireEnd()
 
 	// Alundaio: Removed auto-reload since it's widely asked by just about everyone who is a gun whore
 	// Lander: Reinstated as a cvar
-	if (g_auto_reload)
+	if (g_auto_reload && !VrBlockReload())
 	{
 		CActor	*actor = smart_cast<CActor*>(H_Parent());
 		if (m_pInventory && !iAmmoElapsed && actor && GetState() != eReload)
@@ -291,6 +292,9 @@ void CWeaponMagazined::FireEnd()
 
 void CWeaponMagazined::Reload()
 {
+	// Direct engine/script reloads still use the native transaction. Flatten
+	// transient VR magazines first so native ammo counts remain authoritative.
+	if (VrBlockReload()) VrPrepareSave();
 	inherited::Reload();
 	TryReload();
 }
@@ -475,6 +479,7 @@ void CWeaponMagazined::UnloadMagazine(bool spawn_ammo)
 
 void CWeaponMagazined::ReloadMagazine()
 {
+	if (VrBlockReload()) VrPrepareSave();
 	m_needReload = false;
 	m_BriefInfo_CalcFrame = 0;
 
@@ -761,6 +766,8 @@ void CWeaponMagazined::state_Fire(float dt)
 
 		CEntity* E = smart_cast<CEntity*>(H_Parent());
 		E->g_fireParams(this, p1, d);
+		Fmatrix vr_world;
+		if (VrAimTransform(vr_world)) { p1.set(get_LastFP()); d.set(get_LastFD()); }
 
 		if (!E->g_stateFire())
 			StopShooting();
@@ -897,6 +904,7 @@ void CWeaponMagazined::OnShot()
 
 	// Camera
 	AddShotEffector();
+	VrOnShot();
 
 	// Animation
 	PlayAnimShoot();
@@ -907,7 +915,7 @@ void CWeaponMagazined::OnShot()
 	// Shell Drop
 	Fvector vel;
 	PHGetLinearVell(vel);
-	OnShellDrop(get_LastSP(), vel);
+	if (!DeferShellDrop()) OnShellDrop(get_LastSP(), vel);
 
 	// Огонь из ствола
 	StartFlameParticles();
@@ -1136,6 +1144,13 @@ void CWeaponMagazined::switch2_Hiding()
 {
 	OnZoomOut();
 	CWeapon::FireEnd();
+	if (VrMode())
+	{
+		// The world holster is the VR draw animation. Complete the native
+		// state transition immediately so grip interactions stay responsive.
+		SwitchState(eHidden);
+		return;
+	}
 
 	if (m_sounds_enabled)
 	{
@@ -1162,6 +1177,12 @@ void CWeaponMagazined::switch2_Hidden()
 void CWeaponMagazined::switch2_Showing()
 {
 	if (ParentIsActor()) g_player_hud->attach_item(this);
+	if (VrMode())
+	{
+		SetPending(FALSE);
+		SwitchState(eIdle);
+		return;
+	}
 
 	if (m_sounds_enabled)
 	{
@@ -1188,6 +1209,7 @@ bool CWeaponMagazined::Action(u16 cmd, u32 flags)
 		{
 		if (flags & CMD_START)
 			{
+				if (VrBlockReload()) return true;
 				if (ParentIsActor() && Actor()->is_safemode())
 					Actor()->set_safemode(false);
 

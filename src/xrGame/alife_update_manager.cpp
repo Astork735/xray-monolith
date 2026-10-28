@@ -17,6 +17,8 @@
 #include "ef_storage.h"
 #include "xrserver.h"
 #include "level.h"
+#include "Actor.h"
+#include "VrWeaponInteraction.h"
 #include "graph_engine.h"
 #include "../xrEngine/x_ray.h"
 #include "restriction_space.h"
@@ -173,6 +175,8 @@ bool CALifeUpdateManager::change_level(NET_Packet& net_packet)
 	// then change actor server entity 
 	// then call client net_Save 
 	// then restore actor server entity 
+	if (auto* actor=smart_cast<CActor*>(Level().CurrentControlEntity()))
+		PrepareVrWeaponSave(*actor);
 	Level().ClientSend();
 
 	m_changing_level = true;

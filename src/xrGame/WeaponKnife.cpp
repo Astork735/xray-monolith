@@ -161,6 +161,17 @@ void CWeaponKnife::KnifeStrike(const Fvector& pos, const Fvector& dir)
 	MakeShot(pos, dir);
 }
 
+void CWeaponKnife::VrStrike(const Fvector& pos, const Fvector& dir, float k_hit, float distance)
+{
+	// Only as far as the blade swept: fireDistance is otherwise whatever
+	// the last native attack left (or the config's start value).
+	fireDistance = distance;
+	m_eHitType = m_eHitType_1;
+	fCurrentHit = GetHit1Power();
+	fHitImpulse_cur = GetHit1Impulse();
+	MakeShot(pos, dir, k_hit);
+}
+
 void CWeaponKnife::MakeShot(Fvector const& pos, Fvector const& dir, float const k_hit)
 {
 	CCartridge cartridge;

@@ -723,7 +723,11 @@ void CActor::update_camera(CCameraShotEffector* effector)
 			pACam->pitch -= PI_MUL_2;
 	}
 
-	effector->ChangeHP(&(pACam->pitch), &(pACam->yaw));
+	// In VR the body camera's yaw is the player's heading: turning it on each
+	// shot jerked the whole world sideways (hardest with shotguns). The
+	// weapon kicks in the hands instead (CVrWeaponInteraction::OnShot).
+	if (!g_vr_owns_present)
+		effector->ChangeHP(&(pACam->pitch), &(pACam->yaw));
 
 	if (pACam->bClampYaw) clamp(pACam->yaw, pACam->lim_yaw[0], pACam->lim_yaw[1]);
 	if (pACam->bClampPitch) clamp(pACam->pitch, pACam->lim_pitch[0], pACam->lim_pitch[1]);

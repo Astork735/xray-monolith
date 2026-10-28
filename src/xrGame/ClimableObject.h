@@ -6,6 +6,11 @@ class CPHCharacter;
 struct dContact;
 struct SGameMtl;
 
+class CClimableObject;
+// Every ladder in the level (VR hands look for them directly: ladders are
+// not collideable spatial objects).
+xr_vector<CClimableObject*>& ClimableObjects();
+
 class CClimableObject :
 	public CPhysicsShellHolder,
 	public IClimableObject

@@ -175,6 +175,7 @@ extern bool IsGameTypeSingle();
 
 void CMainMenu::Activate(bool bActivate)
 {
+    m_vr_pressed_receiver = nullptr;
 	if (!!m_Flags.test(flActive) == bActivate) return;
 	if (m_Flags.test(flGameSaveScreenshot)) return;
 	if ((m_screenshotFrame == Device.dwFrame) ||
@@ -251,7 +252,7 @@ void CMainMenu::Activate(bool bActivate)
 			Console->Show();
 		}
 
-		if (m_startDialog->IsShown())
+		if (m_startDialog && m_startDialog->IsShown())
 			m_startDialog->HideDialog();
 
 		CleanInternals();
@@ -289,6 +290,7 @@ void CMainMenu::Activate(bool bActivate)
 
 bool CMainMenu::ReloadUI()
 {
+    m_vr_pressed_receiver = nullptr;
 	if (m_startDialog)
 	{
 		if (m_startDialog->IsShown())
@@ -323,6 +325,36 @@ bool CMainMenu::CanSkipSceneRendering()
 
 //IInputReceiver
 extern int mouse_button_2_key[];
+
+bool CMainMenu::VrPointer(float u, float v, int button)
+{
+    CUIDialogWnd* target = TopInputReceiver();
+    if (!IsActive() || !target || !target->IsEnabled() || !target->NeedCursor() || Console->bVisible)
+    {
+        m_vr_pressed_receiver = nullptr;
+        return false;
+    }
+    if (m_vr_pressed_receiver != target) m_vr_pressed_receiver = nullptr;
+    const bool valid = u >= 0 && u <= 1 && v >= 0 && v <= 1;
+    Fvector2 position;
+    position.set(valid ? u*UI_BASE_WIDTH : -1.f, valid ? v*UI_BASE_HEIGHT : -1.f);
+    if (valid) GetUICursor().SetVrCursorPosition(position);
+    target->OnMouseAction(position.x, position.y, WINDOW_MOUSE_MOVE);
+    if (TopInputReceiver() != target) { m_vr_pressed_receiver = nullptr; return false; }
+    if (button > 0 && valid)
+    {
+        m_vr_pressed_receiver = target;
+        IR_OnMousePress(0);
+    }
+    else if (button < 0 && m_vr_pressed_receiver == target)
+    {
+        m_vr_pressed_receiver = nullptr;
+        // Cancel off-panel clicks at off-panel coordinates, never the last hit.
+        if (valid) IR_OnMouseRelease(0);
+        else target->OnMouseAction(-1,-1,WINDOW_LBUTTON_UP);
+    }
+    return true;
+}
 
 void CMainMenu::IR_OnMousePress(int btn)
 {
@@ -601,6 +633,17 @@ void CMainMenu::SwitchToMultiplayerMenu()
 
 void CMainMenu::DestroyInternal(bool bForce)
 {
+	// A script can open the menu while a save is loading (GAMMA's game-over
+	// sequence runs "main_menu on" when it stops). The load restarts the
+	// scripts and takes the menu down: close it properly first, or the game
+	// stays paused with the level unhooked and the menu has no dialog.
+	if (bForce && IsActive() && g_vr_owns_present)
+	{
+		Msg("* main menu closed: a saved game is loading");
+		m_Flags.set(flGameSaveScreenshot, FALSE);
+		m_screenshotFrame = u32(-1);
+		Activate(false);
+	}
 	if (m_startDialog && ((m_deactivated_frame < Device.dwFrame + 4) || bForce))
 		xr_delete(m_startDialog);
 }

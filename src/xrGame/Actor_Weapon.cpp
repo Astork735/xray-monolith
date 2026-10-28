@@ -36,14 +36,16 @@ float CActor::GetWeaponAccuracy() const
 	
 	// momopate: optionally make pdm values affect ads, have a smoother transition in and out of the aiming bonus
 	float disp_aim;
-	bool is_zooming = (W && ((g_smooth_ads_transition && GetWeaponParam(W, GetInertionAimFactor(), 1.0f) < 1.0f) || (!g_smooth_ads_transition && IsZoomAimingMode() && !GetWeaponParam(W, IsRotatingToZoom(), false))));
+	// VR has no zoom key: a weapon raised to the eye on its sights aims.
+	const bool vr_aiming = g_vr_owns_present && W && W->VrAiming();
+	bool is_zooming = vr_aiming || (W && ((g_smooth_ads_transition && GetWeaponParam(W, GetInertionAimFactor(), 1.0f) < 1.0f) || (!g_smooth_ads_transition && IsZoomAimingMode() && !GetWeaponParam(W, IsRotatingToZoom(), false))));
 	if (is_zooming)
 	{
 		if (!g_apply_pdm_to_ads)
 			return m_fDispAim;
 		else
 		{
-			if (!g_smooth_ads_transition)
+			if (!g_smooth_ads_transition || vr_aiming)
 				disp_aim = m_fDispAim;
 			else
 				disp_aim = _lerp(m_fDispAim, 1.0f, GetWeaponParam(W, GetInertionAimFactor(), 1.0f));

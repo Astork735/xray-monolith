@@ -40,6 +40,7 @@ CBlender_Compile::~CBlender_Compile()
 void CBlender_Compile::_cpp_Compile(ShaderElement* _SH)
 {
 	SH = _SH;
+	if (VrSight && iElement < 2) SH->flags.bVrSight = TRUE;
 	RS.Invalidate();
 
 	//	TODO: Check if we need such wired system for

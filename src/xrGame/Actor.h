@@ -69,6 +69,8 @@ class CLocationManager;
 
 class CNightVisionEffector;
 class CFPCamEffector;
+class CPhysicsShell;
+class IRenderVisual;
 
 class CActor :
 	public CEntityAlive,
@@ -440,6 +442,152 @@ public:
 	// Motions (передвижения актрера)
 	//////////////////////////////////////////////////////////////////////////
 public:
+	Fvector m_vr_move{0,0,0};
+	bool m_vr_sprint_down = false;
+	bool m_vr_jump_down = false;
+	int m_vr_stance = 0; // 0 standing, 1 crouching, 2 low crouch
+	int m_vr_physical_stance = 0; // stance from ducking the real head
+	int m_vr_applied_stance = 0;  // stance whose wishful flags are applied
+	float m_vr_stand_height = -1.f; // camera height last seen standing
+	float m_vr_crouch_lift = 0.f;   // view raise cancelling a head-driven crouch box
+	bool m_vr_lift_tracking = false; // lift follows the camera exactly
+	u32 m_vr_lift_frame = u32(-1);
+	void VrApplyStance();
+	// Raise for the VR eye anchor: a crouch caused by the real head already
+	// lowers the tracked view, so the crouched box must not lower it again.
+	float VrCrouchLift(float dt);
+	// Roomscale (vr_roomscale): VrControls walks the body after a head that
+	// walked away from it (direction in world, remaining distance); the
+	// part of the body's move that followed the head is taken out of the
+	// tracking origin after the camera update, so the head stays put.
+	Fvector m_vr_room_dir{0,0,0};
+	float m_vr_room_remaining = 0.f;
+	bool m_vr_room_requested = false;
+	Fvector m_vr_room_anchor{0,0,0};
+	bool m_vr_room_anchor_valid = false;
+	bool VrRoomscaleRequest();
+	// The weapon's aim in the body's frame last frame: its turn rate is the
+	// angular velocity weapon spread uses in VR, not the body's snap turns.
+	Fvector m_vr_prev_aim{0,0,0};
+	bool m_vr_prev_aim_valid = false;
+	// After the camera update: roomscale follow, this frame's tracked body,
+	// and the weapon's angular velocity (VR only).
+	void VrAfterCameraUpdate();
+    // VR hand state; arrays are indexed by physical hand (0 left, 1 right).
+    struct VrPickupState
+    {
+        u16 grabbed_id[2]{u16(-1),u16(-1)};
+        Fmatrix grab_offset[2];
+        Fvector previous_grab_position[2]{};
+        bool pickup_armed[2]{};
+        bool use_trigger_down[2]{};
+        bool use_pressed=false;
+        int use_hand=-1;
+        bool weapon_grip_armed[2]{};
+        bool native_reload_down=false;
+        bool native_reload_armed=false;
+        bool grip_held[2]{};
+        u16 gripped_weapon_id=u16(-1);
+        // Hand motion for throwing, and a pending throw.
+        bool hand_valid[2]{};
+        Fmatrix hand_previous[2];
+        Fvector hand_velocity[2]{}, hand_angular[2]{};
+        // A weapon let go and a bolt thrown, each until its world physics is
+        // live: both can be on their way at once (one per hand).
+        struct VrThrown
+        {
+            u16 id=u16(-1);
+            Fvector velocity{}, angular{};
+            u32 expires=0;
+            // A thrown bolt is also put at the hand that let it go once it
+            // is in the world, and readied as the game readies a thrown bolt.
+            bool place=false, limited=false;
+            Fmatrix matrix;
+        } thrown[2];
+        // What a free hand's pointer ray rests on, for the use action.
+        u16 pick_id=u16(-1);
+        float pick_range=0.f;
+        int pick_element=0;
+        // A weapon picked up by hand, wielded in that hand once it arrives.
+        u16 wield_id=u16(-1);
+        int wield_hand=1;
+        u32 wield_expires=0;
+        // Physical hands (spheres at the palms).
+        CPhysicsShell* hand_body[2]{};
+        float hand_blocked[2]{};
+        CPhysicsShell* weapon_body=nullptr;
+        u16 weapon_body_id=u16(-1);
+        // Hand-over-hand ladder climbing, and the ladder held.
+        u16 climb_ladder=u16(-1);
+        int climb_hand=-1;
+        float climb_previous=0.f;
+        // Body slot each hand is within reach of, for the hover pulse.
+        int body_hover[2]{-1,-1};
+        // Quick slot (0-3) each hand holds an item from, taken from a chest
+        // pocket; since when it has been at the mouth; the trigger last frame.
+        int pocket_held[2]{-1,-1};
+        u32 pocket_mouth_since[2]{};
+        bool pocket_trigger_down[2]{};
+        // The hand holding a grenade or bolt (-1 until one is taken: the
+        // dominant hand), its grip last frame, and a throw released before
+        // the missile was ready, kept for a moment.
+        int missile_hand=-1;
+        bool missile_grip=false;
+        u32 missile_grip_since=0;
+        bool missile_pending=false;
+        u32 missile_pending_until=0;
+        Fmatrix missile_matrix;
+        Fvector missile_velocity{};
+        // Each hand's fastest velocity relative to the body over the last
+        // 100 ms: a throw is let go as the hand already slows.
+        Fvector throw_peak[2]{};
+        u32 throw_peak_time[2]{};
+        // The active bolt waits in its pouch on the belt, not in a hand:
+        // after a throw, or when let go gently. A hand at the pouch takes it.
+        bool missile_stowed=false;
+        // The pouch drawn at the bolt slot, and whether its model is missing.
+        IRenderVisual* bolt_pouch=nullptr;
+        bool bolt_pouch_missing=false;
+        // Each grip last frame, so a squeeze at the chest puts the open PDA away.
+        bool pda_grip[2]{};
+        // A knife or binoculars without a VR weapon profile, taken from the
+        // belt: kept only while that hand's grip is held.
+        u16 slot_hold_id=u16(-1);
+        int slot_hold_hand=-1;
+        // The hand holding the detector or flashlight taken from the belt
+        // (kept while its grip is held), and its trigger last frame.
+        int device_hand=-1;
+        bool device_trigger_down=false;
+        // The held knife's blade tip last frame, and when it may hit again.
+        Fvector knife_tip{};
+        bool knife_valid=false;
+        u32 knife_ready=0;
+        // Where the detector or flashlight and the knife are held this frame
+        // (VrUpdateHudItems).
+        Fmatrix device_pose, knife_pose, device_hold, knife_hold;
+        bool device_pose_valid=false, knife_pose_valid=false;
+        // The hand holding a bolt taken from the pouch (the active item is
+        // left as it is), and until when an emptied bolt slot is refilled.
+        int bolt_hand=-1;
+        u32 bolt_refill_until=0;
+    } m_vr_pickup;
+    // What the climbing hand pulled since the body last moved (metres, +
+    // lifts the body), applied directly to the body on the ladder.
+    float m_vr_climb_delta = 0.f;
+    // The stick may get on a ladder again (it was let go since stepping off).
+    bool m_vr_ladder_rearm = true;
+    // Hand-over-hand climbing moves the body directly (gravity off).
+    bool m_vr_hand_climbing = false;
+    void VrControls(float dt);
+    // VR ladder climbing, done directly on the body (see VrClimbLadder).
+    class CClimableObject* VrLadder();
+    void VrClimbLadder(class CClimableObject* ladder);
+    u16 m_vr_ladder_id = u16(-1);
+    float m_vr_stick_forward = 0.f;
+    // What the use action acts on: the camera ray, or in VR a hand's pointer.
+    collide::rq_result UseRQ();
+    // Horizontal direction to the ladder a hand holds, if any.
+    bool VrLadderDirection(Fvector& direction);
 	void g_cl_CheckControls(u32 mstate_wf, Fvector& vControlAccel, float& Jump, float dt);
 	void g_cl_ValidateMState(float dt, u32 mstate_wf);
 	void g_cl_Orientate(u32 mstate_rl, float dt);

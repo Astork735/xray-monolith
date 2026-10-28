@@ -1,5 +1,7 @@
 #include "stdafx.h"
 #include "Flashlight.h"
+#include "Actor.h"
+#include "VrBodySlots.h"
 #include "inventory.h"
 #include "player_hud.h"
 #include "weapon.h"
@@ -130,7 +132,20 @@ void CFlashlight::UpdateCL()
 	}
 
 	firedeps dep;
-	HudItemData()->setup_firedeps(dep);
+	Fmatrix vr_pose;
+	if (g_vr_owns_present && VrDevicePose(*actor, vr_pose))
+	{
+		// The light leaves the model in the hand, not the flat first-person
+		// one: its fire point is taken with the hand's pose in place.
+		attachable_hud_item* hud = HudItemData();
+		hud->update(false);
+		const Fmatrix flat = hud->m_item_transform;
+		hud->m_item_transform = vr_pose;
+		hud->setup_firedeps(dep);
+		hud->m_item_transform = flat;
+	}
+	else
+		HudItemData()->setup_firedeps(dep);
 
 	light_render->set_position(dep.vLastFP);
 	light_omni->set_position(dep.vLastFP);
@@ -237,6 +252,13 @@ void CFlashlight::TurnDeviceInternal(bool b)
 		light_omni->set_active(b);
 	}
 	glow_render->set_active(b);
+}
+
+void CFlashlight::VrToggleLight()
+{
+	const bool on = !m_bWorking && (!IsUsingCondition() || GetCondition() >= m_fLowestBatteryCharge);
+	TurnDeviceInternal(on);
+	m_sounds.PlaySound(on ? "sndShow" : "sndHide", Fvector().set(0, 0, 0), this, true, false);
 }
 
 bool CFlashlight::torch_active() const

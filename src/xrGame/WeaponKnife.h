@@ -25,6 +25,11 @@ protected:
 	void state_Attacking(float dt);
 
 	virtual void KnifeStrike(const Fvector& pos, const Fvector& dir);
+public:
+	// VR: a swing of the held knife hits along dir from pos with the primary
+	// attack, k_hit scaling its power.
+	void VrStrike(const Fvector& pos, const Fvector& dir, float k_hit, float distance);
+protected:
 
 	float fWallmarkSize;
 	u16 knife_material_idx;

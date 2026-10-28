@@ -70,6 +70,8 @@ void CMissile::reinit()
 	m_throw = false;
 	m_constpower = false;
 	m_fThrowForce = 0;
+	m_vr_primed = m_vr_thrown = m_vr_throw = false;
+	m_vr_stale_state = u32(-1);
 	m_dwDestroyTime = 0xffffffff;
 	SetPending(FALSE);
 	m_fake_missile = NULL;
@@ -217,7 +219,7 @@ void CMissile::OnH_B_Independent(bool just_before_destroy)
 		PPhysicsShell()->SetAirResistance(0.f, 0.f);
 		PPhysicsShell()->set_DynamicScales(1.f, 1.f);
 
-		if (GetState() == eThrow)
+		if (GetState() == eThrow && !m_vr_thrown)
 		{
 			Msg("Throw on reject");
 			Throw();
@@ -303,12 +305,18 @@ void CMissile::State(u32 state, u32 old_state)
 	{
 	case eShowing:
 		{
+			m_vr_primed = m_vr_thrown = false;
 			if (ParentIsActor()) g_player_hud->attach_item(this);
 			SetPending(TRUE);
-			PlayHUDMotion("anm_show", FALSE, this, GetState(), 1.f, 0.f, false);
-
 			if (m_sounds.FindSoundItem("sndShow", false))
 				m_sounds.PlaySound("sndShow", H_Root()->Position(), H_Root(), !!GetHUDmode());
+			if (VrQuick())
+			{
+				setVisible(TRUE);
+				SwitchState(eIdle);
+				break;
+			}
+			PlayHUDMotion("anm_show", FALSE, this, GetState(), 1.f, 0.f, false);
 		}
 		break;
 	case eIdle:
@@ -324,10 +332,15 @@ void CMissile::State(u32 state, u32 old_state)
 				if (old_state != eHiding)
 				{
 					SetPending(TRUE);
-					PlayHUDMotion("anm_hide", TRUE, this, GetState());
-
 					if (m_sounds.FindSoundItem("sndHide", false))
 						m_sounds.PlaySound("sndHide", H_Root()->Position(), H_Root(), !!GetHUDmode());
+					if (VrQuick())
+					{
+						setVisible(FALSE);
+						SwitchState(eHidden);
+					}
+					else
+						PlayHUDMotion("anm_hide", TRUE, this, GetState());
 				}
 			}
 		}
@@ -351,14 +364,21 @@ void CMissile::State(u32 state, u32 old_state)
 		{
 			SetPending(TRUE);
 			m_fThrowForce = m_fMinForce;
-			PlayHUDMotion("anm_throw_begin", TRUE, this, GetState());
-
 			if (m_sounds.FindSoundItem("sndCheckout", false))
 			{
 				Fvector C;
 				Center(C);
 				PlaySound("sndCheckout", C);
 			}
+			if (VrQuick())
+			{
+				// As at the end of the throw start animation.
+				if (!m_fake_missile && !smart_cast<CMissile*>(H_Parent()))
+					spawn_fake_missile();
+				SwitchState(m_throw ? eThrow : eReady);
+			}
+			else
+				PlayHUDMotion("anm_throw_begin", TRUE, this, GetState());
 		}
 		break;
 	case eReady:
@@ -370,14 +390,17 @@ void CMissile::State(u32 state, u32 old_state)
 		{
 			SetPending(TRUE);
 			m_throw = false;
-			PlayHUDMotion("anm_throw", TRUE, this, GetState());
-
 			if (m_sounds.FindSoundItem("sndThrow", false))
 			{
 				Fvector C;
 				Center(C);
 				PlaySound("sndThrow", C);
 			}
+			// Thrown by a VR hand: already gone, so the next one at once.
+			if (m_vr_thrown && VrQuick())
+				SwitchState(eThrowEnd);
+			else
+				PlayHUDMotion("anm_throw", TRUE, this, GetState());
 		}
 		break;
 	case eThrowEnd:
@@ -396,6 +419,14 @@ void CMissile::State(u32 state, u32 old_state)
 
 void CMissile::OnStateSwitch(u32 S, u32 oldState)
 {
+	// The switch that was on its way when VrUnprime put the missile back to
+	// idle at once (the throw start's own switch to ready) is dropped, or the
+	// missile would be readied again with nothing left to undo it.
+	if (S == m_vr_stale_state)
+	{
+		m_vr_stale_state = u32(-1);
+		return;
+	}
 	m_dwStateTime = 0;
 	inherited::OnStateSwitch(S, oldState);
 	State(S, oldState);
@@ -507,6 +538,12 @@ void CMissile::setup_throw_params()
 	VERIFY(entity);
 	CInventoryOwner* inventory_owner = smart_cast<CInventoryOwner*>(H_Parent());
 	VERIFY(inventory_owner);
+	if (m_vr_throw)
+	{
+		m_throw_matrix.set(m_vr_throw_matrix);
+		m_throw_direction.normalize_safe(m_vr_throw_velocity);
+		return;
+	}
 	Fmatrix trans;
 	trans.identity();
 	Fvector FirePos, FireDir;
@@ -539,7 +576,7 @@ void CMissile::setup_throw_params()
 void CMissile::OnMotionMark(u32 state, const motion_marks& M)
 {
 	inherited::OnMotionMark(state, M);
-	if (state == eThrow && !m_throw)
+	if (state == eThrow && !m_throw && !m_vr_thrown)
 	{
 		if (H_Parent())
 			Throw();
@@ -566,6 +603,8 @@ void CMissile::Throw()
 		m_fake_missile->m_fThrowForce = m_constpower ? m_fConstForce : m_fThrowForce;
 	else
 		m_fake_missile->m_fThrowForce = inventory_owner->missile_throw_force();
+	if (m_vr_throw)
+		m_fake_missile->m_fThrowForce = m_vr_throw_velocity.magnitude();
 
 	m_fThrowForce = m_fMinForce;
 
@@ -804,7 +843,55 @@ u32 CMissile::ef_weapon_type() const
 bool CMissile::render_item_ui_query()
 {
 	bool b_is_active_item = m_pInventory->ActiveItem() == this;
-	return b_is_active_item && (GetState() == eReady) && !m_throw && smart_cast<CActor*>(H_Parent());
+	return b_is_active_item && (GetState() == eReady) && !m_throw && !m_vr_primed && smart_cast<CActor*>(H_Parent());
+}
+
+bool CMissile::VrQuick() const
+{
+	return g_vr_owns_present && const_cast<CMissile*>(this)->ParentIsActor();
+}
+
+void CMissile::VrPrime()
+{
+	// State switches arrive as events; the flag keeps a request from
+	// repeating while its event is on the way.
+	if (GetState() != eIdle || (m_vr_primed && Device.dwTimeGlobal - m_vr_prime_time < 500)) return;
+	m_vr_primed = true;
+	m_vr_prime_time = Device.dwTimeGlobal;
+	m_throw = false;
+	m_constpower = true;
+	SwitchState(eThrowStart);
+}
+
+bool CMissile::VrThrow(const Fmatrix& hand, const Fvector& velocity)
+{
+	// Ready means the throw start has finished and the missile that flies
+	// (the fake) exists.
+	if (m_vr_thrown || GetState() != eReady || !m_fake_missile || !H_Parent()) return false;
+	m_vr_throw_matrix.set(hand);
+	m_vr_throw_velocity.set(velocity);
+	m_vr_throw = true;
+	Throw();
+	m_vr_throw = false;
+	m_vr_thrown = true;
+	SwitchState(eThrow);
+	return true;
+}
+
+void CMissile::VrUnprime()
+{
+	if (!m_vr_primed || m_vr_thrown) return;
+	// Still idle: the throw start is on its way; asked again next frame.
+	const u32 state = GetState();
+	if (state != eThrowStart && state != eReady) return;
+	m_vr_primed = false;
+	// A switch still on its way arrives after this one and is dropped.
+	m_vr_stale_state = GetNextState() != state ? GetNextState() : u32(-1);
+	// At once rather than as an event: a grenade being put away checks it.
+	StopCurrentAnimWithoutCallback();
+	SetState(eIdle);
+	SetNextState(eIdle);
+	OnStateSwitch(eIdle, state);
 }
 
 void CMissile::render_item_ui()

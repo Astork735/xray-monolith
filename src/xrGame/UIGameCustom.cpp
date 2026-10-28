@@ -19,6 +19,7 @@
 #include "xrEngine/x_ray.h"
 
 #include "ui\UICellItem.h" //Alundaio
+#include "../xrEngine/Vr/vr_gameplay.h"
 //#include "script_game_object.h" //Alundaio
 
 EGameIDs ParseStringToGameType(const char* str);
@@ -102,7 +103,9 @@ void CUIGameCustom::Render()
 					item->render_item_ui();
 			}
 		}
-		if (GameIndicatorsShown() && psHUD_Flags.is(HUD_DRAW | HUD_DRAW_RT))
+		// VR can show status on the wrist instead (vr_hide_hud).
+		if (GameIndicatorsShown() && psHUD_Flags.is(HUD_DRAW | HUD_DRAW_RT) &&
+			!(g_vr_owns_present && vr::HideHud()))
 			UIMainIngameWnd->Draw();
 	}
 	m_pMessagesWnd->Draw();
@@ -166,7 +169,7 @@ bool CUIGameCustom::ShowActorMenu()
 	}
 	else
 	{
-		if (!psActorFlags.test(AF_3D_PDA)) HidePdaMenu();
+		if (!Pda3D()) HidePdaMenu();
 		
 		//---- before inventory mode ---------------------------
 		::luabind::functor<bool> funct1;

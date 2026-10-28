@@ -32,6 +32,12 @@
 
 #include "xrSash.h"
 #include "MonitorList.h"
+#include "Vr/vr_gameplay.h"
+
+#ifdef VR_ENABLED
+#include "Vr/vr_stereo.h"
+#include "Vr/vr_config.h"
+#endif
 
 extern "C" void XR_EARLY_INIT();
 
@@ -147,7 +153,12 @@ struct _SoundProcessor : public pureFrame
 	{
 		//Msg ("------------- sound: %d [%3.2f,%3.2f,%3.2f]",u32(Device.dwFrame),VPUSH(Device.vCameraPosition));
 		Device.Statistic->Sound.Begin();
-		::Sound->update(Device.vCameraPosition, Device.vCameraDirection, Device.vCameraTop);
+		// VR: the listener is the tracked head, so sounds turn with it.
+		Fmatrix head;
+		if (g_vr_owns_present && vr::HeadTransform(head))
+			::Sound->update(head.c, head.k, head.j);
+		else
+			::Sound->update(Device.vCameraPosition, Device.vCameraDirection, Device.vCameraTop);
 		Device.Statistic->Sound.End();
 	}
 } SoundProcessor;
@@ -662,6 +673,10 @@ void Startup()
 
 	Device.Run();
 
+#ifdef VR_ENABLED
+	vr::StopVr();
+#endif
+
 	// Discord
 	clearDiscordPresence();
 
@@ -1095,6 +1110,12 @@ int APIENTRY WinMain_impl(HINSTANCE hInstance,
 
 	InitSettings();
 	Msg(XRAY_MONOLITH_VERSION);
+
+#ifdef VR_ENABLED
+	// Resolve -vr / -novr (command line wins over the saved vr_enabled preference).
+	// Must run after Core._initialize: logging (Msg) needs the string/FS systems.
+	vr_resolve_launch_mode(lpCmdLine);
+#endif
 
 	{
 		FS_FileSet fset;

@@ -12,6 +12,7 @@ class CWeaponMagazinedWGrenade : public CWeaponMagazined,
 	typedef CWeaponMagazined inherited;
 public:
 	CWeaponMagazinedWGrenade(ESoundTypes eSoundType = SOUND_TYPE_WEAPON_SUBMACHINEGUN);
+    bool VrPhysicalMechanismAvailable() const override { return !m_bGrenadeMode; }
 	virtual ~CWeaponMagazinedWGrenade();
 
 	virtual void Load(LPCSTR section);

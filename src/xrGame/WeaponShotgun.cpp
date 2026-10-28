@@ -239,6 +239,15 @@ bool CWeaponShotgun::HaveCartridgeInInventory(u8 cnt)
 	return ac >= cnt;
 }
 
+// One shell pressed in by hand. AddCartridge returns the count it could not
+// add, so success is judged by the magazine growing.
+bool CWeaponShotgun::VrLoadShell()
+{
+	const size_t before = m_magazine.size();
+	AddCartridge(1);
+	return m_magazine.size() > before;
+}
+
 u8 CWeaponShotgun::AddCartridge(u8 cnt)
 {
 	if (IsMisfire()) bMisfire = false;

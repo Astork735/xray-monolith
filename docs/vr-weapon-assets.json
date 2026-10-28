@@ -1,0 +1,1060 @@
+{
+  "game": "F:\\Games\\stalker2",
+  "weapons": {
+    "pm": {
+      "model_candidates": [
+        {
+          "source": "F:\\Games\\stalker2\\db\\meshes\\meshes_weapons.db0",
+          "sha256": "689756bd318854c12f5dabf4eec2b674072cd78a71492162d2d095314306bf7a",
+          "bones": [
+            {
+              "index": 0,
+              "name": "wpn_body",
+              "parent": "",
+              "bind_rotation": [
+                -0.0,
+                0.0,
+                0.0
+              ],
+              "bind_position": [
+                0.0,
+                0.0,
+                0.0
+              ],
+              "vertex_count": 1532,
+              "mesh_min": [
+                -0.013858772814273834,
+                -0.07186359167098999,
+                -0.03700646758079529
+              ],
+              "mesh_max": [
+                0.011624381877481937,
+                0.03944706916809082,
+                0.10698739439249039
+              ]
+            },
+            {
+              "index": 1,
+              "name": "bullets",
+              "parent": "wpn_body",
+              "bind_rotation": [
+                -7.450580596923828e-09,
+                -5.8207657444020455e-11,
+                -1.5972180733569985e-07
+              ],
+              "bind_position": [
+                8.296156738651916e-05,
+                -0.006469879299402237,
+                0.001795745687559247
+              ],
+              "vertex_count": 1856,
+              "mesh_min": [
+                -0.004521452821791172,
+                -0.04390128701925278,
+                -0.01334621012210846
+              ],
+              "mesh_max": [
+                0.004643022548407316,
+                0.029591407626867294,
+                0.018302861601114273
+              ]
+            },
+            {
+              "index": 2,
+              "name": "gilza",
+              "parent": "wpn_body",
+              "bind_rotation": [
+                -0.0,
+                0.0,
+                0.0
+              ],
+              "bind_position": [
+                0.0084228515625,
+                0.03842971473932266,
+                0.03470366448163986
+              ],
+              "vertex_count": 0
+            },
+            {
+              "index": 3,
+              "name": "hammer",
+              "parent": "wpn_body",
+              "bind_rotation": [
+                -0.0,
+                0.0,
+                0.0
+              ],
+              "bind_position": [
+                7.589517209138918e-11,
+                0.017070695757865906,
+                -0.023803118616342545
+              ],
+              "vertex_count": 332,
+              "mesh_min": [
+                -0.0031769275665283203,
+                0.011569822207093239,
+                -0.036065347492694855
+              ],
+              "mesh_max": [
+                0.0032961531542241573,
+                0.03594256564974785,
+                -0.022472962737083435
+              ]
+            },
+            {
+              "index": 4,
+              "name": "magazin",
+              "parent": "wpn_body",
+              "bind_rotation": [
+                -0.0,
+                0.0,
+                -1.4994294872394676e-07
+              ],
+              "bind_position": [
+                2.7791347001482336e-10,
+                -0.02371467463672161,
+                -0.00047828792594373226
+              ],
+              "vertex_count": 322,
+              "mesh_min": [
+                -0.007449948228895664,
+                -0.07137211412191391,
+                -0.01955164223909378
+              ],
+              "mesh_max": [
+                0.007560873404145241,
+                0.02790982648730278,
+                0.020893853157758713
+              ]
+            },
+            {
+              "index": 5,
+              "name": "muzzle",
+              "parent": "wpn_body",
+              "bind_rotation": [
+                -0.0,
+                0.0,
+                0.0
+              ],
+              "bind_position": [
+                4.3118739689873564e-09,
+                0.03144516795873642,
+                0.1169426217675209
+              ],
+              "vertex_count": 0
+            },
+            {
+              "index": 6,
+              "name": "siodelko",
+              "parent": "wpn_body",
+              "bind_rotation": [
+                -0.0,
+                0.0,
+                0.0
+              ],
+              "bind_position": [
+                1.309080510658589e-09,
+                0.014439130201935768,
+                0.005268828012049198
+              ],
+              "vertex_count": 164,
+              "mesh_min": [
+                -0.006824882701039314,
+                0.002431020140647888,
+                -0.008407510817050934
+              ],
+              "mesh_max": [
+                0.005819191690534353,
+                0.02752547338604927,
+                0.020151183009147644
+              ]
+            },
+            {
+              "index": 7,
+              "name": "slide",
+              "parent": "wpn_body",
+              "bind_rotation": [
+                -0.0,
+                0.0,
+                0.0
+              ],
+              "bind_position": [
+                3.814697180359872e-08,
+                0.03555305302143097,
+                0.06595808267593384
+              ],
+              "vertex_count": 1826,
+              "mesh_min": [
+                -0.013880646787583828,
+                0.015939323231577873,
+                -0.037445805966854095
+              ],
+              "mesh_max": [
+                0.011114782653748989,
+                0.0438961535692215,
+                0.10637525469064713
+              ]
+            },
+            {
+              "index": 8,
+              "name": "sprezyna",
+              "parent": "wpn_body",
+              "bind_rotation": [
+                -0.0,
+                0.0,
+                0.0
+              ],
+              "bind_position": [
+                1.0764534819074356e-09,
+                -0.018112383782863617,
+                -5.305872764438391e-05
+              ],
+              "vertex_count": 1698,
+              "mesh_min": [
+                -0.0054366993717849255,
+                -0.06881381571292877,
+                -0.015155814588069916
+              ],
+              "mesh_max": [
+                0.005664368160068989,
+                0.02504398301243782,
+                0.01646321266889572
+              ]
+            },
+            {
+              "index": 9,
+              "name": "trigger",
+              "parent": "wpn_body",
+              "bind_rotation": [
+                -0.0,
+                0.0,
+                0.0
+              ],
+              "bind_position": [
+                4.604605932656547e-11,
+                0.009698063135147095,
+                0.042622096836566925
+              ],
+              "vertex_count": 106,
+              "mesh_min": [
+                -0.0034939551260322332,
+                -0.01292499527335167,
+                0.03149983659386635
+              ],
+              "mesh_max": [
+                0.0012547795195132494,
+                0.011027263477444649,
+                0.05089814215898514
+              ]
+            },
+            {
+              "index": 10,
+              "name": "wpn_silencer",
+              "parent": "wpn_body",
+              "bind_rotation": [
+                -0.0,
+                0.0,
+                0.0
+              ],
+              "bind_position": [
+                1.2653518233207706e-09,
+                0.03135541453957558,
+                0.16443024575710297
+              ],
+              "vertex_count": 342,
+              "mesh_min": [
+                -0.010289391502737999,
+                0.021072011440992355,
+                0.10650638490915298
+              ],
+              "mesh_max": [
+                0.010300040245056152,
+                0.04166143387556076,
+                0.22631219029426575
+              ]
+            }
+          ]
+        }
+      ],
+      "config_candidates": [
+        {
+          "source": "F:\\Games\\stalker2\\db\\configs\\configs.db0",
+          "sha256": "a560d6e9a9b7c0b47a77669f883287ef4c35cd96c53e14b7bc7d16a997215818",
+          "weapon_settings": [
+            "fire_point                  = 0.0, 0.133, 0.161",
+            "shell_point\t\t \t\t\t= 0.0, 0.133, 0.047",
+            "ammo_class                  = ammo_9x18_fmj, ammo_9x18_fmj_bad, ammo_9x18_fmj_verybad, ammo_9x18_pmm, ammo_9x18_pmm_bad, ammo_9x18_pmm_verybad, ammo_9x18_ap, ammo_9x18_ap_bad, ammo_9x18_ap_verybad",
+            "ammo_mag_size               = 8",
+            "item_visual                 = anomaly_weapons\\wpn_pm\\wpn_pm_hud.ogf",
+            "shell_bone                  = gilza",
+            "shell_point                 = 0, 0, 0",
+            "fire_bone                   = muzzle",
+            "fire_point                  = 0, 0, 0",
+            "item_visual                 = anomaly_weapons\\wpn_pm\\wpn_pm_actor_hud.ogf",
+            "item_visual                 = anomaly_weapons\\wpn_pm\\wpn_pm_sk1_hud.ogf",
+            "ammo_mag_size               = 12",
+            "item_visual                 = anomaly_weapons\\wpn_pm\\wpn_pmm_hud.ogf"
+          ]
+        }
+      ],
+      "effective_model": "F:\\Games\\stalker2\\db\\meshes\\meshes_weapons.db0",
+      "effective_config": "F:\\Games\\stalker2\\db\\configs\\configs.db0"
+    },
+    "ak74": {
+      "model_candidates": [
+        {
+          "source": "F:\\Games\\stalker2\\db\\meshes\\meshes_weapons.db0",
+          "sha256": "777b01bf18ace62357f2e55c8e822eb8d13163e9987009a31cbca08d77857233",
+          "bones": [
+            {
+              "index": 0,
+              "name": "wpn_body",
+              "parent": "",
+              "bind_rotation": [
+                -0.0,
+                -0.0,
+                0.0
+              ],
+              "bind_position": [
+                0.0,
+                0.0,
+                -0.0
+              ],
+              "vertex_count": 0
+            },
+            {
+              "index": 1,
+              "name": "body",
+              "parent": "wpn_body",
+              "bind_rotation": [
+                -0.0,
+                -0.0,
+                0.0
+              ],
+              "bind_position": [
+                0.0,
+                0.0,
+                -0.0
+              ],
+              "vertex_count": 6992,
+              "mesh_min": [
+                -0.02135203778743744,
+                -0.08079331368207932,
+                -0.24038124084472656
+              ],
+              "mesh_max": [
+                0.02468406967818737,
+                0.0811215490102768,
+                0.5464668273925781
+              ]
+            },
+            {
+              "index": 2,
+              "name": "a1",
+              "parent": "body",
+              "bind_rotation": [
+                -0.0,
+                -0.0,
+                0.0
+              ],
+              "bind_position": [
+                -0.013666591607034206,
+                -0.017611686140298843,
+                -0.2049165815114975
+              ],
+              "vertex_count": 0
+            },
+            {
+              "index": 3,
+              "name": "gilza",
+              "parent": "body",
+              "bind_rotation": [
+                -0.0,
+                -0.0,
+                0.0
+              ],
+              "bind_position": [
+                0.0,
+                0.049298834055662155,
+                0.056389328092336655
+              ],
+              "vertex_count": 0
+            },
+            {
+              "index": 4,
+              "name": "lock",
+              "parent": "body",
+              "bind_rotation": [
+                -0.0,
+                -0.0,
+                0.0
+              ],
+              "bind_position": [
+                0.0004157713847234845,
+                -0.006524077616631985,
+                0.07309950143098831
+              ],
+              "vertex_count": 84,
+              "mesh_min": [
+                -0.004897666163742542,
+                -0.024762528017163277,
+                0.06024421751499176
+              ],
+              "mesh_max": [
+                0.007947767153382301,
+                0.005013370420783758,
+                0.07781098783016205
+              ]
+            },
+            {
+              "index": 5,
+              "name": "magazin",
+              "parent": "body",
+              "bind_rotation": [
+                -0.0,
+                -0.0,
+                0.0
+              ],
+              "bind_position": [
+                6.670717993983999e-05,
+                -0.044044122099876404,
+                0.11661392450332642
+              ],
+              "vertex_count": 641,
+              "mesh_min": [
+                -0.01067882776260376,
+                -0.13788636028766632,
+                0.07273899763822556
+              ],
+              "mesh_max": [
+                0.013728955760598183,
+                0.03222214803099632,
+                0.18441571295261383
+              ]
+            },
+            {
+              "index": 6,
+              "name": "patron1",
+              "parent": "magazin",
+              "bind_rotation": [
+                -0.0,
+                -0.0,
+                0.0
+              ],
+              "bind_position": [
+                -0.0019512108992785215,
+                0.07103066146373749,
+                -0.019920306280255318
+              ],
+              "vertex_count": 306,
+              "mesh_min": [
+                -0.00581844337284565,
+                0.01904771663248539,
+                0.08403515070676804
+              ],
+              "mesh_max": [
+                0.009615001268684864,
+                0.03149343654513359,
+                0.12689991295337677
+              ]
+            },
+            {
+              "index": 7,
+              "name": "patron2",
+              "parent": "magazin",
+              "bind_rotation": [
+                -0.0,
+                -0.0,
+                0.0
+              ],
+              "bind_position": [
+                0.0040418184362351894,
+                0.06751212477684021,
+                -0.019867537543177605
+              ],
+              "vertex_count": 0
+            },
+            {
+              "index": 8,
+              "name": "patron3",
+              "parent": "magazin",
+              "bind_rotation": [
+                -0.0,
+                -0.0,
+                0.0
+              ],
+              "bind_position": [
+                -0.0018654554150998592,
+                0.06443125009536743,
+                -0.019867537543177605
+              ],
+              "vertex_count": 0
+            },
+            {
+              "index": 9,
+              "name": "priklad",
+              "parent": "body",
+              "bind_rotation": [
+                -0.0,
+                -0.0,
+                0.0
+              ],
+              "bind_position": [
+                0.0,
+                0.024075699970126152,
+                -0.037518370896577835
+              ],
+              "vertex_count": 0
+            },
+            {
+              "index": 10,
+              "name": "reserved",
+              "parent": "body",
+              "bind_rotation": [
+                -0.0,
+                -0.0,
+                0.0
+              ],
+              "bind_position": [
+                0.0,
+                0.029508374631404877,
+                -0.014235464856028557
+              ],
+              "vertex_count": 0
+            },
+            {
+              "index": 11,
+              "name": "safe",
+              "parent": "body",
+              "bind_rotation": [
+                -0.0,
+                -0.0,
+                0.0
+              ],
+              "bind_position": [
+                0.0,
+                0.02542828768491745,
+                0.016117502003908157
+              ],
+              "vertex_count": 0
+            },
+            {
+              "index": 12,
+              "name": "trigger",
+              "parent": "body",
+              "bind_rotation": [
+                -0.0,
+                -0.0,
+                0.0
+              ],
+              "bind_position": [
+                0.00016872731794137508,
+                0.012145565822720528,
+                0.037817880511283875
+              ],
+              "vertex_count": 100,
+              "mesh_min": [
+                -0.0031422143802046776,
+                -0.01474502868950367,
+                0.016956249251961708
+              ],
+              "mesh_max": [
+                0.006192309781908989,
+                0.011843373998999596,
+                0.03931889683008194
+              ]
+            },
+            {
+              "index": 13,
+              "name": "wpn_launcher",
+              "parent": "body",
+              "bind_rotation": [
+                -0.0,
+                -0.0,
+                0.0
+              ],
+              "bind_position": [
+                -0.00012193690781714395,
+                0.012887293472886086,
+                0.23382766544818878
+              ],
+              "vertex_count": 3902,
+              "mesh_min": [
+                -0.018604084849357605,
+                -0.04805365949869156,
+                0.1677180826663971
+              ],
+              "mesh_max": [
+                0.02208089828491211,
+                0.04132455587387085,
+                0.41926515102386475
+              ]
+            },
+            {
+              "index": 14,
+              "name": "cel_gl",
+              "parent": "wpn_launcher",
+              "bind_rotation": [
+                -0.0,
+                -0.0,
+                0.0
+              ],
+              "bind_position": [
+                -0.0217263363301754,
+                0.024754684418439865,
+                0.12524478137493134
+              ],
+              "vertex_count": 797,
+              "mesh_min": [
+                -0.03285643458366394,
+                0.01787550188601017,
+                0.3249979615211487
+              ],
+              "mesh_max": [
+                -0.01044278871268034,
+                0.048800621181726456,
+                0.4177233874797821
+              ]
+            },
+            {
+              "index": 15,
+              "name": "grenade",
+              "parent": "wpn_launcher",
+              "bind_rotation": [
+                -0.0,
+                -0.0,
+                0.0
+              ],
+              "bind_position": [
+                -0.00018764603009913117,
+                -0.017334721982479095,
+                0.11431244760751724
+              ],
+              "vertex_count": 998,
+              "mesh_min": [
+                -0.013010222464799881,
+                -0.019177507609128952,
+                0.328183650970459
+              ],
+              "mesh_max": [
+                0.016481980681419373,
+                0.010314678773283958,
+                0.4052565395832062
+              ]
+            },
+            {
+              "index": 16,
+              "name": "safe_gl",
+              "parent": "wpn_launcher",
+              "bind_rotation": [
+                -0.0,
+                -0.0,
+                0.0
+              ],
+              "bind_position": [
+                0.0,
+                -0.007485566660761833,
+                0.05170464515686035
+              ],
+              "vertex_count": 0
+            },
+            {
+              "index": 17,
+              "name": "trigger_gl",
+              "parent": "wpn_launcher",
+              "bind_rotation": [
+                -0.0,
+                -0.0,
+                0.0
+              ],
+              "bind_position": [
+                0.0002449599269311875,
+                -0.014312271028757095,
+                0.011709438636898994
+              ],
+              "vertex_count": 260,
+              "mesh_min": [
+                -0.0019919928163290024,
+                -0.016161620616912842,
+                0.2479933500289917
+              ],
+              "mesh_max": [
+                0.005468815565109253,
+                0.014276009052991867,
+                0.29710322618484497
+              ]
+            },
+            {
+              "index": 18,
+              "name": "wpn_scope",
+              "parent": "body",
+              "bind_rotation": [
+                -0.0,
+                -0.0,
+                0.0
+              ],
+              "bind_position": [
+                0.0008520612609572709,
+                0.08449603617191315,
+                0.05945059284567833
+              ],
+              "vertex_count": 5188,
+              "mesh_min": [
+                -0.034582871943712234,
+                0.011814853176474571,
+                -0.11611205339431763
+              ],
+              "mesh_max": [
+                0.018580898642539978,
+                0.11356133967638016,
+                0.13220135867595673
+              ]
+            },
+            {
+              "index": 19,
+              "name": "wpn_silencer",
+              "parent": "body",
+              "bind_rotation": [
+                -0.0,
+                -0.0,
+                0.0
+              ],
+              "bind_position": [
+                -0.00016376648272853345,
+                0.033950649201869965,
+                0.560613214969635
+              ],
+              "vertex_count": 1338,
+              "mesh_min": [
+                -0.017504002898931503,
+                0.01687219738960266,
+                0.47519952058792114
+              ],
+              "mesh_max": [
+                0.020185543224215508,
+                0.05456202104687691,
+                0.6634348630905151
+              ]
+            },
+            {
+              "index": 20,
+              "name": "zatvor",
+              "parent": "body",
+              "bind_rotation": [
+                -0.0,
+                -0.0,
+                0.0
+              ],
+              "bind_position": [
+                0.028570057824254036,
+                0.047909609973430634,
+                0.15326568484306335
+              ],
+              "vertex_count": 148,
+              "mesh_min": [
+                0.004649433307349682,
+                0.04217268526554108,
+                0.08628275245428085
+              ],
+              "mesh_max": [
+                0.03820912912487984,
+                0.06161169707775116,
+                0.15247440338134766
+              ]
+            }
+          ]
+        }
+      ],
+      "config_candidates": [
+        {
+          "source": "F:\\Games\\stalker2\\db\\configs\\configs.db0",
+          "sha256": "618ee72156e67a4b6e30f66c6e5488cf749559df0254fecc6e1886e8098d716c",
+          "weapon_settings": [
+            "fire_point                               = 0, 0.218, 0.656",
+            "fire_point2                              = 0, 0.161, 0.583",
+            "shell_point               \t             = 0.07,0.2,0.466",
+            "shell_bone                \t             = wpn_body",
+            "ammo_class                               = ammo_5.45x39_fmj, ammo_5.45x39_fmj_bad, ammo_5.45x39_fmj_verybad, ammo_5.45x39_ep, ammo_5.45x39_ep_bad, ammo_5.45x39_ep_verybad, ammo_5.45x39_ap, ammo_5.45x39_ap_bad, ammo_5.45x39_ap_verybad",
+            "ammo_mag_size                            = 30",
+            "item_visual                              = anomaly_weapons\\wpn_ak74\\wpn_ak74_hud.ogf",
+            "shell_bone                               = wpn_body",
+            "shell_point                              = 0.017, 0.054, 0.17",
+            "fire_bone                                = wpn_body",
+            "fire_bone2                               = wpn_body",
+            "fire_point                               = 0, 0.042, 0.684",
+            "fire_point2                              = 0.078965, -0.211564, 0.553397",
+            "item_visual                              = anomaly_weapons\\wpn_ak74\\wpn_ak74_1p29_hud.ogf",
+            "item_visual                              = anomaly_weapons\\wpn_ak74\\wpn_ak74_kobra_hud.ogf",
+            "item_visual                              = anomaly_weapons\\wpn_ak74\\wpn_ak74_hud.ogf",
+            "item_visual                              = anomaly_weapons\\wpn_ak74\\wpn_ak74_sk3_hud.ogf",
+            "item_visual                              = anomaly_weapons\\wpn_ak74\\wpn_ak74_1p29_sk3_hud.ogf",
+            "item_visual                              = anomaly_weapons\\wpn_ak74\\wpn_ak74_kobra_sk3_hud.ogf",
+            "item_visual                              = anomaly_weapons\\wpn_ak74\\wpn_ak74_sk3_hud.ogf",
+            "item_visual                              = anomaly_weapons\\wpn_ak74\\wpn_ak74_sk1_hud.ogf",
+            "item_visual                              = anomaly_weapons\\wpn_ak74\\wpn_ak74_1p29_sk1_hud.ogf",
+            "item_visual                              = anomaly_weapons\\wpn_ak74\\wpn_ak74_kobra_sk1_hud.ogf",
+            "item_visual                              = anomaly_weapons\\wpn_ak74\\wpn_ak74_sk1_hud.ogf",
+            "item_visual                              = anomaly_weapons\\wpn_ak74\\wpn_ak74_sk2_hud.ogf",
+            "item_visual                              = anomaly_weapons\\wpn_ak74\\wpn_ak74_1p29_sk2_hud.ogf",
+            "item_visual                              = anomaly_weapons\\wpn_ak74\\wpn_ak74_kobra_sk2_hud.ogf",
+            "item_visual                              = anomaly_weapons\\wpn_ak74\\wpn_ak74_sk2_hud.ogf",
+            "item_visual                              = anomaly_weapons\\wpn_ak74\\wpn_ak74_sk6_hud.ogf",
+            "ammo_mag_size                            = 45",
+            "item_visual                              = anomaly_weapons\\wpn_ak74\\wpn_ak74_eot_rpkmag_hud.ogf"
+          ]
+        }
+      ],
+      "effective_model": "F:\\Games\\stalker2\\db\\meshes\\meshes_weapons.db0",
+      "effective_config": "F:\\Games\\stalker2\\db\\configs\\configs.db0"
+    },
+    "usp45": {
+      "model_candidates": [
+        {
+          "source": "F:\\Games\\stalker2\\db\\meshes\\meshes_weapons.db0",
+          "sha256": "e1f90ccc8b99792626173106fdbfd9cd13ca85b2b1203a16e9fa79703c4cb75d",
+          "bones": [
+            {
+              "index": 0,
+              "name": "wpn_body",
+              "parent": "",
+              "bind_rotation": [
+                -0.0,
+                -0.0,
+                0.0
+              ],
+              "bind_position": [
+                0.0,
+                0.0,
+                -0.0
+              ],
+              "vertex_count": 2776,
+              "mesh_min": [
+                -0.016031349077820778,
+                -0.06966613978147507,
+                -0.042344287037849426
+              ],
+              "mesh_max": [
+                0.011866224929690361,
+                0.04126341640949249,
+                0.13038861751556396
+              ]
+            },
+            {
+              "index": 1,
+              "name": "gilza",
+              "parent": "wpn_body",
+              "bind_rotation": [
+                -0.0,
+                -0.0,
+                0.0
+              ],
+              "bind_position": [
+                0.01155857089906931,
+                0.042811594903469086,
+                0.04427231103181839
+              ],
+              "vertex_count": 0
+            },
+            {
+              "index": 2,
+              "name": "magazin",
+              "parent": "wpn_body",
+              "bind_rotation": [
+                1.3643841743469238,
+                -3.1347601413726807,
+                -7.367291345872218e-07
+              ],
+              "bind_position": [
+                0.0,
+                -0.03557456284761429,
+                -0.008612924255430698
+              ],
+              "vertex_count": 520,
+              "mesh_min": [
+                -0.011527327820658684,
+                -0.06963761895895004,
+                -0.03512195497751236
+              ],
+              "mesh_max": [
+                0.011556517332792282,
+                0.02446173131465912,
+                0.02217506803572178
+              ]
+            },
+            {
+              "index": 3,
+              "name": "bullets",
+              "parent": "magazin",
+              "bind_rotation": [
+                -2.0173626514589892e-21,
+                1.127276050283399e-10,
+                3.5791813957075647e-11
+              ],
+              "bind_position": [
+                5.292607966111973e-06,
+                -0.0023783817887306213,
+                -0.05481062829494476
+              ],
+              "vertex_count": 506,
+              "mesh_min": [
+                -0.0038387617096304893,
+                0.00818872731178999,
+                -0.009436171501874924
+              ],
+              "mesh_max": [
+                0.004291540943086147,
+                0.026124507188796997,
+                0.02164466492831707
+              ]
+            },
+            {
+              "index": 4,
+              "name": "muzzle",
+              "parent": "wpn_body",
+              "bind_rotation": [
+                -1.4703847425201353e-16,
+                -0.0005675819120369852,
+                -6.46234815038454e-27
+              ],
+              "bind_position": [
+                -7.402405026368797e-05,
+                0.03199148178100586,
+                0.1415470689535141
+              ],
+              "vertex_count": 0
+            },
+            {
+              "index": 5,
+              "name": "nipple",
+              "parent": "wpn_body",
+              "bind_rotation": [
+                -0.0,
+                -0.0,
+                0.0
+              ],
+              "bind_position": [
+                -1.4245700452608645e-10,
+                0.015610307455062866,
+                -0.0191110260784626
+              ],
+              "vertex_count": 223,
+              "mesh_min": [
+                -0.0034050638787448406,
+                0.012394034303724766,
+                -0.03588345646858215
+              ],
+              "mesh_max": [
+                0.00401780940592289,
+                0.039438605308532715,
+                -0.024311043322086334
+              ]
+            },
+            {
+              "index": 6,
+              "name": "slide",
+              "parent": "wpn_body",
+              "bind_rotation": [
+                -0.0,
+                -0.0,
+                0.0
+              ],
+              "bind_position": [
+                3.814697180359872e-08,
+                0.02881799265742302,
+                0.06008041650056839
+              ],
+              "vertex_count": 1268,
+              "mesh_min": [
+                -0.01073095016181469,
+                0.011348776519298553,
+                -0.036464840173721313
+              ],
+              "mesh_max": [
+                0.011504383757710457,
+                0.046258531510829926,
+                0.12215092033147812
+              ]
+            },
+            {
+              "index": 7,
+              "name": "trigger",
+              "parent": "wpn_body",
+              "bind_rotation": [
+                -0.0,
+                -0.0,
+                0.0
+              ],
+              "bind_position": [
+                1.6656957757543722e-10,
+                0.010483410209417343,
+                0.03815614804625511
+              ],
+              "vertex_count": 156,
+              "mesh_min": [
+                -0.004798156209290028,
+                -0.01308491826057434,
+                0.03277432546019554
+              ],
+              "mesh_max": [
+                0.005448499694466591,
+                0.008306446485221386,
+                0.04413454234600067
+              ]
+            },
+            {
+              "index": 8,
+              "name": "wpn_silencer",
+              "parent": "wpn_body",
+              "bind_rotation": [
+                -1.4703847425201353e-16,
+                -0.0005675819120369852,
+                -6.46234815038454e-27
+              ],
+              "bind_position": [
+                -7.402174378512427e-05,
+                0.030904404819011688,
+                0.1941528022289276
+              ],
+              "vertex_count": 325,
+              "mesh_min": [
+                -0.009287641383707523,
+                0.013792844489216805,
+                0.11242564022541046
+              ],
+              "mesh_max": [
+                0.010133279487490654,
+                0.04202984273433685,
+                0.23962001502513885
+              ]
+            }
+          ]
+        }
+      ],
+      "config_candidates": [
+        {
+          "source": "F:\\Games\\stalker2\\db\\configs\\configs.db0",
+          "sha256": "acebaebf18155a219d1bc90505348437e869525d67b20f064b2e7c5f31b80ea4",
+          "weapon_settings": [
+            "fire_point                  = 0.0, 0.133, 0.161",
+            "fire_point2                 = 0.0, 0.133, 0.161",
+            "shell_point\t\t \t\t\t= 0.0, 0.133, 0.047",
+            "ammo_class                  = ammo_11.43x23_fmj, ammo_11.43x23_fmj_bad, ammo_11.43x23_fmj_verybad, ammo_11.43x23_hydro, ammo_11.43x23_hydro_bad, ammo_11.43x23_hydro_verybad",
+            "ammo_mag_size               = 12",
+            "item_visual                 = anomaly_weapons\\wpn_usp45\\wpn_usp45_hud.ogf",
+            "shell_bone                  = gilza",
+            "shell_point                 = 0, 0, 0",
+            "fire_bone                   = muzzle",
+            "fire_point                  = 0, 0, 0",
+            "item_visual                 = anomaly_weapons\\wpn_usp45\\wpn_usp45_sk1_hud.ogf",
+            "ammo_class                  = ammo_9x19_fmj, ammo_9x19_fmj_bad, ammo_9x19_fmj_verybad, ammo_9x19_pbp, ammo_9x19_pbp_bad, ammo_9x19_pbp_verybad, ammo_9x19_ap, ammo_9x19_ap_bad, ammo_9x19_ap_verybad",
+            "ammo_mag_size               = 15",
+            "item_visual                 = anomaly_weapons\\wpn_usp45\\wpn_usp_match_hud.ogf",
+            "item_visual                 = anomaly_weapons\\wpn_usp45\\wpn_usp_nimble_hud.ogf"
+          ]
+        }
+      ],
+      "effective_model": "F:\\Games\\stalker2\\db\\meshes\\meshes_weapons.db0",
+      "effective_config": "F:\\Games\\stalker2\\db\\configs\\configs.db0"
+    }
+  }
+}

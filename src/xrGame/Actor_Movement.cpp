@@ -16,6 +16,13 @@
 #include "actoreffector.h"
 #include "static_cast_checked.hpp"
 #include "player_hud.h"
+#include "../xrEngine/Vr/vr_gameplay.h"
+#include "../xrEngine/Vr/vr_crouch_policy.h"
+#include "../xrEngine/Vr/vr_gameplay_policy.h"
+#include "xr_level_controller.h"
+#include "ClimableObject.h"
+#include "../xrphysics/PHCharacter.h"
+#include "UI/UIDialogWnd.h"
 
 #ifdef DEBUG
 #include "phdebug.h"
@@ -162,6 +169,213 @@ void CActor::g_cl_ValidateMState(float dt, u32 mstate_wf)
 	};
 };
 
+void CActor::VrApplyStance()
+{
+    const int stance=vr::CombinedStance(m_vr_stance, m_vr_physical_stance);
+    if (stance<m_vr_applied_stance)
+    {
+        if (stance<2) mstate_wishful&=~mcAccel;
+        if (!stance) mstate_wishful&=~mcCrouch;
+    }
+    if (stance)
+    {
+        mstate_wishful|=mcCrouch;
+        if (stance==2) mstate_wishful|=mcAccel;
+    }
+    m_vr_applied_stance=stance;
+}
+
+float CActor::VrCrouchLift(float dt)
+{
+    // Once per frame; the body camera is read several times.
+    if (m_vr_lift_frame==Device.dwFrame) return m_vr_crouch_lift;
+    m_vr_lift_frame=Device.dwFrame;
+    if (!(mstate_real & mcCrouch)) m_vr_stand_height=CameraHeight();
+    const float height=CurrentHeight<0.f ? CameraHeight() : CurrentHeight;
+    // Cancel the box's drop only while the head (not the stick) chose the
+    // stance. Follow the smoothed camera exactly, but ease in/out when the
+    // stick takes over or lets go so the view never jumps.
+    const bool head_chose=vr::PhysicalCrouch() && m_vr_stand_height>0.f && m_vr_physical_stance>=m_vr_stance;
+    const float target=head_chose ? _max(0.f, m_vr_stand_height-height) : 0.f;
+    const float step=1.5f*_max(dt, 0.f);
+    if (!head_chose) m_vr_lift_tracking=false;
+    if (m_vr_lift_tracking || _abs(target-m_vr_crouch_lift)<=step)
+    {
+        m_vr_crouch_lift=target;
+        m_vr_lift_tracking=head_chose;
+    }
+    else m_vr_crouch_lift+=target>m_vr_crouch_lift ? step : -step;
+    return m_vr_crouch_lift;
+}
+
+bool CActor::VrRoomscaleRequest()
+{
+    // The player walked away from the body in the room: the body walks after
+    // the head (through the ordinary movement and collision), and only on
+    // the ground, not on a ladder.
+    Fvector head;
+    if (!vr::Roomscale() || !vr::HeadPosition(head) || m_vr_ladder_id!=u16(-1) || m_vr_pickup.climb_hand>=0 ||
+        (mstate_real & (mcFall|mcJump|mcClimb)))
+        return false;
+    Fvector offset; offset.sub(head,cam_FirstEye()->Position()); offset.y=0.f;
+    const float distance=offset.magnitude();
+    const float request=vr::RoomscaleRequest(distance,0.15f);
+    if (request<=0.f) return false;
+    offset.div(distance);
+    m_vr_room_dir=offset;
+    m_vr_room_remaining=distance;
+    m_vr_room_requested=true;
+    // World direction into the model's basis (the controller applies yaw).
+    Fmatrix inverse_model;
+    inverse_model.rotateY(r_model_yaw);
+    m_vr_move.mul(offset,request);
+    inverse_model.transform_dir(m_vr_move);
+    mstate_wishful |= mcFwd;
+    return true;
+}
+
+void CActor::VrAfterCameraUpdate()
+{
+    if (!g_vr_owns_present || Level().CurrentControlEntity()!=this)
+    {
+        m_vr_room_anchor_valid=m_vr_room_requested=m_vr_prev_aim_valid=false;
+        m_vr_room_remaining=0.f;
+        return;
+    }
+    // Roomscale: the camera anchor's move this frame, the part of it along
+    // the way to the head (up to what was left of that way) followed the
+    // head. That part comes out of the tracking origin, so the head (and
+    // view) stays where the player is. Momentum after the request stops is
+    // followed too, until the remaining way is used up.
+    const Fvector anchor=cam_FirstEye()->Position();
+    if (m_vr_room_anchor_valid && m_vr_room_remaining>0.f)
+    {
+        Fvector moved; moved.sub(anchor,m_vr_room_anchor); moved.y=0.f;
+        const float followed=vr::RoomscaleFollowed(moved.dotproduct(m_vr_room_dir),m_vr_room_remaining);
+        if (followed>0.f) vr::ShiftTrackingOrigin(Fvector().mul(m_vr_room_dir,followed));
+        m_vr_room_remaining-=followed;
+        if (followed<=0.f && !m_vr_room_requested) m_vr_room_remaining=0.f;
+    }
+    m_vr_room_requested=false;
+    m_vr_room_anchor=anchor;
+    m_vr_room_anchor_valid=true;
+    vr::UpdateGameplayBody();
+    // Weapon spread grows with how fast the aim turns. In VR that is the
+    // weapon in the hand, measured in the body's frame so a snap or smooth
+    // turn of the body does not count, while turning the gun does.
+    Fmatrix aim;
+    auto* weapon=smart_cast<CWeapon*>(inventory().ActiveItem());
+    if (weapon && weapon->VrAimTransform(aim))
+    {
+        Fvector k=cam_FirstEye()->Direction(); k.y=0.f;
+        if (k.square_magnitude()<EPS_S) k.set(0.f,0.f,1.f);
+        k.normalize();
+        Fvector i; i.crossproduct(Fvector().set(0.f,1.f,0.f),k);
+        const Fvector local{aim.k.dotproduct(i),aim.k.y,aim.k.dotproduct(k)};
+        fCurAVelocity=m_vr_prev_aim_valid && Device.fTimeDelta>EPS_S ?
+            Fvector().sub(local,m_vr_prev_aim).magnitude()/Device.fTimeDelta : 0.f;
+        m_vr_prev_aim=local;
+        m_vr_prev_aim_valid=true;
+    }
+    else
+    {
+        fCurAVelocity=0.f;
+        m_vr_prev_aim_valid=false;
+    }
+}
+
+void CActor::VrControls(float dt)
+{
+    m_vr_move.set(0,0,0);
+    const bool ui_blocked = CurrentGameUI() && CurrentGameUI()->TopInputReceiver() &&
+        CurrentGameUI()->TopInputReceiver()->StopAnyMove();
+    if (!g_Alive() || Remote() || m_holder || ui_blocked || IsTalking() || m_input_external_handler)
+    {
+        vr::SuspendGameplayInput();
+        // The schedule clears the crouch wish every update (non-toggle input
+        // modes): keep the stance while a window or conversation blocks the
+        // controls, or the player stands up behind it.
+        if (g_vr_owns_present && g_Alive() && !m_holder) VrApplyStance();
+        return;
+    }
+    // Ducking the real head crouches; the stick still works and the deeper
+    // of the two is used.
+    float head_delta=0.f;
+    const bool head_valid=vr::HeadHeightDelta(head_delta);
+    m_vr_physical_stance=vr::PhysicalCrouch() ?
+        vr::PhysicalStance(head_valid, head_delta, m_vr_physical_stance, vr::CrouchDepth(), vr::LowCrouchDepth()) : 0;
+    float side=0.f, forward=0.f, turn=0.f;
+    m_vr_stick_forward=0.f;
+    if (!vr::MovementInput(dt, side, forward, turn))
+    {
+        VrApplyStance();
+        // Stick movement off: only a hand climbing a ladder moves the body.
+        side=forward=turn=0.f;
+        m_vr_sprint_down=false;
+        // (A hand on a ladder carries the body in g_Physics.)
+        if (!(mstate_wishful & mcAnyMove) && CanMove()) VrRoomscaleRequest();
+        return;
+    }
+	const bool sprint=vr::SprintButton();
+	if (sprint && !m_vr_sprint_down)
+	{
+		mstate_wishful ^= mcSprint;
+		// Sprinting stands up, as the desktop sprint toggle does.
+		if (m_vr_stance) { m_vr_stance=0; mstate_wishful&=~(mcCrouch|mcAccel); }
+	}
+	m_vr_sprint_down=sprint;
+	// Right stick click jumps, edge-triggered like the desktop key.
+	const bool jump=vr::JumpButton();
+	if (jump && !m_vr_jump_down) mstate_wishful |= mcJump;
+	else if (!jump && m_vr_jump_down) mstate_wishful &= ~mcJump;
+	m_vr_jump_down=jump;
+    // Right stick up/down steps through standing, crouching and low crouch.
+    // The wishful flags are re-applied each frame because non-toggle input
+    // modes clear them; standing releases them once so the keys still work.
+    if (const int step=vr::StanceStep())
+        m_vr_stance=clampr(m_vr_stance-step,0,2);
+    VrApplyStance();
+    // Use the existing body-camera controller and actor physics. No direct
+    // position writes, replayed simulation, or synthetic keyboard events.
+    if (turn != 0)
+    {
+        const int command = turn > 0 ? kRIGHT : kLEFT;
+        cam_Active()->Move(command, _abs(turn));
+        if (cam_Active() != cam_FirstEye()) cam_FirstEye()->Move(command, _abs(turn));
+    }
+    // Ladders are climbed directly (CActor::VrClimbLadder): the stick's
+    // forward travel is the climb speed there, and it does not walk.
+    m_vr_stick_forward=forward;
+    if (m_vr_ladder_id!=u16(-1) || m_vr_pickup.climb_hand>=0) forward=side=0.f;
+    // Stick walking moves the view: no roomscale follow is taken out of it.
+    if (_abs(forward)>EPS_S || _abs(side)>EPS_S) m_vr_room_remaining=0.f;
+    else if (!(mstate_wishful & mcAnyMove) && CanMove() && VrRoomscaleRequest()) return;
+    if (!(mstate_wishful & mcAnyMove) && CanMove())
+    {
+        Fvector facing;
+        // Body frame: converted to the model's basis below.
+        if (!vr::HeadDirectionInBody(facing)) return;
+        facing.y=0;
+        // Keep a stable horizontal heading when looking straight up/down.
+        if (facing.square_magnitude()<0.0001f) facing.set(0,0,1);
+        facing.normalize_safe();
+        Fvector right; right.set(facing.z,0,-facing.x);
+        m_vr_move.mul(facing,forward);
+        m_vr_move.mad(right,side);
+        // The movement controller applies model yaw later. Convert the
+        // headset/body direction into that local basis exactly once.
+        Fmatrix body, inverse_model;
+        body.rotateY(-cam_FirstEye()->GetWorldYaw());
+        body.transform_dir(m_vr_move);
+        inverse_model.rotateY(r_model_yaw);
+        inverse_model.transform_dir(m_vr_move);
+        if (forward > EPS_S) mstate_wishful |= mcFwd;
+        if (forward < -EPS_S) mstate_wishful |= mcBack;
+        if (side < -EPS_S) mstate_wishful |= mcLStrafe;
+        if (side > EPS_S) mstate_wishful |= mcRStrafe;
+    }
+}
+
 void CActor::g_cl_CheckControls(u32 mstate_wf, Fvector& vControlAccel, float& Jump, float dt)
 {
 	float cam_eff_factor = 0.0f;
@@ -194,6 +408,9 @@ void CActor::g_cl_CheckControls(u32 mstate_wf, Fvector& vControlAccel, float& Ju
 	if (mstate_wf & mcBack) vControlAccel.z += -1;
 	if (mstate_wf & mcLStrafe) mstate_wf & mcSprint ? vControlAccel.x += -0.5 : vControlAccel.x += -1;
 	if (mstate_wf & mcRStrafe) mstate_wf & mcSprint ? vControlAccel.x += 0.5 : vControlAccel.x += 1;
+
+    if ((mstate_wf & mcAnyMove) && m_vr_move.square_magnitude() > EPS_S)
+        vControlAccel = m_vr_move;
 
 	CPHMovementControl::EEnvironment curr_env = character_physics_support()->movement()->Environment();
 	if (curr_env == CPHMovementControl::peOnGround || curr_env == CPHMovementControl::peAtWall)
@@ -312,6 +529,11 @@ void CActor::g_cl_CheckControls(u32 mstate_wf, Fvector& vControlAccel, float& Ju
 						scale *= m_fWalk_StrafeFactor;
 				}
 
+				// The stick's travel sets the pace, except against a step or
+				// a wall: pressing into one pushes as hard as a key does, or a
+				// partly pushed stick lacks the force to climb stairs.
+				if (m_vr_move.square_magnitude() > EPS_S && curr_env != CPHMovementControl::peAtWall)
+					scale *= _min(1.f, m_vr_move.magnitude());
 				vControlAccel.mul(scale);
 				cam_eff_factor = scale;
 			} //scale>EPS

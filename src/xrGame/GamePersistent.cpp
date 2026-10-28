@@ -201,6 +201,7 @@ void CGamePersistent::Disconnect()
 
 void CGamePersistent::OnGameStart()
 {
+    m_vr_loading_prompt=false;
 	__super::OnGameStart();
 	UpdateGameType();
 }
@@ -270,6 +271,7 @@ void CGamePersistent::UpdateGameType()
 
 void CGamePersistent::OnGameEnd()
 {
+    m_vr_loading_prompt=false;
 	__super::OnGameEnd();
 
 	xr_delete(g_stalker_animation_data_storage);
@@ -598,6 +600,7 @@ void CGamePersistent::game_loaded()
 			VERIFY(NULL == m_intro);
 			m_intro = xr_new<CUISequencer>();
 			m_intro->Start("game_loaded");
+            m_vr_loading_prompt=true;
 			Msg("intro_start game_loaded");
 			m_intro->m_on_destroy_event.bind(this, &CGamePersistent::update_game_loaded);
 
@@ -644,8 +647,17 @@ void CGamePersistent::game_loaded()
 	}
 }
 
+bool CGamePersistent::VrLoadingPrompt(bool confirm)
+{
+    if (!m_vr_loading_prompt || !m_intro || !m_intro->IsActive() ||
+        !g_pGameLevel || !g_pGameLevel->bReady || !pInput || pInput->CurrentIR()!=m_intro) return false;
+    if (confirm) m_intro->Stop(); // existing unpause, intro and script callbacks
+    return true;
+}
+
 void CGamePersistent::update_game_loaded()
 {
+    m_vr_loading_prompt=false;
 	xr_delete(m_intro);
 	Msg("intro_delete ::update_game_loaded");
 	start_game_intro();

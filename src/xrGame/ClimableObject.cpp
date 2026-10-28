@@ -57,6 +57,12 @@ CClimableObject::~CClimableObject()
 {
 }
 
+xr_vector<CClimableObject*>& ClimableObjects()
+{
+	static xr_vector<CClimableObject*> ladders;
+	return ladders;
+}
+
 void CClimableObject::Load(LPCSTR section)
 {
 	inherited::Load(section);
@@ -110,11 +116,14 @@ BOOL CClimableObject::net_Spawn(CSE_Abstract* DC)
 	//	shedule_unregister();
 	processing_deactivate();
 	//m_pStaticShell->set_ObjectContactCallback(ObjectContactCallback);
+	ClimableObjects().push_back(this);
 	return ret;
 }
 
 void CClimableObject::net_Destroy()
 {
+	auto& ladders = ClimableObjects();
+	ladders.erase(std::remove(ladders.begin(), ladders.end(), this), ladders.end());
 	inherited::net_Destroy();
 	DestroyStaticGeomShell(m_pStaticShell);
 

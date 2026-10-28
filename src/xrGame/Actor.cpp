@@ -31,6 +31,8 @@
 #include "../xrEngine/xr_input.h"
 //
 #include "Actor.h"
+#include "VrWeaponInteraction.h"
+#include "../xrEngine/Vr/vr_gameplay.h"
 #include "ActorAnimation.h"
 #include "actor_anim_defs.h"
 #include "HudItem.h"
@@ -52,6 +54,7 @@
 #include "../Include/xrRender/Kinematics.h"
 #include "artefact.h"
 #include "CharacterPhysicsSupport.h"
+#include "ClimableObject.h"
 #include "material_manager.h"
 #include "../xrphysics/IColisiondamageInfo.h"
 #include "ui/UIMainIngameWnd.h"
@@ -69,6 +72,7 @@
 #include "../Include/xrRender/UIRender.h"
 
 #include "ai_object_location.h"
+#include "VrBodySlots.h"
 #include "ui/uiMotionIcon.h"
 #include "ui/UIActorMenu.h"
 #include "ActorHelmet.h"
@@ -115,6 +119,8 @@ int showActorBody = 0;
 
 Flags32 psActorFlags = {AF_GODMODE_RT | AF_AUTOPICKUP | AF_RUN_BACKWARD | AF_IMPORTANT_SAVE | AF_USE_TRACERS};
 int psActorSleepTime = 1;
+
+bool Pda3D() { return psActorFlags.test(AF_3D_PDA) && !g_vr_owns_present; }
 
 
 CActor::CActor() : CEntityAlive(), current_ik_cam_shift(0)
@@ -1037,9 +1043,36 @@ void CActor::g_Physics(Fvector& _accel, float jump, float dt)
 
 	if (g_Alive())
 	{
-		if (mstate_real & mcClimb && !cameras[eacFirstEye]->bClampYaw)
+		// The ladder yaw clamp never engages with headset turning; VR climbs
+		// with the stick or hands at any heading (see VrControls).
+		if (mstate_real & mcClimb && !cameras[eacFirstEye]->bClampYaw && !g_vr_owns_present)
 			accel.set(0.f, 0.f, 0.f);
-		character_physics_support()->movement()->Calculate(accel, cameras[cam_active]->vDirection, 0, jump, dt, false);
+		Fvector climb_dir = cameras[cam_active]->vDirection;
+		if (g_vr_owns_present)
+		{
+			// The ladder physics reads the camera to get on (facing the
+			// ladder, looking down at its top) and for the direction. In VR
+			// that is the head, which pitches and turns where the body camera
+			// does not, or the ladder a hand holds.
+			Fmatrix head;
+			if (vr::HeadTransform(head))
+			{
+				climb_dir = head.k;
+				// Looking a little down at a ladder in front is not climbing
+				// down: only a clear downward look (about 20 degrees, to get
+				// on from the top) counts.
+				if (climb_dir.y < 0.f && climb_dir.y > -0.35f) { climb_dir.y = 0.f; climb_dir.normalize_safe(); }
+			}
+			Fvector towards;
+			const bool held = VrLadderDirection(towards);
+			if (held) climb_dir.set(towards.x, climb_dir.y, towards.z);
+		}
+		// VR ladders are climbed directly, without the ladder physics (which
+		// needs contact, a facing and its own state machine).
+		CClimableObject* ladder = g_vr_owns_present ? VrLadder() : nullptr;
+		if (ladder) { accel.set(0.f, 0.f, 0.f); jump = 0.f; }
+		character_physics_support()->movement()->Calculate(accel, climb_dir, 0, jump, dt, false);
+		VrClimbLadder(ladder);
 		bool new_border_state = character_physics_support()->movement()->isOutBorder();
 		if (m_bOutBorder != new_border_state && Level().CurrentControlEntity() == this)
 		{
@@ -1179,6 +1212,10 @@ void CActor::UpdateCL()
 	CWeapon* pWeapon = smart_cast<CWeapon*>(inventory().ActiveItem());
 
 	cam_Update(float(Device.dwTimeDelta) / 1000.0f, currentFOV());
+	// The tracked body is placed at this frame's camera before hands are
+	// used: weapons (updated after their parent) fire from where they are drawn.
+	VrAfterCameraUpdate();
+	UpdateVrWeapons(*this);
     m_legs_controller.update(this);
 
 #ifdef STATIONARYMGUN_NEW
@@ -1290,7 +1327,10 @@ void CActor::UpdateCL()
 	Cameras().hud_camera_Matrix(trans);
 
 	if (IsFocused())
+	{
 		g_player_hud->update(trans);
+		VrUpdateHudItems(*this);
+	}
 
 	if (psActorFlags.test(AF_MULTI_ITEM_PICKUP))
 		m_bPickupMode = false;
@@ -1770,6 +1810,248 @@ void CActor::set_state_box(u32 mstate)
 		character_physics_support()->movement()->ActivateBox(0, true);
 }
 
+CClimableObject* CActor::VrLadder()
+{
+	// The ladder a hand holds, else the one the stick climbs: pushing
+	// forward at a ladder within reach that the head faces gets on, and the
+	// player stays on it until stepping off its top or bottom, or away.
+	if (!g_Alive() || Holder())
+	{
+		m_vr_ladder_id = u16(-1);
+		return nullptr;
+	}
+	// A ladder a hand holds is kept after the hand lets go, so the body hangs
+	// there while the other hand reaches for the next rung.
+	if (m_vr_pickup.climb_hand >= 0)
+		if (auto* held = smart_cast<CClimableObject*>(Level().Objects.net_Find(m_vr_pickup.climb_ladder)))
+		{
+			m_vr_ladder_id = held->ID();
+			return held;
+		}
+	Fmatrix head_world;
+	if (!vr::HeadTransform(head_world)) return nullptr;
+	Fvector head = head_world.k;
+	head.y = 0.f;
+	if (head.square_magnitude() < EPS_S) return nullptr;
+	head.normalize();
+	const auto suits = [&](CClimableObject* ladder, bool on) -> bool
+	{
+		Fvector to; to.sub(ladder->Position(), Position()); to.y = 0.f;
+		const float distance = to.magnitude();
+		const float half = _abs(ladder->Axis().y);
+		const float bottom = ladder->Position().y - half, top = ladder->Position().y + half;
+		if (distance > ladder->Side().magnitude() + (on ? 1.f : 0.7f)) return false;
+		if (Position().y < bottom - 0.4f || Position().y > top + 0.3f) return false;
+		return on || distance < EPS_S || to.div(distance).dotproduct(head) > 0.4f;
+	};
+	if (m_vr_ladder_id != u16(-1))
+	{
+		auto* current = smart_cast<CClimableObject*>(Level().Objects.net_Find(m_vr_ladder_id));
+		if (current && suits(current, true)) return current;
+		m_vr_ladder_id = u16(-1);
+	}
+	// Only a forward push gets on, and not again until the stick has been
+	// let go after stepping off: pulling back, or walking on past the foot,
+	// must not take the ladder every frame and hold the body there.
+	if (m_vr_stick_forward < 0.3f) { m_vr_ladder_rearm = true; return nullptr; }
+	if (!m_vr_ladder_rearm) return nullptr;
+	for (CClimableObject* ladder : ClimableObjects())
+		if (ladder && suits(ladder, false))
+		{
+			m_vr_ladder_id = ladder->ID();
+			return ladder;
+		}
+	return nullptr;
+}
+
+void CActor::VrClimbLadder(CClimableObject* ladder)
+{
+	CPHMovementControl* movement = character_physics_support()->movement();
+	const float pulled = m_vr_climb_delta;
+	m_vr_climb_delta = 0.f;
+	if (!ladder)
+	{
+		if (m_vr_hand_climbing) { movement->SetApplyGravity(TRUE); m_vr_hand_climbing = false; }
+		return;
+	}
+	const bool by_hand = m_vr_pickup.climb_hand >= 0;
+	// The hand's pull, or the stick: forward climbs up, or down while
+	// looking clearly down (as on the desktop); back the other way.
+	float speed = by_hand ? (Device.fTimeDelta > 0.001f ? pulled / Device.fTimeDelta : 0.f) : 0.f;
+	if (!by_hand)
+	{
+		Fmatrix head; head.identity();
+		vr::HeadTransform(head);
+		speed = m_vr_stick_forward * 2.f * (head.k.y < -0.42f ? -1.f : 1.f);
+	}
+	Fvector to; to.sub(ladder->Position(), Position()); to.y = 0.f;
+	const float distance = to.magnitude();
+	if (distance > EPS_S) to.div(distance);
+	const float half = _abs(ladder->Axis().y);
+	const float bottom = ladder->Position().y - half, top = ladder->Position().y + half;
+	// Over the top is through the ladder's plane, away from the side climbed.
+	Fvector over; over.set(ladder->Norm()); over.y = 0.f;
+	if (over.square_magnitude() < EPS_S) over.set(to);
+	else
+	{
+		over.normalize();
+		Fvector from; from.sub(Position(), ladder->Position());
+		if (from.dotproduct(over) > 0.f) over.invert();
+	}
+	Fvector position;
+	movement->GetPosition(position);
+	if (speed > 0.f && position.y > top - 0.15f)
+	{
+		// Over the top: lifted clear of the lip and pushed onto what is there.
+		position.y = _max(position.y, top + 0.05f);
+		movement->SetPosition(position);
+		Fvector velocity; velocity.set(over.x * 2.f, 0.5f, over.z * 2.f);
+		movement->SetVelocity(velocity);
+		movement->SetApplyGravity(TRUE);
+		m_vr_hand_climbing = false;
+		m_vr_ladder_id = u16(-1);
+		m_vr_ladder_rearm = false;
+		m_vr_pickup.climb_hand = -1;
+		return;
+	}
+	Fvector velocity; velocity.set(0.f, by_hand ? 0.f : speed, 0.f);
+	if (speed < 0.f && Position().y <= bottom + 0.02f && !by_hand)
+	{
+		// At the bottom: off the ladder.
+		movement->SetApplyGravity(TRUE);
+		m_vr_hand_climbing = false;
+		m_vr_ladder_id = u16(-1);
+		m_vr_ladder_rearm = false;
+		return;
+	}
+	// Held close to the ladder (40 cm from its centre line).
+	if (distance > 0.4f) velocity.mad(to, std::min(distance - 0.4f, 0.5f) * 2.f);
+	// Standing still puts the character body to sleep and the ground damps
+	// it, so a velocity set there does nothing (a jump wakes and lifts it,
+	// which is why getting on used to need one). Wake it every frame on the
+	// ladder, and lift it off the ground when getting on going up.
+	movement->EnableCharacter();
+	if (by_hand)
+	{
+		// The body moves exactly as far as the hand pulled, so the rung
+		// stays where the hand holds it; never below the ladder's foot.
+		position.y = clampr(position.y + pulled, bottom - 0.05f, top + 0.1f);
+		movement->SetPosition(position);
+	}
+	else if (!m_vr_hand_climbing && speed > 0.f)
+	{
+		position.y += 0.05f;
+		movement->SetPosition(position);
+	}
+	movement->SetApplyGravity(FALSE);
+	movement->SetVelocity(velocity);
+	m_vr_hand_climbing = true;
+}
+
+bool CActor::VrLadderDirection(Fvector& direction)
+{
+	if (m_vr_pickup.climb_hand < 0 || m_vr_pickup.climb_ladder == u16(-1)) return false;
+	CObject* ladder = Level().Objects.net_Find(m_vr_pickup.climb_ladder);
+	if (!ladder) return false;
+	direction.sub(ladder->Position(), Position());
+	direction.y = 0.f;
+	if (direction.square_magnitude() < EPS_S) return false;
+	direction.normalize();
+	return true;
+}
+
+collide::rq_result CActor::UseRQ()
+{
+	collide::rq_result RQ = HUD().GetRQ();
+	// In VR the use target is what a free hand points at (UpdateVrWeapons),
+	// for the target shown, the use action, holders and body dragging alike.
+	if (g_vr_owns_present && Level().CurrentControlEntity() == this)
+	{
+		RQ.O = m_vr_pickup.pick_id != u16(-1) ? Level().Objects.net_Find(m_vr_pickup.pick_id) : nullptr;
+		RQ.range = m_vr_pickup.pick_range;
+		RQ.element = m_vr_pickup.pick_element;
+	}
+	return RQ;
+}
+
+void CActor::UpdateUseTarget()
+{
+	collide::rq_result RQ = UseRQ();
+
+
+	if (!input_external_handler_installed() && RQ.O && RQ.O->getVisible() && RQ.range < 2.0f)
+	{
+		m_pObjectWeLookingAt = smart_cast<CGameObject*>(RQ.O);
+
+		CGameObject* game_object = smart_cast<CGameObject*>(RQ.O);
+		m_pUsableObject = smart_cast<CUsableScriptObject*>(game_object);
+		m_pInvBoxWeLookingAt = smart_cast<CInventoryBox*>(game_object);
+		m_pPersonWeLookingAt = smart_cast<CInventoryOwner*>(game_object);
+		m_pVehicleWeLookingAt = smart_cast<CHolderCustom*>(game_object);
+		CEntityAlive* pEntityAlive = smart_cast<CEntityAlive*>(game_object);
+
+		if (GameID() == eGameIDSingle)
+		{
+			if (m_pUsableObject && m_pUsableObject->tip_text())
+			{
+				m_sDefaultObjAction = CStringTable().translate(m_pUsableObject->tip_text());
+			}
+			else
+			{
+				if (m_pPersonWeLookingAt && pEntityAlive && pEntityAlive->g_Alive() && m_pPersonWeLookingAt->IsTalkEnabled())
+				{
+					m_sDefaultObjAction = m_sCharacterUseAction;
+				}
+				else if (pEntityAlive && !pEntityAlive->g_Alive())
+				{
+					if (m_pPersonWeLookingAt && m_pPersonWeLookingAt->deadbody_closed_status())
+					{
+						m_sDefaultObjAction = m_sDeadCharacterDontUseAction;
+					}
+					else
+					{
+						bool b_allow_drag = !!pSettings->line_exist("ph_capture_visuals", pEntityAlive->cNameVisual());
+						if (b_allow_drag)
+						{
+							m_sDefaultObjAction = m_sDeadCharacterUseOrDragAction;
+						}
+						else if (pEntityAlive->cast_inventory_owner())
+						{
+							m_sDefaultObjAction = m_sDeadCharacterUseAction;
+						}
+					} // m_pPersonWeLookingAt
+				}
+				else if (m_pVehicleWeLookingAt)
+				{
+					m_sDefaultObjAction = m_pVehicleWeLookingAt->m_sUseAction == 0
+						                      ? m_sCarCharacterUseAction
+						                      : m_pVehicleWeLookingAt->m_sUseAction;
+				}
+				else if (m_pObjectWeLookingAt &&
+					m_pObjectWeLookingAt->cast_inventory_item() &&
+					m_pObjectWeLookingAt->cast_inventory_item()->CanTake())
+				{
+					m_sDefaultObjAction = m_sInventoryItemUseAction;
+				}
+				else
+				{
+					m_sDefaultObjAction = NULL;
+				}
+			}
+		}
+	}
+	else
+	{
+		m_pPersonWeLookingAt = NULL;
+		m_sDefaultObjAction = NULL;
+		m_pUsableObject = NULL;
+		m_pObjectWeLookingAt = NULL;
+		m_pVehicleWeLookingAt = NULL;
+		m_pInvBoxWeLookingAt = NULL;
+	}
+
+}
+
 void CActor::shedule_Update(u32 DT)
 {
 	setSVU(OnServer());
@@ -1821,6 +2103,7 @@ void CActor::shedule_Update(u32 DT)
 	if (Level().CurrentControlEntity() == this && !Level().IsDemoPlay())
 		//------------------------------------------------
 	{
+		VrControls(dt);
 		g_cl_CheckControls(mstate_wishful, NET_SavedAccel, NET_Jump, dt);
 		{
 			/*
@@ -2009,79 +2292,7 @@ void CActor::shedule_Update(u32 DT)
 		setVisible(TRUE);
 
 	//÷òî àêòåð âèäèò ïåðåä ñîáîé
-	collide::rq_result& RQ = HUD().GetRQ();
-
-
-	if (!input_external_handler_installed() && RQ.O && RQ.O->getVisible() && RQ.range < 2.0f)
-	{
-		m_pObjectWeLookingAt = smart_cast<CGameObject*>(RQ.O);
-
-		CGameObject* game_object = smart_cast<CGameObject*>(RQ.O);
-		m_pUsableObject = smart_cast<CUsableScriptObject*>(game_object);
-		m_pInvBoxWeLookingAt = smart_cast<CInventoryBox*>(game_object);
-		m_pPersonWeLookingAt = smart_cast<CInventoryOwner*>(game_object);
-		m_pVehicleWeLookingAt = smart_cast<CHolderCustom*>(game_object);
-		CEntityAlive* pEntityAlive = smart_cast<CEntityAlive*>(game_object);
-
-		if (GameID() == eGameIDSingle)
-		{
-			if (m_pUsableObject && m_pUsableObject->tip_text())
-			{
-				m_sDefaultObjAction = CStringTable().translate(m_pUsableObject->tip_text());
-			}
-			else
-			{
-				if (m_pPersonWeLookingAt && pEntityAlive && pEntityAlive->g_Alive() && m_pPersonWeLookingAt->IsTalkEnabled())
-				{
-					m_sDefaultObjAction = m_sCharacterUseAction;
-				}
-				else if (pEntityAlive && !pEntityAlive->g_Alive())
-				{
-					if (m_pPersonWeLookingAt && m_pPersonWeLookingAt->deadbody_closed_status())
-					{
-						m_sDefaultObjAction = m_sDeadCharacterDontUseAction;
-					}
-					else
-					{
-						bool b_allow_drag = !!pSettings->line_exist("ph_capture_visuals", pEntityAlive->cNameVisual());
-						if (b_allow_drag)
-						{
-							m_sDefaultObjAction = m_sDeadCharacterUseOrDragAction;
-						}
-						else if (pEntityAlive->cast_inventory_owner())
-						{
-							m_sDefaultObjAction = m_sDeadCharacterUseAction;
-						}
-					} // m_pPersonWeLookingAt
-				}
-				else if (m_pVehicleWeLookingAt)
-				{
-					m_sDefaultObjAction = m_pVehicleWeLookingAt->m_sUseAction == 0
-						                      ? m_sCarCharacterUseAction
-						                      : m_pVehicleWeLookingAt->m_sUseAction;
-				}
-				else if (m_pObjectWeLookingAt &&
-					m_pObjectWeLookingAt->cast_inventory_item() &&
-					m_pObjectWeLookingAt->cast_inventory_item()->CanTake())
-				{
-					m_sDefaultObjAction = m_sInventoryItemUseAction;
-				}
-				else
-				{
-					m_sDefaultObjAction = NULL;
-				}
-			}
-		}
-	}
-	else
-	{
-		m_pPersonWeLookingAt = NULL;
-		m_sDefaultObjAction = NULL;
-		m_pUsableObject = NULL;
-		m_pObjectWeLookingAt = NULL;
-		m_pVehicleWeLookingAt = NULL;
-		m_pInvBoxWeLookingAt = NULL;
-	}
+	UpdateUseTarget();
 
 	//	UpdateSleep									();
 
@@ -2234,8 +2445,9 @@ extern BOOL g_legs_enabled;
 
 bool canRenderLegs(CActor* actor, CHolderCustom* m_holder) noexcept
 {
-    return g_legs_enabled
-        && (legs_in_low_crouch || !(actor->MovingState() & mcCrouch && actor->MovingState() & mcAccel))
+    return (g_legs_enabled || g_vr_owns_present)
+        // In VR the first-person body is the player's arms: kept in low crouch.
+        && (g_vr_owns_present || legs_in_low_crouch || !(actor->MovingState() & mcCrouch && actor->MovingState() & mcAccel))
         && g_player_hud
         && !m_holder
         && (legs_in_demo_record || pDemoRecords.empty())

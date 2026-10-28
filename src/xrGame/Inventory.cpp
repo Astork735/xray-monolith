@@ -784,7 +784,7 @@ bool CInventory::Action(u16 cmd, u32 flags)
 		b_send_event = true;
 		if (flags & CMD_START)
 		{
-			if (!psActorFlags.test(AF_3D_PDA)) return false;
+			if (!Pda3D()) return false;
 
 			if (smart_cast<CPda*>(ActiveItem()))
 			{

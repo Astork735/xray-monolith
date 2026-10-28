@@ -9422,6 +9422,15 @@
     <ClCompile Include="WeaponPM.cpp">
       <Filter>Core\Client\Objects\items &amp; weapons\Weapons\Various weapons\PM</Filter>
     </ClCompile>
+    <ClCompile Include="VrWeaponInteraction.cpp">
+      <Filter>Core\Client\Objects\items &amp; weapons\Weapons</Filter>
+    </ClCompile>
+    <ClCompile Include="VrBodySlots.cpp">
+      <Filter>Core\Client\Objects\items &amp; weapons\Weapons</Filter>
+    </ClCompile>
+    <ClCompile Include="VrWristDisplay.cpp">
+      <Filter>Core\Client\Objects\items &amp; weapons\Weapons</Filter>
+    </ClCompile>
     <ClCompile Include="WeaponBinoculars.cpp">
       <Filter>Core\Client\Objects\items &amp; weapons\Weapons\Various weapons\Binocular</Filter>
     </ClCompile>

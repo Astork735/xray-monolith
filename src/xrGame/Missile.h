@@ -124,6 +124,29 @@ public:
 	Fvector GetThrowPoint() { return m_vThrowPoint; }
 	Fvector GetThrowDir() { return m_vThrowDir; }
 
+	// VR: thrown by hand (see VrBodySlots.cpp). Priming plays the throw
+	// start (the pin) and readies the missile; the throw then leaves from the
+	// hand with the hand's velocity instead of the camera's direction and
+	// the charged force, while the throw animation and sound still play.
+	// Opening the hand without a throw (or putting the missile away) undoes
+	// the priming, so a readied grenade is not let fly at the camera's aim.
+	void VrPrime();
+	void VrUnprime();
+	bool VrThrow(const Fmatrix& hand, const Fvector& velocity);
+	bool VrPrimed() const { return m_vr_primed; }
+	bool VrThrown() const { return m_vr_thrown; }
+	// Held by the player in VR, where the first-person animations are not
+	// seen: showing, hiding, the throw start and the throw do not wait on them.
+	bool VrQuick() const;
+protected:
+	bool m_vr_primed = false;
+	bool m_vr_thrown = false;
+	bool m_vr_throw = false;
+	u32 m_vr_prime_time = 0;
+	u32 m_vr_stale_state = u32(-1);
+	Fmatrix m_vr_throw_matrix;
+	Fvector m_vr_throw_velocity;
+
 public:
 	DECLARE_SCRIPT_REGISTER_FUNCTION
 };

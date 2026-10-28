@@ -29,6 +29,7 @@ class CAutosaveManager;
 class CPHCommander;
 class CLevelDebug;
 class CLevelSoundManager;
+class CUIDialogWnd;
 class CGameTaskManager;
 class CZoneList;
 class message_filter;
@@ -82,6 +83,11 @@ protected:
 	CClientSpawnManager* m_client_spawn_manager = nullptr;
 	CAutosaveManager* m_autosave_manager = nullptr;
     CDebugRenderer* m_debug_renderer = nullptr;
+    CUIDialogWnd* m_vr_ui_pressed_receiver = nullptr;
+    float m_vr_ui_scroll = 0.f;
+    u32 m_vr_ui_scroll_time = 0;
+    xr_vector<u16> m_vr_nearby_items;
+    u32 m_vr_nearby_frame = 0;
 	CPHCommander* m_ph_commander = nullptr;
 	CPHCommander* m_ph_commander_scripts = nullptr;
 	CPHCommander* m_ph_commander_physics_worldstep = nullptr;
@@ -226,6 +232,19 @@ public:
 	virtual void OnEvent(EVENT E, u64 P1, u64 P2);
 	virtual void _BCL OnFrame(void);
 	virtual void OnRender();
+	void OnRenderVrExtras() override;
+    // Takeable world items near the tracked head, nearest first.
+    const xr_vector<u16>& VrNearbyItems();
+    void VrRenderItemLabels();
+    void VrRenderOverlayUI();
+    const void* VrBodyCamera(Fmatrix& world) override;
+    void VrConstrainHead(const Fvector& anchor, Fvector& desired) override;
+    void VrQuickSave() override;
+    bool VrInventoryOpen() const override;
+    void VrToggleInventory() override;
+    bool VrUiPointerActive() const override;
+    bool VrUiPointer(float u, float v, int button, int right) override;
+    bool VrOutfitHands() const override;
 
 	enum DBG_RENDER_FLAGS
 	{

@@ -14,6 +14,10 @@ CUIDialogWnd::CUIDialogWnd()
 
 CUIDialogWnd::~CUIDialogWnd()
 {
+	// Never leave a dangling pointer on a holder's input stack: the next
+	// holder update would call into freed memory.
+	if (m_pParentHolder && CDialogHolder::IsAlive(m_pParentHolder))
+		m_pParentHolder->ForgetDialog(this);
 }
 
 void CUIDialogWnd::Show(bool status)

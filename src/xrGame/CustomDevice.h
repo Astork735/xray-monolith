@@ -55,6 +55,8 @@ public:
 
 	virtual void render_item_3d_ui();
 	virtual bool render_item_3d_ui_query();
+	// VR: the first-person show and hide are not seen; finish one at once.
+	void VrSkipAnimation();
 
 	bool m_bZoomed;
 	bool m_CustomDeviceEnabled;

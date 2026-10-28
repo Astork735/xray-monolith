@@ -25,6 +25,10 @@ public:
 	void PlayAnimCloseWeapon();
 
 	virtual bool Action(u16 cmd, u32 flags);
+	// VR: single shells go into the tube through the loading port.
+	bool VrShellLoader() const override { return true; }
+	bool VrHasShell() override { return HaveCartridgeInInventory(1); }
+	bool VrLoadShell() override;
 	//virtual	int		GetCurrentFireMode	() { return m_aFireModes[m_iCurFireMode]; }; //AVO: this is already implemented in paremnt class (CWeaponMagazined)
 
 protected:

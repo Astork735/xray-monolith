@@ -8,6 +8,15 @@ ui_core& UI() { return *GamePersistent().m_pUI_core; };
 
 extern ENGINE_API Fvector2 g_current_font_scale;
 
+float ui_core::VrGlyphWidth()
+{
+	// The VR UI texture is shown at 4:3 whatever its own shape (see
+	// vr::kUiPanelAspect), so its pixels are not square there: glyphs, drawn
+	// at their pixel widths, are narrowed by as much to keep their shape.
+	if (!g_vr_owns_present || !Device.dwHeight) return 1.f;
+	return float(Device.dwWidth) / float(Device.dwHeight) * (UI_BASE_HEIGHT / UI_BASE_WIDTH);
+}
+
 void S2DVert::rotate_pt(const Fvector2& pivot, const float cosA, const float sinA, const float kx)
 {
 	Fvector2 t = pt;
@@ -227,7 +236,7 @@ ui_core::ui_core()
 	OnDeviceReset();
 
 	m_current_scale = &m_scale_;
-	g_current_font_scale.set(1.0f, 1.0f);
+	g_current_font_scale.set(VrGlyphWidth(), 1.0f);
 	m_currentPointType = IUIRender::pttTL;
 }
 
@@ -251,7 +260,7 @@ void ui_core::pp_start()
 
 	m_current_scale = &m_pp_scale_;
 
-	g_current_font_scale.set(float(::Render->getTarget()->get_width()) / float(Device.dwWidth),
+	g_current_font_scale.set(VrGlyphWidth() * float(::Render->getTarget()->get_width()) / float(Device.dwWidth),
 	                         float(::Render->getTarget()->get_height()) / float(Device.dwHeight));
 }
 
@@ -259,7 +268,7 @@ void ui_core::pp_stop()
 {
 	m_bPostprocess = false;
 	m_current_scale = &m_scale_;
-	g_current_font_scale.set(1.0f, 1.0f);
+	g_current_font_scale.set(VrGlyphWidth(), 1.0f);
 }
 
 void ui_core::RenderFont()
@@ -286,6 +295,9 @@ float ui_core::get_current_kx()
 	// the world space pass and a map update made for it use no screen aspect
 	ui_core* core = GamePersistent().m_pUI_core;
 	if (core && (core->m_currentPointType == IUIRender::pttLIT || core->m_bAspectNeutral))
+		return 1.0f;
+	// VR shows the UI at 4:3 (vr::kUiPanelAspect): no widescreen correction.
+	if (g_vr_owns_present)
 		return 1.0f;
 
 	float h = float(Device.dwHeight);

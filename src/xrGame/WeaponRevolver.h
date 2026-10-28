@@ -7,6 +7,7 @@ class CWeaponRevolver :
 	typedef CWeaponCustomPistol inherited;
 public:
 	CWeaponRevolver();
+    bool VrPhysicalMechanismAvailable() const override { return false; }
 	virtual ~CWeaponRevolver();
 
 	virtual void Load(LPCSTR section);

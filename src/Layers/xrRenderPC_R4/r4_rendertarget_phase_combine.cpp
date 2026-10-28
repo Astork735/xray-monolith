@@ -56,6 +56,15 @@ void CRenderTarget::phase_combine()
 		// clang-format off
 		gpu_id = (Device.dwFrame - 1) % HW.Caps.iGPUNum;
 	}
+	// VR: only the first eye adapts (phase_luminance); the other passes read
+	// its result, which its swap below left in slot 0, and keep the history.
+	const bool vr_shared_exposure = g_vr_rendering_eye && g_vr_eye_index != 0;
+	if (vr_shared_exposure)
+	{
+		t_LUM_src->surface_set(rt_LUM_pool[gpu_id * 2 + 0]->pSurface);
+		t_LUM_dest->surface_set(rt_LUM_pool[gpu_id * 2 + 0]->pSurface);
+	}
+	else
 	{
 		t_LUM_src->surface_set(rt_LUM_pool[gpu_id * 2 + 0]->pSurface);
 		t_LUM_dest->surface_set(rt_LUM_pool[gpu_id * 2 + 1]->pSurface);
@@ -94,7 +103,7 @@ void CRenderTarget::phase_combine()
 			Matrix_current.set(Device.mProject);
 			m_saved_viewproj.set(Device.mFullTransform);
 		}
-		float scale = ps_r2_mblur / 2.f;
+		float scale = g_vr_rendering_eye ? 0.f : ps_r2_mblur / 2.f;
 		m_blur_scale.set(scale, -scale).div(12.f);
 	}
 
@@ -178,7 +187,7 @@ void CRenderTarget::phase_combine()
 		m_previous.mul(m_saved_viewproj, Device.mInvView);
 		m_current.set(Device.mProject);
 		m_saved_viewproj.set(Device.mFullTransform);
-		float scale = ps_r2_mblur / 2.f;
+		float scale = g_vr_rendering_eye ? 0.f : ps_r2_mblur / 2.f;
 		m_blur_scale.set(scale, -scale).div(12.f);
 	}*/
 
@@ -421,7 +430,7 @@ void CRenderTarget::phase_combine()
 		//	TODO: DX10: CHeck this!
 		//g_pGamePersistent->Environment().RenderClouds	();
 		RImplementation.render_forward();
-		if (g_pGamePersistent) g_pGamePersistent->OnRenderPPUI_main(); // PP-UI
+		if (!g_vr_rendering_eye && g_pGamePersistent) g_pGamePersistent->OnRenderPPUI_main(); // PP-UI
 	}
 
 	//	Igor: for volumetric lights
@@ -483,7 +492,7 @@ void CRenderTarget::phase_combine()
 			RCache.set_ColorWriteEnable();
 			//CHK_DX(HW.pDevice->Clear	( 0L, NULL, D3DCLEAR_TARGET, color_rgba(127,127,0,127), 1.0f, 0L));
 			RImplementation.r_dsgraph_render_distort();
-			if (g_pGamePersistent) g_pGamePersistent->OnRenderPPUI_PP(); // PP-UI
+			if (!g_vr_rendering_eye && g_pGamePersistent) g_pGamePersistent->OnRenderPPUI_PP(); // PP-UI
 		}
 	}
 
@@ -516,7 +525,8 @@ void CRenderTarget::phase_combine()
 		phase_ssfx_motion_blur();
 	}
 
-	if (scope_3D_fake_enabled)
+	// The flat-screen scope passes; VR draws its own lens and red dot.
+	if (scope_3D_fake_enabled && !g_vr_rendering_eye)
 	{
 		phase_3DSSReticle(); // Redotix99: for 3D Shader Based Scopes
 	}
@@ -562,7 +572,7 @@ void CRenderTarget::phase_combine()
 		phase_heatvision();
 	//--DSR-- HeatVision_end
 
-	if (scope_fake_enabled)
+	if (scope_fake_enabled && !g_vr_rendering_eye)
 	{
 		phase_fakescope(); //crookr
 	}
@@ -743,7 +753,7 @@ void CRenderTarget::phase_combine()
 
 	//*** exposure-pipeline-clear
 	{
-		std::swap(rt_LUM_pool[gpu_id * 2 + 0], rt_LUM_pool[gpu_id * 2 + 1]);
+		if (!vr_shared_exposure) std::swap(rt_LUM_pool[gpu_id * 2 + 0], rt_LUM_pool[gpu_id * 2 + 1]);
 		t_LUM_src->surface_set(NULL);
 		t_LUM_dest->surface_set(NULL);
 	}

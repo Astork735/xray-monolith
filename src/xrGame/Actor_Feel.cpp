@@ -156,6 +156,9 @@ CActor::pickup_result_t CActor::PickupModeUpdate()
 
 void CActor::DrawPickupItems()
 {
+	// VR names the items in the world, on each one (CLevel::VrRenderItemLabels);
+	// these are placed with the flat camera on the head-locked panel.
+	if (g_vr_owns_present) return;
 	CFrustum frustum;
 	frustum.CreateFromMatrix(Device.mFullTransform, FRUSTUM_P_LRTB | FRUSTUM_P_FAR);
 

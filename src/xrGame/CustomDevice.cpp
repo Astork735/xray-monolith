@@ -32,7 +32,9 @@ bool CCustomDevice::CheckCompatibilityInt(CHudItem* itm, u16* slot_to_activate)
 
 	CInventoryItem& iitm = itm->item();
 	u32 slot = iitm.BaseSlot();
-	bool bres = (slot == INV_SLOT_2 || slot == KNIFE_SLOT || slot == BOLT_SLOT); // || iitm.AllowDevice();
+	// In VR the device and the weapon are in different hands, so it goes
+	// beside any of them.
+	bool bres = g_vr_owns_present || (slot == INV_SLOT_2 || slot == KNIFE_SLOT || slot == BOLT_SLOT); // || iitm.AllowDevice();
 	if (!bres && slot_to_activate)
 	{
 		*slot_to_activate = NO_ACTIVE_SLOT;
@@ -862,6 +864,14 @@ void CCustomDevice::on_a_hud_attach()
 
 	if (nullptr == m_ui)
 		CreateUI();
+}
+
+void CCustomDevice::VrSkipAnimation()
+{
+	const u32 state = GetState();
+	if ((state != eShowing && state != eHiding) || GetNextState() != state) return;
+	StopCurrentAnimWithoutCallback();
+	OnAnimationEnd(state);
 }
 
 bool CCustomDevice::render_item_3d_ui_query()

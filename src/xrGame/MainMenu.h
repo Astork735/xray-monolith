@@ -52,6 +52,7 @@ class CMainMenu :
 
 {
 	CUIDialogWnd* m_startDialog;
+    CUIDialogWnd* m_vr_pressed_receiver = nullptr;
 
 
 	enum
@@ -138,6 +139,7 @@ public:
 
 	virtual void Activate(bool bActive);
 	virtual bool IsActive();
+    bool VrPointer(float u, float v, int button) override;
 	virtual bool CanSkipSceneRendering();
 
 	virtual bool IgnorePause() { return true; }

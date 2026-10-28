@@ -51,6 +51,8 @@ public:
 
 	DEFINE_MAP_PRED(const char*, SPS*, map_PS, map_PSIt, str_pred);
 	DEFINE_MAP_PRED(const char*, texture_detail, map_TD, map_TDIt, str_pred);
+	// Read-only, for checks over every render target (VR scope view).
+	const map_RT& RenderTargets() const { return m_rtargets; }
 private:
 	// data
 	map_Blender m_blenders;

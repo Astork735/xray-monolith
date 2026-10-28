@@ -17,6 +17,8 @@
 #include "alife_registry_container.h"
 #include "xrserver.h"
 #include "level.h"
+#include "Actor.h"
+#include "VrWeaponInteraction.h"
 #include "../xrEngine/x_ray.h"
 #include "saved_game_wrapper.h"
 #include "string_table.h"
@@ -245,6 +247,8 @@ void CALifeStorageManager::save(NET_Packet& net_packet)
 void CALifeStorageManager::prepare_objects_for_save()
 {
 	PROF_EVENT();
+	if (auto* actor=smart_cast<CActor*>(Level().CurrentControlEntity()))
+		PrepareVrWeaponSave(*actor);
 	Level().ClientSend();
 	Level().ClientSave();
 }

@@ -134,6 +134,9 @@ void CWeaponRPG7::switch2_Fire()
 				d.normalize_safe();
 			}
 		}
+		// VR: along the tracked launcher, not the body camera's pick.
+		Fmatrix vr_world;
+		if (VrAimTransform(vr_world)) { p.set(get_LastFP()); d.set(get_LastFD()); }
 
 		Fmatrix launch_matrix;
 		launch_matrix.identity();

@@ -530,6 +530,7 @@ Shader* CResourceManager::_lua_Create(LPCSTR d_shader, LPCSTR s_textures)
 
 	// Prepare
 	_ParseList(C.L_textures, s_textures);
+	C.VrSight = CBlender_Compile::IsVrSight(d_shader, s_textures);
 	C.detail_texture = NULL;
 	C.detail_scaler = NULL;
 
@@ -619,6 +620,7 @@ ShaderElement* CBlender_Compile::_lua_Compile(LPCSTR namesp, LPCSTR name)
 {
 	ShaderElement E;
 	SH = &E;
+	if (VrSight && iElement < 2) SH->flags.bVrSight = TRUE;
 	RS.Invalidate();
 
 	// Compile

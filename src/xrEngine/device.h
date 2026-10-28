@@ -508,6 +508,61 @@ private:
 
 extern ENGINE_API CRenderDevice Device;
 
+// Set while native OpenXR VR owns the headset and render resolution.
+// The desktop swapchain remains a nonblocking mirror. False outside VR.
+extern ENGINE_API bool g_vr_owns_present;
+
+// Called by the render layer (which owns CHW) once the D3D11 device exists, to
+// enter native OpenXR VR if it was requested. width/height/dxgi_format describe
+// the desktop backbuffer; eye dimensions come from OpenXR. Returns true when a VR
+// session was started. Always compiled; returns false otherwise.
+extern ENGINE_API bool vr_engine_start(void* d3d11_device, unsigned width, unsigned height, int dxgi_format);
+
+// Renderer/engine boundary, kept free of OpenXR and D3D types for other backends.
+extern ENGINE_API bool vr_engine_prepare(unsigned long& low, long& high, unsigned& minimum_feature);
+extern ENGINE_API void vr_engine_stop();
+extern ENGINE_API void vr_engine_dimensions(unsigned& width, unsigned& height);
+extern ENGINE_API bool vr_render_target(void* target, unsigned width, unsigned height);
+extern ENGINE_API void vr_mirror(void* target, bool overlay);
+extern ENGINE_API void vr_world_overlay();
+// The colour (ARGB) of the overlay's next lines and faces: its shader takes
+// the colour from a constant rather than the vertices (vr::OverlayDraw).
+extern ENGINE_API void vr_world_overlay_color(u32 color);
+// Binds the magnified scope's view target (created on demand).
+extern ENGINE_API bool vr_scope_target(unsigned width, unsigned height);
+// The scope's view renders at size x size between begin and end: the
+// renderer's screen-sized targets and the device's size are swapped for
+// smaller ones. False when that is not possible (render at eye size).
+extern ENGINE_API bool vr_scope_resize_begin(unsigned size);
+extern ENGINE_API void vr_scope_resize_end();
+// Draws the scope's view on a disc into the current eye: clip holds the four
+// corners in clip space (top-left, top-right, bottom-left, bottom-right);
+// params: brightness, offset x/y, unused, and mode (0 lens, 1 red dot).
+extern ENGINE_API void vr_scope_lens(const float* clip, const float* params);
+// Darkens the current eye beyond a view angle: params are the projection's
+// _11, _22, _31, _32, the strength (0..1), and a uniform fade to black over
+// the whole eye (0..1; a head inside a wall).
+extern ENGINE_API void vr_comfort_vignette(const float* params);
+// Copies the current eye's depth buffer into the runtime's depth image
+// (ID3D11Texture2D of the same size, D24S8 family).
+extern ENGINE_API void vr_copy_eye_depth(void* texture);
+extern ENGINE_API void vr_renderer_mode(bool enabled);
+extern ENGINE_API void vr_renderer_release();
+extern ENGINE_API bool g_vr_rendering_eye;
+extern ENGINE_API bool g_vr_eye_rendered;
+// Sun shadow cascades shared by the eyes (vr_shared_shadows): 0 each pass
+// fits and renders its own (desktop, the scope view), 1 the first eye fits
+// them to g_vr_shadow_view/project and keeps them, 2 the second eye reuses
+// what the first kept this frame.
+extern ENGINE_API int g_vr_shadow_share;
+// The eye being drawn (0, 1), or -1 (desktop, the scope view). The first eye
+// advances the shared exposure (eye adaptation); the rest use its result.
+extern ENGINE_API int g_vr_eye_index;
+// The VR UI layer is the bound target: UI blending there keeps coverage in
+// the alpha channel the compositor blends the layer with.
+extern ENGINE_API bool g_vr_ui_pass;
+extern ENGINE_API Fmatrix g_vr_shadow_view, g_vr_shadow_project;
+
 #ifndef _EDITOR
 #define RDEVICE Device
 #else

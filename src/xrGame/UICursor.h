@@ -21,6 +21,7 @@ public:
 
 	Fvector2 GetCursorPosition();
 	void SetUICursorPosition(Fvector2 pos);
+    void SetVrCursorPosition(Fvector2 pos);
 	void UpdateCursorPosition(int _dx, int _dy);
 	virtual void OnScreenResolutionChanged();
 

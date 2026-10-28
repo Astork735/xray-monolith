@@ -40,6 +40,8 @@
 #include "MainMenu.h"
 #include "xrEngine/XR_IOConsole.h"
 #include "actor.h"
+#include "PhysicsShellHolder.h"
+#include "../xrPhysics/PhysicsShell.h"
 #include "player_hud.h"
 #include "UI/UIGameTutorial.h"
 #include "file_transfer.h"
@@ -50,10 +52,29 @@
 #include "xrPhysics/IPHWorld.h"
 #include "xrPhysics/console_vars.h"
 #include "../xrEngine/device.h"
+#include "../xrEngine/CameraBase.h"
+#include "../xrEngine/Vr/vr_gameplay.h"
+#include "../xrEngine/Vr/vr_gameplay_policy.h"
+#include "../xrEngine/Vr/vr_hand_render.h"
+#include "../xrPhysics/ActorCameraCollision.h"
+#include "../Include/xrRender/DrawUtils.h"
+#include "../xrEngine/Vr/vr_overlay_draw.h"
+#include "UsableScriptObject.h"
 
 #include "UIGameCustom.h"
+#include "ui/UIActorMenu.h"
+#include "ui/UIDialogWnd.h"
 #include "ui/UIPdaWnd.h"
 #include "UICursor.h"
+#include "xr_level_controller.h"
+#include "VrWeaponInteraction.h"
+#include "VrBodySlots.h"
+#include "VrWristDisplay.h"
+#include "ui_base.h"
+#include "../xrCDB/ISpatial.h"
+#include "../Include/xrRender/RenderVisual.h"
+#include "../xrEngine/vis_common.h"
+#include "../xrEngine/GameFont.h"
 #include "debug_renderer.h"
 #include "LevelDebugScript.h"
 #include "script_attachment_manager.h"
@@ -1178,6 +1199,9 @@ void CLevel::OnFrame()
 
 	for (auto& pair : m_script_attachments)
 		pair.second->Update();
+
+	if (auto* actor = smart_cast<CActor*>(CurrentControlEntity()))
+		VrSnapHeldItems(*actor);
 }
 
 int psLUA_GCSTEP = 300;
@@ -1230,13 +1254,375 @@ extern void render_reshade_effects();
 
 extern int ps_r4_hdr10_pda; // NOTE: this is a hack to avoid double HDR tonemapping the PDA
 
+bool CLevel::VrInventoryOpen() const
+{
+    return CurrentGameUI() && CurrentGameUI()->GetActorMenu().IsShown();
+}
+
+void CLevel::VrToggleInventory()
+{
+    if (!CurrentGameUI()) return;
+    // Closing must work while the inventory has paused actor simulation.
+    // Anomaly's backpack, loot and trade windows are script dialogs rather
+    // than the native ActorMenu, so close any open level dialog through the
+    // same inventory key press a desktop player would use.
+    if (CUIDialogWnd* open=CurrentGameUI()->TopInputReceiver())
+    {
+        m_vr_ui_pressed_receiver=nullptr;
+        const int escape=0x01; // DIK_ESCAPE
+        const int inventory=get_action_dik(kINVENTORY);
+        // Dialogs that ignore the inventory key (NPC conversation, some
+        // script windows) still close on Escape, so X is never a dead button.
+        for (const int dik:{inventory ? inventory : escape,escape})
+        {
+            CurrentGameUI()->IR_UIOnKeyboardPress(dik);
+            CurrentGameUI()->IR_UIOnKeyboardRelease(dik);
+            if (CurrentGameUI()->TopInputReceiver()!=open) break;
+        }
+        if (VrInventoryOpen()) CurrentGameUI()->ShowActorMenu();
+        return;
+    }
+    if (VrInventoryOpen())
+    {
+        m_vr_ui_pressed_receiver=nullptr;
+        CurrentGameUI()->ShowActorMenu();
+        return;
+    }
+    CActor* actor=smart_cast<CActor*>(CurrentControlEntity());
+    if (!actor || CurrentViewEntity()!=actor || !actor->g_Alive() ||
+        actor->Remote() || actor->inventory_disabled()) return;
+    CurrentGameUI()->ShowActorMenu();
+}
+
+bool CLevel::VrUiPointerActive() const
+{
+    if (!CurrentGameUI() || Console->bVisible) return false;
+    CUIDialogWnd* target=CurrentGameUI()->TopInputReceiver();
+    if (!target && VrInventoryOpen()) target=&CurrentGameUI()->GetActorMenu();
+    return target && target->IsShown() && target->IsEnabled() && target->NeedCursor();
+}
+
+bool CLevel::VrUiPointer(float u, float v, int button, int right)
+{
+    CUIDialogWnd* target=CurrentGameUI() ? CurrentGameUI()->TopInputReceiver() : nullptr;
+    // Actor inventory, NPC conversation, trading, upgrades, and other level
+    // dialogs share the same holder and cursor input route.
+    if (!target && VrInventoryOpen())
+        target=&CurrentGameUI()->GetActorMenu();
+    if (!target || !target->IsShown() || !target->IsEnabled() || !target->NeedCursor() ||
+        Console->bVisible)
+    {
+        m_vr_ui_pressed_receiver=nullptr;
+        return false;
+    }
+    if (m_vr_ui_pressed_receiver!=target)
+        m_vr_ui_pressed_receiver=nullptr;
+    const bool valid=u>=0 && u<=1 && v>=0 && v<=1;
+    Fvector2 position;
+    position.set(valid ? u*UI_BASE_WIDTH : -1.f,valid ? v*UI_BASE_HEIGHT : -1.f);
+    if (valid) GetUICursor().SetVrCursorPosition(position);
+    target->OnMouseAction(position.x,position.y,WINDOW_MOUSE_MOVE);
+    // Right stick up/down scrolls the window under the cursor: one step at
+    // once, then repeating faster the further the stick is pushed.
+    const float scroll=vr::UiScrollAxis();
+    const u32 now=Device.dwTimeContinual;
+    const float dt=std::min(0.1f,float(now-m_vr_ui_scroll_time)*0.001f);
+    m_vr_ui_scroll_time=now;
+    if (!valid || _abs(scroll)<0.3f) m_vr_ui_scroll=0.f;
+    else if (m_vr_ui_scroll==0.f) m_vr_ui_scroll=scroll>0.f ? 1.f : -1.f;
+    else m_vr_ui_scroll+=scroll*dt*12.f;
+    while (valid && _abs(m_vr_ui_scroll)>=1.f)
+    {
+        const bool up=m_vr_ui_scroll>0.f;
+        m_vr_ui_scroll+=up ? -1.f : 1.f;
+        if (m_vr_ui_scroll==0.f) m_vr_ui_scroll=up ? 1e-4f : -1e-4f;
+        target->OnMouseAction(position.x,position.y,up ? WINDOW_MOUSE_WHEEL_UP : WINDOW_MOUSE_WHEEL_DOWN);
+    }
+    CUIDialogWnd* current=CurrentGameUI()->TopInputReceiver();
+    if (current && current!=target)
+    {
+        m_vr_ui_pressed_receiver=nullptr;
+        return false;
+    }
+    if (button>0 && valid)
+    {
+        m_vr_ui_pressed_receiver=target;
+        // Follow the ordinary mouse input path, including dialog keyboard
+        // callbacks and inventory drag capture.
+        CurrentGameUI()->IR_UIOnKeyboardPress(MOUSE_1);
+    }
+    else if (button<0 && m_vr_ui_pressed_receiver==target)
+    {
+        m_vr_ui_pressed_receiver=nullptr;
+        if (valid) CurrentGameUI()->IR_UIOnKeyboardRelease(MOUSE_1);
+        else target->OnMouseAction(-1,-1,WINDOW_LBUTTON_UP);
+    }
+    // A or B: the right mouse button (the inventory's item menu).
+    if (right>0 && valid) CurrentGameUI()->IR_UIOnKeyboardPress(MOUSE_2);
+    else if (right<0)
+    {
+        // Let go off the panel (or with the hand lost) is still a release,
+        // at off-panel coordinates, or the right button stays down.
+        if (valid) CurrentGameUI()->IR_UIOnKeyboardRelease(MOUSE_2);
+        else target->OnMouseAction(-1,-1,WINDOW_RBUTTON_UP);
+    }
+    return true;
+}
+
+bool CLevel::VrOutfitHands() const
+{
+    auto* actor=smart_cast<CActor*>(CurrentControlEntity());
+    return actor && actor->m_legs_controller.vr_outfit_arms();
+}
+
+const void* CLevel::VrBodyCamera(Fmatrix& world)
+{
+    CActor* actor = smart_cast<CActor*>(CurrentControlEntity());
+    if (!actor || CurrentViewEntity() != actor || !actor->g_Alive() || !actor->Ready() || actor->Holder()) return nullptr;
+    CCameraBase* camera = actor->cam_FirstEye();
+    world.identity(); world.c = camera->Position(); world.k = camera->Direction();
+    world.c.y += actor->VrCrouchLift(Device.fTimeDelta);
+    world.k.y = 0;
+    if (world.k.square_magnitude() < EPS_S) world.k.set(0,0,1);
+    world.k.normalize(); world.i.crossproduct(world.j, world.k);
+    return actor;
+}
+void CLevel::VrQuickSave()
+{
+    // As the quick save key, so the game's own save script handles it (and
+    // can refuse it, as during a conversation or in combat).
+    CActor* actor = smart_cast<CActor*>(CurrentControlEntity());
+    const int dik = get_action_dik(kQUICK_SAVE);
+    if (!actor || !actor->g_Alive() || !dik) return;
+    IR_OnKeyboardPress(dik);
+    IR_OnKeyboardRelease(dik);
+    Msg("* [VR] menu held: quick save");
+}
+void CLevel::VrConstrainHead(const Fvector& anchor, Fvector& desired)
+{
+    CActor* actor = smart_cast<CActor*>(CurrentControlEntity());
+    if (!actor) { desired = anchor; return; }
+    Fvector delta; delta.sub(desired, anchor);
+    const float distance = delta.magnitude();
+    const float limit = vr::MaxHeadOffset();
+    if (distance > limit && distance > EPS_S) delta.mul(limit / distance);
+    const float safe = vr::HeadSweepFraction(delta.magnitude(), [&](float fraction)
+    {
+        Fmatrix box; box.identity(); box.c.mad(anchor, delta, fraction);
+        return test_head_box(0.12f, box, actor);
+    });
+    desired.mad(anchor, delta, safe);
+}
+const xr_vector<u16>& CLevel::VrNearbyItems()
+{
+    if (m_vr_nearby_frame==Device.dwFrame) return m_vr_nearby_items;
+    m_vr_nearby_frame=Device.dwFrame;
+    m_vr_nearby_items.clear();
+    auto* actor=smart_cast<CActor*>(CurrentControlEntity());
+    Fvector head;
+    if (!actor || !actor->g_Alive() || actor->Holder() || !vr::HeadPosition(head))
+        return m_vr_nearby_items;
+    xr_vector<ISpatial*> found;
+    g_SpatialSpace->q_sphere(found,0,STYPE_COLLIDEABLE,head,1.8f);
+    xr_vector<std::pair<float,u16>> ranked;
+    for (ISpatial* spatial:found)
+    {
+        CObject* object=spatial->dcast_CObject();
+        auto* item=object ? smart_cast<CInventoryItem*>(object) : nullptr;
+        if (!item || object->H_Parent() || !object->getVisible() || object->getDestroy() ||
+            !object->Visual() || !item->CanTake()) continue;
+        ranked.emplace_back(object->Position().distance_to_sqr(head),object->ID());
+    }
+    std::sort(ranked.begin(),ranked.end());
+    for (const auto& entry:ranked)
+    {
+        if (m_vr_nearby_items.size()>=6) break;
+        // Not named through a wall or floor: only items the head can see.
+        CObject* object=Objects.net_Find(entry.second);
+        if (!object) continue;
+        Fvector centre; object->Center(centre);
+        Fvector direction; direction.sub(centre,head);
+        const float distance=direction.magnitude();
+        collide::rq_result wall;
+        if (distance>EPS_S && ObjectSpace.RayPick(head,direction.div(distance),distance,
+            collide::rqtStatic,wall,nullptr)) continue;
+        m_vr_nearby_items.push_back(entry.second);
+    }
+    return m_vr_nearby_items;
+}
+
+void CLevel::VrRenderItemLabels()
+{
+    if (!g_vr_owns_present || !vr::GameplayActive() ||
+        (CurrentGameUI() && CurrentGameUI()->TopInputReceiver())) return;
+    CGameFont* font=UI().Font().pFontArial14;
+    if (!font) return;
+    font->SetAligment(CGameFont::alCenter);
+    font->SetColor(0xFFF2E7B8);
+    // Only names mark pickable items, and none for an item already in a hand.
+    auto* actor=smart_cast<CActor*>(CurrentControlEntity());
+    for (u16 id:VrNearbyItems())
+    {
+        if (actor && (id==actor->m_vr_pickup.grabbed_id[0] || id==actor->m_vr_pickup.grabbed_id[1]))
+            continue;
+        CObject* object=Objects.net_Find(id);
+        auto* item=object ? smart_cast<CInventoryItem*>(object) : nullptr;
+        if (!item || !object->Visual()) continue;
+        Fbox box; box.xform(object->Visual()->getVisData().box,object->XFORM());
+        Fvector top; box.getcenter(top); top.y=box.max.y+0.06f;
+        // Drawn into each eye with that eye's projection, so the name sits
+        // on the item at its depth instead of on the head-locked UI panel.
+        // Fmatrix::transform into an Fvector4 has already divided x and y by
+        // w (dividing again slid the names toward the view centre with
+        // distance, and moved them as the head moved).
+        Fvector4 clip;
+        Device.mFullTransform.transform(clip,top);
+        if (clip.w<0.05f) continue;
+        const float x=clip.x, y=clip.y;
+        if (_abs(x)>1.f || _abs(y)>1.f) continue;
+        font->Out((x+1.f)*0.5f*float(Device.dwWidth),(1.f-y)*0.5f*float(Device.dwHeight),
+            "%s",item->NameShort());
+    }
+    font->OnRender();
+}
+
+void CLevel::OnRenderVrExtras()
+{
+    if (game) BulletManager().Render();
+    if (!vr::GameplayActive()) return;
+    VrRenderItemLabels();
+    vr_world_overlay();
+    // Pouch and holsters show a single ring only while a hand is within
+    // their reach: the pouch for the support hand (with ammunition to draw),
+    // a holster for the hand holding its weapon (to put it away) or an empty
+    // hand (to draw it).
+    const auto ring=[](const Fvector& centre, float radius, u32 color)
+    {
+        Fvector previous;
+        for (int segment=0;segment<=32;++segment)
+        {
+            const float angle=PI_MUL_2*float(segment)/32.f;
+            Fvector point=centre;
+            point.x+=radius*_cos(angle); point.z+=radius*_sin(angle);
+            if (segment) vr::OverlayDraw().DrawLine(previous,point,color);
+            previous=point;
+        }
+    };
+    if (auto* actor=smart_cast<CActor*>(CurrentControlEntity()); actor && actor->g_Alive())
+    {
+        auto* active=smart_cast<CWeapon*>(actor->inventory().ActiveItem());
+        // The pouch is there only while a weapon is in the hand.
+        auto* pouch_weapon=active;
+        const int support=active ? 1-active->VrWeaponHand() : 1-vr::DominantHand();
+        const Fvector pouch=VrHipPoint(*actor,support==1);
+        Fmatrix hand;
+        if (pouch_weapon && pouch_weapon->VrPouchHasAmmo() && vr::HandTransform(support,false,hand) &&
+            hand.c.distance_to(pouch)<0.28f)
+            ring(pouch,0.11f,0xFFFFD870);
+        for (u16 slot:{INV_SLOT_2,INV_SLOT_3})
+        {
+            auto* weapon=smart_cast<CWeapon*>(actor->inventory().ItemFromSlot(slot));
+            Fvector centre;
+            float range=0.f;
+            if (!weapon || !weapon->VrHolsterPoint(*actor,centre,range)) continue;
+            bool in_reach=false;
+            if (active==weapon)
+                in_reach=vr::HandTransform(weapon->VrWeaponHand(),false,hand) && hand.c.distance_to(centre)<=range;
+            else if (!active)
+                for (int side=0;side<2 && !in_reach;++side)
+                    in_reach=vr::HandTransform(side,false,hand) && hand.c.distance_to(centre)<=range;
+            if (in_reach) ring(centre,0.1f,0xFF7CFF8E);
+        }
+        // Body slots: a small ring at the slot a free hand is within reach of.
+        if (vr::BodySlotRings())
+            for (int side=0;side<2;++side)
+            {
+                Fvector centre;
+                const int kind=actor->m_vr_pickup.body_hover[side];
+                if (kind>=0 && VrBodySlotPoint(*actor,kind,centre)) ring(centre,0.06f,0xFF8EC8FF);
+            }
+        RenderVrWristDisplay(*actor);
+        RenderVrDeviceUI(*actor);
+        RenderVrBinoculars(*actor);
+    }
+    if (auto* actor=smart_cast<CActor*>(CurrentControlEntity()))
+        for (auto* item:actor->inventory().m_all)
+            if (auto* weapon=item->cast_weapon())
+                weapon->VrRenderBasicMagazines();
+    if (auto* actor=smart_cast<CActor*>(CurrentControlEntity()))
+        if (auto* weapon=smart_cast<CWeapon*>(actor->inventory().ActiveItem()))
+            weapon->VrRenderSight();
+    if (vr::HandsVisible() && !VrOutfitHands())
+    {
+        Fmatrix body, hands[2];
+        if (VrBodyCamera(body))
+        {
+            const bool tracked[2]={vr::HandTransform(0,false,hands[0]),
+                                   vr::HandTransform(1,false,hands[1])};
+            const vr::OverlayDraw draw;
+            vr::DrawBodyIK(draw,body,hands,tracked);
+        }
+    }
+    if (!vr::HandRaysVisible()) return;
+    CObject* actor = CurrentControlEntity();
+    for (int hand = 0; hand < 2; ++hand)
+    {
+        if (vr::HandHiddenForFrame(hand)) continue;
+        Fmatrix aim;
+        if (!vr::HandTransform(hand, true, aim)) continue;
+        collide::rq_result hit;
+        const bool found = ObjectSpace.RayPick(aim.c, aim.k, 2.f, collide::rqtBoth, hit, actor) != FALSE;
+        // Require body-to-hand line of sight too, so a controller cannot point
+        // through a wall after physically reaching through it.
+        Fmatrix body;
+        if (!VrBodyCamera(body)) continue;
+        Fvector to_hand; to_hand.sub(aim.c, body.c);
+        const float hand_distance = to_hand.magnitude();
+        collide::rq_result obstruction;
+        if (hand_distance > vr::MaxHeadOffset() + 1.f) continue;
+        if (hand_distance > EPS_S)
+        {
+            to_hand.div(hand_distance);
+            if (ObjectSpace.RayPick(body.c, to_hand, hand_distance, collide::rqtBoth, obstruction, actor)) continue;
+        }
+        Fvector end; end.mad(aim.c, aim.k, found ? hit.range : 2.f);
+        CGameObject* object = found ? smart_cast<CGameObject*>(hit.O) : nullptr;
+        const auto* item = object ? object->cast_inventory_item() : nullptr;
+        auto* holder = object ? object->cast_physics_shell_holder() : nullptr;
+        const bool pickup = item && holder && holder->PPhysicsShell() &&
+            holder->PPhysicsShell()->isActive() && object->getVisible() &&
+            !object->getDestroy() && !object->H_Parent() && item->CanTake() &&
+            hit.range<=2.f;
+        const bool usable = object && object->getVisible() && object->tip_text();
+        const u32 color = pickup ? 0xff40e878 : usable ? 0xff7190a8 : 0xff304b60;
+        const vr::OverlayDraw draw;
+        draw.DrawLine(aim.c, end, color);
+        if (found) draw.DrawCross(end, pickup ? 0.065f : 0.015f, color);
+        // Mark the pointed-at object's centre as well as the ray impact so
+        // the target remains clear on uneven or partly obscured meshes.
+        if (pickup && object)
+            draw.DrawCross(object->Position(),0.11f,0xff60ff98);
+    }
+}
+
+void CLevel::VrRenderOverlayUI()
+{
+    if (!g_vr_owns_present || !game) return;
+    // Render the HUD and its font atlas on the dedicated head-locked quad,
+    // with the usual postprocess UI scale. Per-eye world render must not
+    // consume glyph batches into the scene's perspective target.
+    UI().pp_start();
+    HUD().RenderUI();
+    UI().pp_stop();
+}
+
 void CLevel::OnRender()
 {
 	// PDA
 	if (game && CurrentGameUI() && &CurrentGameUI()->GetPdaMenu() != nullptr)
 	{
 		CUIPdaWnd* pda = &CurrentGameUI()->GetPdaMenu();
-		if (psActorFlags.test(AF_3D_PDA) && pda->IsShown())
+		if (Pda3D() && pda->IsShown())
 		{
 			ps_r4_hdr10_pda = 1; // !!! HACK !!!
 
@@ -1294,7 +1680,7 @@ void CLevel::OnRender()
 	if (!game)
 		return;
 	Game().OnRender();
-	BulletManager().Render();
+	if (!g_vr_owns_present) BulletManager().Render();
 
 	if (Device.m_SecondViewport.IsSVPFrame())
 		Render->RenderToTarget(Render->rtSVP);
@@ -1302,7 +1688,8 @@ void CLevel::OnRender()
 	if (use_reshade)
 		render_reshade_effects();
 
-	HUD().RenderUI();
+	if (!g_vr_owns_present)
+		HUD().RenderUI();
 
 	ScriptDebugRender();
 
@@ -1411,6 +1798,13 @@ void CLevel::OnRender()
         }
     }
 #endif
+	// The outer level render runs after both stereo eyes have finished and the
+	// UI texture has been rebound. Flush dialogue/HUD font batches here, after
+	// game/script overlays have queued their text, once rather than per eye.
+	if (g_vr_owns_present && !g_vr_rendering_eye &&
+		CurrentGameUI() && g_pGamePersistent &&
+		!(g_pGamePersistent->m_pMainMenu && g_pGamePersistent->m_pMainMenu->IsActive()))
+		VrRenderOverlayUI();
 }
 
 void CLevel::ScriptDebugRender()

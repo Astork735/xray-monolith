@@ -27,6 +27,43 @@ public:
 	};
 
 	u32 dwLightMarkerID;
+	// VR: each sun cascade's shadow map, kept by the first eye for the second
+	// (g_vr_shadow_share). Made on first use from rt_smap_depth's description,
+	// so they always match it; freed with the target (a reset recreates it).
+	ID3DTexture2D* vr_sun_maps[3] = {};
+	Fmatrix vr_sun_combine[3];
+	u32 vr_sun_frame[3] = {u32(-1), u32(-1), u32(-1)};
+	// VR: the magnified scope's view renders at size x size. Between begin
+	// and end every screen-sized target has a smaller twin's surface and
+	// views (made on first use, kept until the size changes), and the device
+	// and this target report that size, so every pass and shader runs
+	// unchanged at it. False (nothing swapped) when a twin cannot be made.
+	bool vr_scope_begin(u32 size);
+	void vr_scope_end();
+private:
+	struct VrScreenTarget
+	{
+		ref_rt* rt;
+		u32 divisor;
+		// The twin's while out, the original's while swapped in.
+		ID3DTexture2D* surface = nullptr;
+		ID3DBaseTexture* texture_surface = nullptr;
+		ID3DRenderTargetView* rtv = nullptr;
+		ID3DDepthStencilView* dsv = nullptr;
+		ID3D11UnorderedAccessView* uav = nullptr;
+		ID3DShaderResourceView* srv = nullptr;
+		u32 width = 0, height = 0;
+	};
+	xr_vector<VrScreenTarget> vr_screen_targets;
+	u32 vr_twin_size = 0, vr_twin_failed = 0;
+	bool vr_twins_in = false;
+	u32 vr_saved_size[2] = {};
+	float vr_saved_half[2] = {};
+	void vr_register_screen_target(ref_rt& rt, u32 divisor);
+	bool vr_make_twins(u32 size);
+	void vr_release_twins();
+	void vr_swap_twins();
+public:
 	//
 	IBlender* b_occq;
 	IBlender* b_accum_mask;

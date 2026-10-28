@@ -91,7 +91,7 @@ void dxFontRender::OnRender(CGameFont& owner)
 					X -= (iFloor(fSize * 0.5f)) * g_current_font_scale.x;
 					break;
 				case CGameFont::alRight:
-					X -= iFloor(fSize);
+					X -= iFloor(fSize * g_current_font_scale.x);
 					break;
 				}
 

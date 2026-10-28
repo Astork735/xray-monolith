@@ -303,6 +303,10 @@ extern u32 g_screenmode;
 
 void CHW::CreateDevice(HWND hwnd, bool move_window)
 {
+#ifdef USE_DX11
+    unsigned long vr_low_probe = 0; long vr_high_probe = 0; unsigned vr_feature_probe = 0;
+    vr_renderer_mode(vr_engine_prepare(vr_low_probe, vr_high_probe, vr_feature_probe));
+#endif
 #if defined(USE_DX10) || defined(USE_DX11)
     m_hWnd = hwnd;
 #endif
@@ -564,18 +568,43 @@ void CHW::CreateDevice(HWND hwnd, bool move_window)
     // create device
     ID3D11Device* device;
     ID3D11DeviceContext* context;
-    R_CHK(D3D11CreateDevice(
-        nullptr,
-        D3D_DRIVER_TYPE_HARDWARE,
-        nullptr,
-        create_device_flags,
-        pFeatureLevels,
-        1,
-        D3D11_SDK_VERSION,
-        &device,
-        &FeatureLevel,
-        &context));
+    unsigned long vr_low = 0;
+    long vr_high = 0;
+    unsigned vr_feature = 0;
+    IDXGIAdapter1* vr_adapter = nullptr;
+    if (vr_engine_prepare(vr_low, vr_high, vr_feature))
+    {
+        for (UINT index = 0; ; ++index)
+        {
+            IDXGIAdapter1* candidate = nullptr;
+            if (m_pFactory->EnumAdapters1(index, &candidate) == DXGI_ERROR_NOT_FOUND) break;
+            if (!candidate) break;
+            DXGI_ADAPTER_DESC1 info{};
+            if (SUCCEEDED(candidate->GetDesc1(&info)) && info.AdapterLuid.LowPart == vr_low && info.AdapterLuid.HighPart == vr_high)
+            { vr_adapter = candidate; break; }
+            candidate->Release();
+        }
+        if (!vr_adapter) Msg("! [VR] required adapter unavailable; session will fall back to desktop");
+    }
+    if (vr_adapter && vr_feature > unsigned(pFeatureLevels[0]))
+        pFeatureLevels[0] = static_cast<D3D_FEATURE_LEVEL>(vr_feature);
+    R = D3D11CreateDevice(
+        vr_adapter,
+        vr_adapter ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE,
+        nullptr, create_device_flags, pFeatureLevels, 1, D3D11_SDK_VERSION,
+        &device, &FeatureLevel, &context);
+    if (FAILED(R) && vr_adapter)
+    {
+        Msg("! [VR] D3D11 device creation on runtime adapter failed: %08x; retrying desktop adapter", R);
+        vr_engine_stop();
+        pFeatureLevels[0] = D3D_FEATURE_LEVEL_11_0;
+        R = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+            create_device_flags, pFeatureLevels, 1, D3D11_SDK_VERSION,
+            &device, &FeatureLevel, &context);
+    }
+    R_CHK(R);
 
+    if (vr_adapter) vr_adapter->Release();
     R_CHK(device->QueryInterface(&pDevice));
     R_CHK(context->QueryInterface(&pContext));
 

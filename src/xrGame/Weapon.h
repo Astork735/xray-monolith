@@ -24,6 +24,8 @@ class CWeaponMagazined;
 class CParticlesObject;
 class CUIWindow;
 class CBinocularsVision;
+class CActor;
+class CVrWeaponInteraction;
 class CNightVisionEffector;
 
 extern float f_weapon_deterioration;
@@ -49,8 +51,10 @@ struct SafemodeAnm
 class CWeapon : public CHudItemObject,
                 public CShootingObject
 {
+    friend class CVrWeaponInteraction;
 private:
 	typedef CHudItemObject inherited;
+    mutable CVrWeaponInteraction* m_vr_interaction = nullptr;
 
 public:
 	CWeapon();
@@ -74,6 +78,63 @@ public:
 	{
 		return 0;
 	}
+
+    // Per-instance VR dispatch. The default component is created only for a
+    // local player weapon with a validated interaction profile.
+    virtual bool VrSupported() const;
+    virtual bool VrMode() const;
+    virtual bool VrTransform(Fmatrix& world) const;
+    virtual bool VrRender();
+    virtual void VrRenderHolster();
+    virtual void VrRenderLooseMagazines();
+    virtual void VrRenderBasicMagazines();
+    virtual void VrUpdateProps();
+    virtual void VrInteract(CActor& actor);
+    virtual bool VrHolsterGrabDistance(CActor& actor, const Fvector& hand, float& distance) const;
+    virtual void VrReleaseInactiveHeld();
+    virtual bool VrLeftHandBusy() const;
+    virtual void VrPrepareSave();
+    virtual void VrPrepareSnapshot();
+    bool VrModularAttachments() const { return m_modular_attachments; }
+    bool VrCanFire() const;
+    bool VrBlockReload() const;
+    bool VrUsesMagazineButton() const;
+    bool VrAimTransform(Fmatrix& world) const;
+    // VR: the weapon is raised to the eye and aimed along (aimed fire).
+    bool VrAiming() const;
+    bool VrHandFrame(Fmatrix& frame) const;
+    bool VrTriggerPoint(Fvector& world) const;
+    bool VrAuthoredHand(int side, struct VrHandPose& pose) const;
+    float VrHandGripRadius() const;
+    bool VrSupporting() const;
+    bool VrBreakAction() const;
+    bool VrShellLoading() const;
+    // Shotguns load single shells from inventory (see CWeaponShotgun).
+    virtual bool VrShellLoader() const { return false; }
+    virtual bool VrHasShell() { return false; }
+    virtual bool VrLoadShell() { return false; }
+    // The weapon's single-cartridge loading sound, for a shell loaded by hand.
+    bool VrPlayShellSound();
+    bool VrGripCloud(const xr_vector<Fvector>*& points, Fmatrix& world, float& ceiling);
+    bool VrHolsterPoint(CActor& actor, Fvector& point, float& range);
+    bool VrSupportHandOverride(Fmatrix& grip) const;
+    int VrWeaponHand() const;
+    bool VrPrepare();
+    void VrRenderSight();
+    bool VrPouchHasAmmo() const;
+    bool VrCollisionBoxes(Fmatrix& world, const xr_vector<Fobb>*& boxes);
+    bool VrPhysicalReload() const;
+    bool VrAuthoredBones(int side, struct VrHandBones& bones) const;
+    void VrSetWeaponHand(int hand);
+    void VrRenderPouch(CActor& actor);
+    // A shot was fired: the weapon kicks in the hands.
+    void VrOnShot();
+    bool VrFillingMagazine() const;
+    bool VrDeferShellDrop() const;
+    void VrCartridgeFired();
+    CVrWeaponInteraction* VrInteraction() const;
+    virtual bool VrPhysicalMechanismAvailable() const { return true; }
+    virtual bool VrUsesGenericInteraction() const { return true; }
 
 	//serialization
 	virtual void save(NET_Packet& output_packet);
@@ -170,6 +231,7 @@ protected:
 	ALife::_TIME_ID m_dwWeaponIndependencyTime;
 
 	virtual bool IsHudModeNow();
+	bool ParticlesInHudMode() override;
 	virtual bool SOParentIsActor() { return ParentIsActor(); }
 	u8 last_idx;
 
@@ -552,6 +614,7 @@ public:
 
 protected:
 	virtual void UpdateFireDependencies_internal();
+	firedeps& MutableFireDependencies() { return m_current_firedeps; }
 	void UpdateUIScope();
 	void SwitchZoomType();
 	void ToggleGrenadeLauncher();
@@ -807,7 +870,8 @@ public:
 	virtual void OnMagazineEmpty();
 	void SpawnAmmo(u32 boxCurr = 0xffffffff,
 	               LPCSTR ammoSect = NULL,
-	               u32 ParentID = 0xffffffff);
+	               u32 ParentID = 0xffffffff,
+	               const Fvector* world_position = nullptr);
 	bool SwitchAmmoType(u32 flags);
 
 	float m_APk;

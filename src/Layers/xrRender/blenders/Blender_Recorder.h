@@ -27,6 +27,15 @@ public:
 	BOOL bUseSteepParallax;
 	int iElement;
 	bool HudElement = false;
+	// A weapon sight's lens, reticle or dot (Anomaly's LFO shaders, reticle
+	// and red-lens textures): drawn for the flat-screen camera, so VR leaves
+	// its normal elements out and draws its own lens and dot.
+	bool VrSight = false;
+	static bool IsVrSight(LPCSTR shader, LPCSTR textures)
+	{
+		return (shader && strstr(shader, "lfo_")) ||
+			(textures && (strstr(textures, "crosshair") || strstr(textures, "_lense")));
+	}
 
 public:
 	CSimulator RS;

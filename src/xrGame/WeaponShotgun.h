@@ -8,6 +8,12 @@ class CWeaponShotgun : public CWeaponCustomPistol
 	typedef CWeaponCustomPistol inherited;
 public:
 	CWeaponShotgun();
+    // Physical handling only where shells are loaded by hand: hinged
+    // barrels or a tube port, detected from the HUD model.
+    bool VrPhysicalMechanismAvailable() const override { return VrShellLoading(); }
+    bool VrShellLoader() const override { return true; }
+    bool VrHasShell() override { return HaveCartridgeInInventory(1); }
+    bool VrLoadShell() override;
 	virtual ~CWeaponShotgun();
 
 	virtual void Load(LPCSTR section);

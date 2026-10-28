@@ -1,0 +1,132 @@
+-- VR Settings for the native OpenXR build (see docs/VR.md).
+-- Every option is tied to an engine vr_* console variable through MCM's
+-- "cmd" field: MCM shows the live value, applies it on Accept and saves it
+-- to user.ltx, so the console and this menu always agree. Options whose
+-- console variable does not exist (a desktop or older executable) are left
+-- out, and the whole menu is hidden when none exist.
+
+local function exists(cmd)
+	local value = get_console():get_string(cmd)
+	return value ~= nil and value ~= ""
+end
+
+local function check(cmd, extra)
+	local option = { id = cmd, type = "check", val = 1, cmd = cmd, bool_to_num = true, hint = cmd }
+	for k, v in pairs(extra or {}) do option[k] = v end
+	return option
+end
+
+local function track(cmd, min, max, step, prec, extra)
+	local option = { id = cmd, type = "track", val = 2, cmd = cmd, min = min, max = max, step = step,
+		prec = prec, hint = cmd }
+	for k, v in pairs(extra or {}) do option[k] = v end
+	return option
+end
+
+local function list(cmd, content, extra)
+	local option = { id = cmd, type = "list", val = 2, cmd = cmd, content = content, no_str = true, hint = cmd }
+	for k, v in pairs(extra or {}) do option[k] = v end
+	return option
+end
+
+local function page(id, options)
+	local gr = {
+		{ id = "title", type = "slide", link = "ui_options_slider_player", text = "ui_mcm_menu_" .. id,
+			size = { 512, 50 }, spacing = 20 },
+	}
+	for _, option in ipairs(options) do
+		if not option.cmd or exists(option.cmd) then
+			gr[#gr + 1] = option
+		end
+	end
+	if #gr == 1 then return nil end
+	return { id = id, sh = true, gr = gr }
+end
+
+function on_mcm_load()
+	if not exists("vr_enabled") then return nil end
+	-- A page may be nil (none of its variables exist), so no ipairs here.
+	local pages = {
+		page("vr_comfort", {
+			check("vr_snap_turn"),
+			track("vr_snap_turn_angle", 5, 90, 5, 0),
+			check("vr_smooth_turn"),
+			track("vr_turn_speed", 15, 180, 5, 0),
+			check("vr_controller_movement"),
+			track("vr_vignette", 0, 1, 0.05, 2),
+			check("vr_left_handed"),
+			track("vr_move_deadzone", 0.05, 0.8, 0.05, 2),
+			track("vr_max_head_offset", 0.1, 1.5, 0.05, 2),
+			check("vr_roomscale"),
+			track("vr_torso_deadband", 10, 120, 5, 0),
+			{ id = "recenter_key", type = "key_bind", val = 2, def = -1, hint = "vr_recenter_key" },
+		}),
+		page("vr_body", {
+			check("vr_physical_crouch"),
+			track("vr_crouch_depth", 0.1, 0.8, 0.02, 2),
+			track("vr_low_crouch_depth", 0.2, 1.2, 0.02, 2),
+			check("vr_body_slots"),
+			track("vr_slot_radius", 0.06, 0.3, 0.01, 2),
+			check("vr_slot_rings"),
+			track("vr_hip_height", 0.4, 1.0, 0.01, 2),
+			track("vr_hip_width", 0.1, 0.4, 0.01, 2),
+		}),
+		page("vr_hands", {
+			check("vr_hands"),
+			check("vr_hand_rays"),
+			check("vr_animated_grip"),
+			list("vr_hand_physics", { { 0, "Off" }, { 1, "Push loose objects" }, { 2, "Loose objects and the world" } }),
+			check("vr_weapon_physics"),
+			track("vr_throw_scale", 0.5, 4, 0.05, 2),
+			track("vr_recoil", 0, 3, 0.05, 2),
+			track("vr_controller_smoothing", 0, 10, 0.5, 1),
+			track("vr_scope_zoom", 0.2, 4, 0.05, 2),
+			track("vr_scope_size", 1, 2, 0.05, 2),
+		}),
+		page("vr_display", {
+			track("vr_render_scale", 0.5, 2, 0.05, 2, { restart = true }),
+			track("vr_world_scale", 0.5, 2, 0.05, 2),
+			track("vr_near_plane", 0.01, 0.2, 0.01, 2),
+			check("vr_shared_shadows"),
+			track("vr_scope_quality", 0, 2, 0.05, 2),
+			check("vr_wrist_display"),
+			check("vr_hide_hud"),
+			list("vr_tracking_origin", { { 0, "Seated (local)" }, { 1, "Standing (stage)" } }),
+			list("vr_enabled", { { 0, "Desktop" }, { 1, "Automatic" }, { 2, "VR" } }, { restart = true }),
+			check("vr_debug"),
+		}),
+	}
+	local gr = {}
+	for i = 1, 4 do
+		if pages[i] then gr[#gr + 1] = pages[i] end
+	end
+	if #gr == 0 then return nil end
+	return { id = "vr_settings", sh = false, gr = gr }
+end
+
+-- Recenter key: re-aligns the view to the body, as the vr_recenter command.
+local recenter_key = -1
+
+local function read_options()
+	if ui_mcm then
+		recenter_key = ui_mcm.get("vr_settings/vr_comfort/recenter_key") or -1
+	end
+end
+
+local function on_option_change()
+	read_options()
+end
+
+local function on_key_press(key)
+	-- vr_recenter takes no value, so it has no status to test for.
+	if recenter_key >= 0 and key == recenter_key then
+		exec_console_cmd("vr_recenter")
+	end
+end
+
+function on_game_start()
+	if not exists("vr_enabled") then return end
+	RegisterScriptCallback("on_option_change", on_option_change)
+	RegisterScriptCallback("on_key_press", on_key_press)
+	read_options()
+end

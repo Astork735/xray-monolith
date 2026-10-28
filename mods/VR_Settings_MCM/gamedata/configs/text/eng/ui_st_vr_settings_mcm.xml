@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="windows-1251"?>
+<string_table>
+	<string id="ui_mcm_menu_vr_settings"><text>VR Settings</text></string>
+	<string id="ui_mcm_menu_vr_comfort"><text>Comfort and Movement</text></string>
+	<string id="ui_mcm_menu_vr_body"><text>Body: Crouch, Slots and Holsters</text></string>
+	<string id="ui_mcm_menu_vr_hands"><text>Hands and Weapons</text></string>
+	<string id="ui_mcm_menu_vr_display"><text>Display and System</text></string>
+
+	<!-- Comfort -->
+	<string id="ui_mcm_vr_snap_turn"><text>Snap Turning</text></string>
+	<string id="ui_mcm_vr_snap_turn_desc"><text>The right stick turns in fixed steps. Push it back to the centre before each step.</text></string>
+	<string id="ui_mcm_vr_snap_turn_angle"><text>Snap Turn Angle (degrees)</text></string>
+	<string id="ui_mcm_vr_snap_turn_angle_desc"><text>How far one snap turns you.</text></string>
+	<string id="ui_mcm_vr_smooth_turn"><text>Smooth Turning</text></string>
+	<string id="ui_mcm_vr_smooth_turn_desc"><text>The right stick turns continuously. Takes priority over snap turning.</text></string>
+	<string id="ui_mcm_vr_turn_speed"><text>Smooth Turn Speed (degrees/s)</text></string>
+	<string id="ui_mcm_vr_turn_speed_desc"><text>Turning speed at full stick for smooth turning.</text></string>
+	<string id="ui_mcm_vr_controller_movement"><text>Stick Movement</text></string>
+	<string id="ui_mcm_vr_controller_movement_desc"><text>Walk with the left stick and turn with the right stick.</text></string>
+	<string id="ui_mcm_vr_vignette"><text>Comfort Vignette</text></string>
+	<string id="ui_mcm_vr_vignette_desc"><text>Darkens the edges of your view while you move or turn with the sticks, and briefly on each snap turn. 0 turns it off; higher values narrow the view further.</text></string>
+	<string id="ui_mcm_vr_left_handed"><text>Left-Handed</text></string>
+	<string id="ui_mcm_vr_left_handed_desc"><text>Move with the right stick and turn with the left. The pistol holster, rifle shoulder, ammunition pouch and belt slots are mirrored, the PDA moves to the right side of the chest, and weapons drawn with a key go to the left hand.</text></string>
+	<string id="ui_mcm_vr_move_deadzone"><text>Stick Deadzone</text></string>
+	<string id="ui_mcm_vr_move_deadzone_desc"><text>Stick travel ignored around the centre. Raise it if you drift while standing still.</text></string>
+	<string id="ui_mcm_vr_max_head_offset"><text>Maximum Lean (m)</text></string>
+	<string id="ui_mcm_vr_max_head_offset_desc"><text>How far your real head may move away from the character before it stops. Walls still stop it sooner.</text></string>
+	<string id="ui_mcm_vr_roomscale"><text>Roomscale</text></string>
+	<string id="ui_mcm_vr_roomscale_desc"><text>When you step more than 15 cm away from the character in your room, the character walks after you, so walls and enemies meet the body where you are. Off: only your view moves, up to the maximum lean.</text></string>
+	<string id="ui_mcm_vr_torso_deadband"><text>Body Turn Threshold (degrees)</text></string>
+	<string id="ui_mcm_vr_torso_deadband_desc"><text>How far you can turn your head before your belt, holsters and pockets turn with it. Turning round in your room brings them round; a glance to the side leaves them where they are.</text></string>
+	<string id="ui_mcm_vr_recenter_key"><text>Recenter View Key</text></string>
+	<string id="ui_mcm_vr_recenter_key_desc"><text>A keyboard key that recenters the view on your character, the same as the vr_recenter console command.</text></string>
+
+	<!-- Body -->
+	<string id="ui_mcm_vr_physical_crouch"><text>Crouch With Your Head</text></string>
+	<string id="ui_mcm_vr_physical_crouch_desc"><text>Ducking your real head crouches the character. The right stick crouch still works; the deeper of the two is used.</text></string>
+	<string id="ui_mcm_vr_crouch_depth"><text>Crouch Depth (m)</text></string>
+	<string id="ui_mcm_vr_crouch_depth_desc"><text>How far below your standing eye height your head must go to crouch. Your standing height is taken when a level starts or when you recenter.</text></string>
+	<string id="ui_mcm_vr_low_crouch_depth"><text>Low Crouch Depth (m)</text></string>
+	<string id="ui_mcm_vr_low_crouch_depth_desc"><text>How far below your standing eye height your head must go for a low crouch.</text></string>
+	<string id="ui_mcm_vr_body_slots"><text>Body Slots</text></string>
+	<string id="ui_mcm_vr_body_slots_desc"><text>Squeeze the grip at a place on your belt: binoculars at the buckle, grenade front left, bolt front right, detector behind the ammunition pouch (left), knife behind the pistol holster (right). The PDA hangs on your upper chest (left side) and the inventory is over your left shoulder; four chest pockets below the PDA hold your quick-use items. Carried items hang on the belt.</text></string>
+	<string id="ui_mcm_vr_slot_radius"><text>Body Slot Reach (m)</text></string>
+	<string id="ui_mcm_vr_slot_radius_desc"><text>How close your hand must be to a body slot to use it.</text></string>
+	<string id="ui_mcm_vr_slot_rings"><text>Show Body Slot Markers</text></string>
+	<string id="ui_mcm_vr_slot_rings_desc"><text>Draw a small ring at a body slot while your hand is within reach of it.</text></string>
+	<string id="ui_mcm_vr_hip_height"><text>Hip Height Below Eyes (m)</text></string>
+	<string id="ui_mcm_vr_hip_height_desc"><text>Distance from your eyes down to the belt: holster, ammunition pouch and belt slots. Raise it if they are too high for you.</text></string>
+	<string id="ui_mcm_vr_hip_width"><text>Hip Width (m)</text></string>
+	<string id="ui_mcm_vr_hip_width_desc"><text>Sideways distance from your centre to the pistol holster and the ammunition pouch.</text></string>
+
+	<!-- Hands and weapons -->
+	<string id="ui_mcm_vr_hands"><text>Show Hands</text></string>
+	<string id="ui_mcm_vr_hands_desc"><text>Show your tracked hands.</text></string>
+	<string id="ui_mcm_vr_hand_rays"><text>Pointer Rays</text></string>
+	<string id="ui_mcm_vr_hand_rays_desc"><text>Show the pointing rays used to aim at items and usable objects.</text></string>
+	<string id="ui_mcm_vr_animated_grip"><text>Grip From Weapon Animations</text></string>
+	<string id="ui_mcm_vr_animated_grip_desc"><text>Hold weapons the way their first-person animations hold them.</text></string>
+	<string id="ui_mcm_vr_hand_physics"><text>Physical Hands</text></string>
+	<string id="ui_mcm_vr_hand_physics_desc"><text>Let your hands push loose objects, and also stop against walls and the world.</text></string>
+	<string id="ui_mcm_vr_weapon_physics"><text>Physical Weapon</text></string>
+	<string id="ui_mcm_vr_weapon_physics_desc"><text>The weapon in your hands pushes loose objects.</text></string>
+	<string id="ui_mcm_vr_throw_scale"><text>Throw Strength</text></string>
+	<string id="ui_mcm_vr_recoil"><text>Recoil</text></string>
+	<string id="ui_mcm_vr_controller_smoothing"><text>Controller Smoothing</text></string>
+	<string id="ui_mcm_vr_controller_smoothing_desc"><text>Steadies the hands and the weapon against controller jitter. 0 is off; higher values are steadier but trail the real hand more (10 is about a tenth of a second).</text></string>
+	<string id="ui_mcm_vr_recoil_desc"><text>How hard each shot kicks the weapon up and back in your hands, with a pulse in the controller. The kick follows the cartridge and the weight of the weapon, and doubles when a two-handed weapon is held in one hand. 0 turns it off.</text></string>
+	<string id="ui_mcm_vr_throw_scale_desc"><text>Grenades and bolts leave at your hand's speed times this. Raise it if your throws fall short.</text></string>
+	<string id="ui_mcm_vr_scope_zoom"><text>Scope Zoom Factor</text></string>
+	<string id="ui_mcm_vr_scope_zoom_desc"><text>Magnified scopes show the game's zoom multiplied by this.</text></string>
+	<string id="ui_mcm_vr_scope_size"><text>Scope Image Size</text></string>
+	<string id="ui_mcm_vr_scope_size_desc"><text>How much larger than the eyepiece glass the scope image is drawn.</text></string>
+
+	<!-- Display and system -->
+	<string id="ui_mcm_vr_render_scale"><text>Render Scale</text></string>
+	<string id="ui_mcm_vr_render_scale_desc"><text>Per-eye resolution relative to the headset's recommendation. Higher is sharper and slower. Takes effect after a restart.</text></string>
+	<string id="ui_mcm_vr_world_scale"><text>World Scale</text></string>
+	<string id="ui_mcm_vr_world_scale_desc"><text>Game units per real metre. 1 matches the world to your real size.</text></string>
+	<string id="ui_mcm_vr_near_plane"><text>Near Clip (m)</text></string>
+	<string id="ui_mcm_vr_near_plane_desc"><text>Closest distance that is drawn. Lower lets you see hands and sights very close to your eyes.</text></string>
+	<string id="ui_mcm_vr_shared_shadows"><text>Shared Sun Shadows</text></string>
+	<string id="ui_mcm_vr_shared_shadows_desc"><text>Render the sun's shadows once for both eyes instead of once per eye. Faster outdoors; turn off to compare.</text></string>
+	<string id="ui_mcm_vr_scope_quality"><text>Scope View Quality</text></string>
+	<string id="ui_mcm_vr_scope_quality_desc"><text>Detail of the magnified scope image: pixels rendered per pixel the lens covers in your eye. 1 matches the headset; higher is sharper and slower. 0 renders it at full eye resolution, as before.</text></string>
+	<string id="ui_mcm_vr_wrist_display"><text>Wrist Status Display</text></string>
+	<string id="ui_mcm_vr_wrist_display_desc"><text>Look at the back of your off-hand wrist, forearm across your view as when reading a watch: bars show health (red) and stamina (yellow), plus radiation (green), psy health (blue), bleeding (dark red) and hunger (brown) when they matter.</text></string>
+	<string id="ui_mcm_vr_hide_hud"><text>Hide Flat HUD</text></string>
+	<string id="ui_mcm_vr_hide_hud_desc"><text>Hide the game's flat on-screen status indicators in VR (use the wrist display instead). Messages and script HUD elements still show.</text></string>
+	<string id="ui_mcm_vr_tracking_origin"><text>Play Space</text></string>
+	<string id="ui_mcm_vr_tracking_origin_desc"><text>Seated uses the headset's local space; standing uses the room-scale stage when the runtime offers one.</text></string>
+	<string id="ui_mcm_vr_enabled"><text>Start In</text></string>
+	<string id="ui_mcm_vr_enabled_desc"><text>Desktop, VR when a headset is available (automatic), or always try VR. The -vr and -novr launch options override this. Takes effect after a restart.</text></string>
+	<string id="ui_mcm_vr_debug"><text>VR Debug</text></string>
+	<string id="ui_mcm_vr_debug_desc"><text>Draw controller axes and write pose, input and timing details to the log.</text></string>
+</string_table>

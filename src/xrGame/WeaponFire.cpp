@@ -140,6 +140,7 @@ void CWeapon::FireTrace(const Fvector& P, const Fvector& D)
 	m_lastCartridge = l_cartridge;
 	m_magazine.pop_back();
 	--iAmmoElapsed;
+	VrCartridgeFired();
 
 	VERIFY((u32)iAmmoElapsed == m_magazine.size());
 }

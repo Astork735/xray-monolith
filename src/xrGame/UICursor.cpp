@@ -134,3 +134,11 @@ void CUICursor::SetUICursorPosition(Fvector2 pos)
 		ClientToScreen(Device.m_hWnd, (LPPOINT)&p);
 	SetCursorPos(p.x, p.y);
 }
+
+void CUICursor::SetVrCursorPosition(Fvector2 pos)
+{
+    // UI-local cursor only: do not warp the user's Windows desktop pointer.
+    vPrevPos = vPos;
+    clamp(pos.x, 0.f, UI_BASE_WIDTH); clamp(pos.y, 0.f, UI_BASE_HEIGHT);
+    vPos = pos;
+}

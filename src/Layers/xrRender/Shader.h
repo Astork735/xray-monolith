@@ -131,6 +131,7 @@ public:
 		u32 isWater : 1;
 
 		u32 iScopeLense : 2; //  Redotix99: for 3D Shader Based Scopes 		
+		u32 bVrSight : 1; // a sight's lens, reticle or dot: VR draws its own
 	};
 
 public:

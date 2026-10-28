@@ -140,6 +140,7 @@ public:
 	virtual void OnAppDeactivate();
 	virtual void _BCL OnFrame();
 	virtual void ImGui_OnRender(LPCSTR name) {};
+    virtual bool VrLoadingPrompt(bool confirm) { return false; }
 
 	// вызывается только когда изменяется тип игры
 	virtual void OnGameStart();
@@ -226,6 +227,9 @@ public:
 	};
 	virtual void Activate(bool bActive) = 0;
 	virtual bool IsActive() = 0;
+    // Normalized coordinates on the head-relative UI quad; negative cancels.
+    // button: -1 release, 0 move, +1 press. Called before simulation/rendering.
+    virtual bool VrPointer(float u, float v, int button) { return false; }
 	virtual bool CanSkipSceneRendering() = 0;
 	virtual void DestroyInternal(bool bForce) = 0;
 };

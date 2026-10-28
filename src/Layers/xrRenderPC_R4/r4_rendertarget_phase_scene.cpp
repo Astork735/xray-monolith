@@ -5,6 +5,11 @@ void CRenderTarget::phase_scene_prepare()
 {
 	PIX_EVENT(phase_scene_prepare);
 
+    // Both eyes share a simulation frame but need independent light buffers
+    // and stencil markers. Let the first accumulator use clear this eye too.
+    if (g_vr_rendering_eye)
+        dwAccumulatorClearMark = Device.dwFrame - 1;
+
 		//	TODO: DX10: Check if we need to set RT here.
 		if (!RImplementation.o.dx10_msaa)
 			u_setrt(Device.dwWidth, Device.dwHeight, rt_Position->pRT,NULL,NULL, HW.pBaseZB);

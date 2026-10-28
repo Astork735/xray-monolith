@@ -341,11 +341,11 @@ void CCameraManager::Update(const Fvector& P, const Fvector& D, const Fvector& N
     }
 #endif // DEBUG
 	// camera
-	if (flags & CCameraBase::flPositionRigid)
+	if (g_vr_owns_present || (flags & CCameraBase::flPositionRigid))
 		m_cam_info.p.set(P);
 	else
 		m_cam_info.p.inertion(P, psCamInert);
-	if (flags & CCameraBase::flDirectionRigid)
+	if (g_vr_owns_present || (flags & CCameraBase::flDirectionRigid))
 	{
 		m_cam_info.d.set(D);
 		m_cam_info.n.set(N);
@@ -371,7 +371,13 @@ void CCameraManager::Update(const Fvector& P, const Fvector& D, const Fvector& N
 	m_cam_info.fAspect = m_cam_info.fAspect * dst + (fASPECT_Dest * aspect) * src;
 	m_cam_info.dont_apply = false;
 
+    const auto body_camera = m_cam_info;
 	UpdateCamEffectors();
+    if (g_vr_owns_present)
+    {
+        m_cam_info.p = body_camera.p; m_cam_info.d = body_camera.d;
+        m_cam_info.n = body_camera.n; m_cam_info.r = body_camera.r;
+    }
 
 	UpdatePPEffectors();
 

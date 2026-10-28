@@ -361,6 +361,8 @@ void CGrenade::net_Relcase(CObject* O)
 
 void CGrenade::DeactivateItem()
 {
+	// Readied by a VR hand that has not thrown it: put away unprimed.
+	VrUnprime();
 	//Drop grenade if primed
 	StopCurrentAnimWithoutCallback();
 	if (!GetTmpPreDestroy() && Local() && (GetState() == eThrowStart || GetState() == eReady || GetState() == eThrow))
