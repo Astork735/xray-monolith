@@ -1,0 +1,2414 @@
+#include "pch_script.h"
+#include "xrEngine/FDemoRecord.h"
+#include "xrEngine/FDemoPlay.h"
+#include "xrEngine/Environment.h"
+#include "xrEngine/IGame_Persistent.h"
+#include "ParticlesObject.h"
+#include "Level.h"
+#include "HUDManager.h"
+#include "InventoryOwner.h"
+#include "relation_registry.h"
+#include "character_info.h"
+#include "string_table.h"
+#include "xrServer.h"
+#include "NET_Queue.h"
+#include "game_cl_base.h"
+#include "entity_alive.h"
+#include "ai_space.h"
+#include "ai_debug.h"
+#include "ShootingObject.h"
+#include "GameTaskManager.h"
+#include "Level_Bullet_Manager.h"
+#include "script_process.h"
+#include "script_engine.h"
+#include "script_engine_space.h"
+#include "team_base_zone.h"
+#include "infoportion.h"
+#include "patrol_path_storage.h"
+#include "date_time.h"
+#include "space_restriction_manager.h"
+#include "seniority_hierarchy_holder.h"
+#include "space_restrictor.h"
+#include "client_spawn_manager.h"
+#include "autosave_manager.h"
+#include "ClimableObject.h"
+#include "level_graph.h"
+#include "mt_config.h"
+#include "phcommander.h"
+#include "map_manager.h"
+#include "xrEngine/CameraManager.h"
+#include "level_sounds.h"
+#include "car.h"
+#include "trade_parameters.h"
+#include "game_cl_base_weapon_usage_statistic.h"
+#include "MainMenu.h"
+#include "xrEngine/XR_IOConsole.h"
+#include "actor.h"
+#include "PhysicsShellHolder.h"
+#include "../xrPhysics/PhysicsShell.h"
+#include "player_hud.h"
+#include "UI/UIGameTutorial.h"
+#include "file_transfer.h"
+#include "message_filter.h"
+#include "demoplay_control.h"
+#include "demoinfo.h"
+#include "CustomDetector.h"
+#include "xrPhysics/IPHWorld.h"
+#include "xrPhysics/console_vars.h"
+#include "../xrEngine/device.h"
+#include "../xrEngine/CameraBase.h"
+#include "../xrEngine/Vr/vr_gameplay.h"
+#include "../xrEngine/Vr/vr_gameplay_policy.h"
+#include "../xrEngine/Vr/vr_hand_render.h"
+#include "../xrPhysics/ActorCameraCollision.h"
+#include "../Include/xrRender/DrawUtils.h"
+#include "../xrEngine/Vr/vr_overlay_draw.h"
+#include "UsableScriptObject.h"
+
+#include "UIGameCustom.h"
+#include "ui/UIActorMenu.h"
+#include "ui/UIDialogWnd.h"
+#include "ui/UIPdaWnd.h"
+#include "UICursor.h"
+#include "xr_level_controller.h"
+#include "VrWeaponInteraction.h"
+#include "VrBodySlots.h"
+#include "VrKeyboard.h"
+#include "WeaponAmmo.h"
+#include "VrWristDisplay.h"
+#include "ui_base.h"
+#include "../xrCDB/ISpatial.h"
+#include "../Include/xrRender/RenderVisual.h"
+#include "../xrEngine/vis_common.h"
+#include "../xrEngine/GameFont.h"
+#include "debug_renderer.h"
+#include "LevelDebugScript.h"
+#include "script_attachment_manager.h"
+#include "script_light_inline.h"
+
+#include "alife_simulator.h"
+#include "alife_object_registry.h"
+
+#ifdef DEBUG
+#include "level_debug.h"
+#include "ai/stalker/ai_stalker.h"
+#include "PhysicObject.h"
+#include "PHDebug.h"
+#include "debug_text_tree.h"
+#endif
+extern ENGINE_API bool g_dedicated_server;
+extern ENGINE_API BOOL	g_bootComplete;
+extern CUISequencer* g_tutorial;
+extern CUISequencer* g_tutorial2;
+
+float g_cl_lvInterp = 0.1;
+u32 lvInterpSteps = 0;
+
+#ifdef SPAWN_ANTIFREEZE
+BOOL spawn_antifreeze = TRUE;
+BOOL spawn_antifreeze_debug = FALSE;
+static HANDLE prefetch_thread_signal;
+
+static void unpausePrefetchThreadSignal()
+{
+	//if (spawn_antifreeze_debug) Msg("prefetch_thread_signal Set");
+	SetEvent(prefetch_thread_signal);
+}
+
+static void pausePrefetchThreadSignal()
+{
+	//if (spawn_antifreeze_debug) Msg("prefetch_thread_signal Reset");
+	ResetEvent(prefetch_thread_signal);
+}
+
+static void closePrefetchThreadSignal()
+{
+	if (spawn_antifreeze_debug) Msg("prefetch_thread_signal Close");
+	CloseHandle(prefetch_thread_signal);
+}
+
+static void createPrefetchThreadSignal()
+{
+	if (spawn_antifreeze_debug) Msg("prefetch_thread_signal CreateEvent");
+	prefetch_thread_signal = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+}
+
+struct spawn_and_prefetch_events
+{
+	NET_Queue_Event* spawn_events = nullptr;
+    spawn_events_data_map* spawn_events_data = nullptr;
+    prefetch_event_queue* prefetch_events = nullptr;
+    models_set* prefetched_models = nullptr;
+    bool* closeSignal = nullptr;
+    xrSRWLock* prefetch_lock = nullptr;
+};
+
+u16	GetSpawnInfo(NET_Packet& P, u16& parent_id, shared_str& section)
+{
+    u16 dummy16, id;
+    P.r_begin(dummy16);
+
+    shared_str s_name;
+    P.r_stringZ(s_name);
+    section = s_name;
+
+    string256 temp;
+    P.r_stringZ(temp);
+
+    u8 temp_gt, s_RP;
+    Fvector o_Position, o_Angle;
+    u16 RespawnTime;
+    P.r_u8(temp_gt/*s_gameid*/);
+    P.r_u8(s_RP);
+    P.r_vec3(o_Position);
+    P.r_vec3(o_Angle);
+    P.r_u16(RespawnTime);
+    P.r_u16(id);
+    P.r_u16(parent_id);
+
+    P.r_pos = 0;
+    return id;
+}
+#endif
+//-AVO
+
+// Define a helper struct to hold the heavy data
+struct ProcessNetPacket : public intrusive_base_nonatomic
+{
+    NET_Packet P;
+};
+
+struct ProcessGameEventsData : ProcessNetPacket
+{
+    prefetch_event E;
+    NET_Packet PRespond;
+};
+
+namespace crash_saving {
+    extern void(*save_impl)();
+    static bool g_isSaving = false;
+    int saveCountMax = 10;
+
+    void _save_impl()
+    {
+        if (g_isSaving) return;
+        if (saveCountMax <= 0) return;
+
+        int saveCount = -1;
+        g_isSaving = true;
+        auto data = make_intrusive<ProcessNetPacket>();
+        NET_Packet& net_packet = data->P;
+        net_packet.w_begin(M_SAVE_GAME);
+
+		std::string path = "fatal_ctd_save_";
+		std::string path_mask(path);
+		std::string path_ext = ".scop";
+		path_mask.append("*").append(path_ext);
+
+        FS_FileSet fset_temp;
+        FS.file_list(fset_temp, "$game_saves$", FS_ListFiles | FS_RootOnly, path_mask.c_str());
+
+		std::vector<FS_File> fset(fset_temp.begin(), fset_temp.end());
+		struct {
+			bool operator()(FS_File& a, FS_File& b) {
+				return a.time_write > b.time_write;
+			}
+		} sortFilesDesc;
+		std::sort(fset.begin(), fset.end(), sortFilesDesc);
+
+        //Msg("save mask %s", path_mask.c_str());
+
+		for (auto &file : fset)
+		{
+			string128 name;
+			xr_strcpy(name, sizeof(name), file.name.c_str());
+			std::string name_string(name);
+			name_string.erase(name_string.length() - path_ext.length());
+
+            //Msg("found save file %s, save_name %s", name, name_string.c_str());
+
+			try {
+				//Msg("save number %s", name_string.substr(path.length()).c_str());
+				int name_count = std::stoi(name_string.substr(path.length()));
+				saveCount = name_count;
+				break;
+			} catch (...) {
+				Msg("!error getting save number from %s", name);
+			}
+		}
+
+        saveCount++;
+        if (saveCount >= saveCountMax) {
+            saveCount = 0;
+        }
+
+        path.append(std::to_string(saveCount));
+        net_packet.w_stringZ(path.c_str());
+        net_packet.w_u8(1);
+        CLevel& level = Level();
+        if (&level != nullptr)
+        {
+            level.Send(net_packet, net_flags(1));
+        }
+
+    }
+}
+
+CLevel::CLevel() :
+    IPureClient(Device.GetTimerGlobal())
+#ifdef PROFILE_CRITICAL_SECTIONS
+    , DemoCS(MUTEX_PROFILE_ID(DemoCS))
+#endif
+{
+	g_bDebugEvents = strstr(Core.Params, "-debug_ge") != nullptr;
+	game_events = xr_new<NET_Queue_Event>();
+
+    eChangeRP = Engine.Event.Handler_Attach("LEVEL:ChangeRP", this);
+    eDemoPlay = Engine.Event.Handler_Attach("LEVEL:PlayDEMO", this);
+    eChangeTrack = Engine.Event.Handler_Attach("LEVEL:PlayMusic", this);
+    eEnvironment = Engine.Event.Handler_Attach("LEVEL:Environment", this);
+    eEntitySpawn = Engine.Event.Handler_Attach("LEVEL:spawn", this);
+    m_pBulletManager = xr_new<CBulletManager>();
+    if (!g_dedicated_server)
+    {
+        m_map_manager = xr_new<CMapManager>();
+        m_game_task_manager = xr_new<CGameTaskManager>();
+    }
+    m_dwDeltaUpdate = u32(fixed_step * 1000);
+    m_seniority_hierarchy_holder = xr_new<CSeniorityHierarchyHolder>();
+    if (!g_dedicated_server)
+    {
+        m_level_sound_manager = xr_new<CLevelSoundManager>();
+        m_space_restriction_manager = xr_new<CSpaceRestrictionManager>();
+        m_client_spawn_manager = xr_new<CClientSpawnManager>();
+        m_autosave_manager = xr_new<CAutosaveManager>();
+        m_debug_renderer = xr_new<CDebugRenderer>();
+#ifdef DEBUG
+        m_level_debug = xr_new<CLevelDebug>();
+#endif
+    }
+    m_ph_commander = xr_new<CPHCommander>();
+    m_ph_commander_scripts = xr_new<CPHCommander>();
+    pObjects4CrPr.clear();
+    pActors4CrPr.clear();
+    g_player_hud = xr_new<player_hud>();
+    g_player_hud->load_default();
+
+#ifdef SPAWN_ANTIFREEZE
+    spawn_events = xr_new<NET_Queue_Event>();
+    spawn_events_data = xr_new<spawn_events_data_map>();
+    prefetch_events = xr_new<prefetch_event_queue>();
+    prefetched_models = xr_new<models_set>();
+    auto events = new spawn_and_prefetch_events({ spawn_events, spawn_events_data, prefetch_events, prefetched_models, &closeSignal, &prefetch_lock });
+    createPrefetchThreadSignal();
+    thread_spawn(ProcessPrefetchEvents, "Pre-Spawn Prefetcher Thread", 0, events);
+    Msg("CLevel::CLevel() Spawn Antifreeze initialized");
+#endif
+
+    Msg("%s", Core.Params);
+    //crash_saving::save_impl = crash_saving::_save_impl; // CLevel ready, we can save now
+}
+
+extern CAI_Space* g_ai_space;
+
+CLevel::~CLevel()
+{
+	//crash_saving::save_impl = nullptr; // CLevel not available, disable crash save
+	xr_delete(g_player_hud);
+	delete_data(m_script_attachments);
+	delete_data(hud_zones_list);
+	hud_zones_list = nullptr;
+	Msg("- Destroying level");
+	Engine.Event.Handler_Detach(eEntitySpawn, this);
+	Engine.Event.Handler_Detach(eEnvironment, this);
+	Engine.Event.Handler_Detach(eChangeTrack, this);
+	Engine.Event.Handler_Detach(eDemoPlay, this);
+	Engine.Event.Handler_Detach(eChangeRP, this);
+	if (physics_world())
+	{
+		destroy_physics_world();
+		xr_delete(m_ph_commander_physics_worldstep);
+	}
+	// destroy PSs
+	for (POIt p_it = m_StaticParticles.begin(); m_StaticParticles.end() != p_it; ++p_it)
+		CParticlesObject::Destroy(*p_it);
+	m_StaticParticles.clear();
+	// Unload sounds
+	// unload prefetched sounds
+	sound_registry.clear();
+	// unload static sounds
+	for (u32 i = 0; i < static_Sounds.size(); ++i)
+	{
+		static_Sounds[i]->destroy();
+		xr_delete(static_Sounds[i]);
+	}
+	static_Sounds.clear();
+	xr_delete(m_level_sound_manager);
+	xr_delete(m_space_restriction_manager);
+	xr_delete(m_seniority_hierarchy_holder);
+	xr_delete(m_client_spawn_manager);
+	xr_delete(m_autosave_manager);
+    xr_delete(m_debug_renderer);
+    delete_data(m_debug_render_queue);
+    if (!g_dedicated_server)
+        ai().script_engine().remove_script_process(ScriptEngine::eScriptProcessorLevel);
+    xr_delete(game);
+    xr_delete(game_events);
+
+#ifdef SPAWN_ANTIFREEZE
+    xr_delete(spawn_events);
+    xr_delete(spawn_events_data);
+    xr_delete(prefetch_events);
+    xr_delete(prefetched_models);
+    closeSignal = true; // signal ProcessPrefetchEvents thread to exit
+    unpausePrefetchThreadSignal();
+#endif
+
+    xr_delete(m_pBulletManager);
+    xr_delete(pStatGraphR);
+    xr_delete(pStatGraphS);
+    xr_delete(m_ph_commander);
+    xr_delete(m_ph_commander_scripts);
+    pObjects4CrPr.clear();
+    pActors4CrPr.clear();
+    ai().unload();
+#ifdef DEBUG
+    xr_delete(m_level_debug);
+#endif
+    xr_delete(m_map_manager);
+    delete_data(m_game_task_manager);
+    // here we clean default trade params
+    // because they should be new for each saved/loaded game
+    // and I didn't find better place to put this code in
+    // XXX nitrocaster: find better place for this clean()
+    CTradeParameters::clean();
+    if (g_tutorial && g_tutorial->m_pStoredInputReceiver == this)
+        g_tutorial->m_pStoredInputReceiver = nullptr;
+    if (g_tutorial2 && g_tutorial2->m_pStoredInputReceiver == this)
+        g_tutorial2->m_pStoredInputReceiver = nullptr;
+    if (IsDemoPlay())
+    {
+        StopPlayDemo();
+        if (m_reader)
+        {
+            FS.r_close(m_reader);
+            m_reader = nullptr;
+        }
+    }
+    xr_delete(m_msg_filter);
+    xr_delete(m_demoplay_control);
+    xr_delete(m_demo_info);
+    if (IsDemoSave())
+    {
+        StopSaveDemo();
+    }
+    deinit_compression();
+}
+
+shared_str CLevel::name() const
+{
+    return map_data.m_name;
+}
+
+void CLevel::GetLevelInfo(CServerInfo* si)
+{
+    if (Server && game)
+    {
+        Server->GetServerInfo(si);
+    }
+}
+
+void CLevel::PrefetchSound(LPCSTR name)
+{
+    // preprocess sound name
+    string_path tmp;
+    xr_strcpy(tmp, name);
+    xr_strlwr(tmp);
+    if (strext(tmp))
+        *strext(tmp) = 0;
+    shared_str snd_name = tmp;
+    // find in registry
+    SoundRegistryMapIt it = sound_registry.find(snd_name);
+    // if find failed - preload sound
+    if (it == sound_registry.end())
+        sound_registry[snd_name].create(snd_name.c_str(), st_Effect, sg_SourceType);
+}
+
+// Game interface ////////////////////////////////////////////////////
+int CLevel::get_RPID(LPCSTR /**name/**/)
+{
+    /*
+    // Gain access to string
+    LPCSTR	params = pLevel->r_string("respawn_point",name);
+    if (0==params)	return -1;
+
+    // Read data
+    Fvector4	pos;
+    int			team;
+    sscanf		(params,"%f,%f,%f,%d,%f",&pos.x,&pos.y,&pos.z,&team,&pos.w); pos.y += 0.1f;
+
+    // Search respawn point
+    svector<Fvector4,maxRP>	&rp = Level().get_team(team).RespawnPoints;
+    for (int i=0; i<(int)(rp.size()); ++i)
+    if (pos.similar(rp[i],EPS_L))	return i;
+    */
+    return -1;
+}
+
+bool g_bDebugEvents = false;
+
+void CLevel::cl_Process_Event(u16 dest, u16 type, NET_Packet& P)
+{
+    // Msg("--- event[%d] for [%d]",type,dest);
+    CObject* O = Objects.net_Find(dest);
+    if (0 == O)
+    {
+#ifdef DEBUG
+        Msg("* WARNING: c_EVENT[%d] to [%d]: unknown dest", type, dest);
+#endif
+        return;
+    }
+    CGameObject* GO = smart_cast<CGameObject*>(O);
+    if (!GO)
+    {
+#ifndef MASTER_GOLD
+        Msg("! ERROR: c_EVENT[%d] : non-game-object", dest);
+#endif
+        return;
+    }
+    if (type != GE_DESTROY_REJECT)
+    {
+        if (type == GE_DESTROY)
+        {
+            Game().OnDestroy(GO);
+        }
+        GO->OnEvent(P, type);
+    }
+    else
+    {
+        // handle GE_DESTROY_REJECT here
+        u32 pos = P.r_tell();
+        u16 id = P.r_u16();
+        P.r_seek(pos);
+        bool ok = true;
+        CObject* D = Objects.net_Find(id);
+        if (0 == D)
+        {
+#ifndef MASTER_GOLD
+            Msg("! ERROR: c_EVENT[%d] : unknown dest", id);
+#endif
+            ok = false;
+        }
+        CGameObject* GD = smart_cast<CGameObject*>(D);
+        if (!GD)
+        {
+#ifndef MASTER_GOLD
+            Msg("! ERROR: c_EVENT[%d] : non-game-object", id);
+#endif
+            ok = false;
+        }
+        GO->OnEvent(P, GE_OWNERSHIP_REJECT);
+        if (ok)
+        {
+            Game().OnDestroy(GD);
+            GD->OnEvent(P, GE_DESTROY);
+        }
+    }
+}
+
+//AVO: used by SPAWN_ANTIFREEZE (by alpet, edited by demonized)
+#ifdef SPAWN_ANTIFREEZE
+bool CLevel::PostponedSpawnFind(u16 id, const NET_Event& E) const
+{
+    auto data = make_intrusive<ProcessNetPacket>();
+    NET_Packet& P = data->P;
+    E.implication(P);
+    return PostponedSpawnFind(id, P);
+}
+
+bool CLevel::PostponedSpawnFind(u16 id, NET_Packet& P) const
+{
+    u16 parent_id;
+    shared_str section;
+    return id == GetSpawnInfo(P, parent_id, section);
+}
+
+bool CLevel::PostponedSpawn(u16 id)
+{
+    PROF_EVENT("ProcessGameEvents PostponedSpawn");
+
+    xrSRWLockGuard g(prefetch_lock, true);
+    auto queue = prefetch_events;
+    auto it = std::find_if(queue->begin(), queue->end(), [id, this](prefetch_event& E) { return PostponedSpawnFind(id, E.p); });
+
+    auto& queue2 = spawn_events->queue;
+    auto it2 = std::find_if(queue2.begin(), queue2.end(), [id, this](const NET_Event& E) { return PostponedSpawnFind(id, E); });
+    return it != queue->end() || it2 != queue2.end();
+}
+
+int CLevel::GetSpawnEventPriority(const NET_Event& e) const
+{
+    if (e.ID == M_EVENT)
+        return 0;
+
+    if (e.ID == M_SPAWN) {
+        auto data = make_intrusive<ProcessNetPacket>();
+        NET_Packet& P = data->P;
+        e.implication(P);
+
+        u16 parent_id = 0;
+        shared_str section;
+        GetSpawnInfo(P, parent_id, section);
+        if (parent_id < 0xFFFF)
+            return 1;
+
+        return 2;
+    }
+
+    return 0;
+}
+
+bool CLevel::SpawnEventCompare(const NET_Event& a, const NET_Event& b) const
+{
+    return GetSpawnEventPriority(a) > GetSpawnEventPriority(b);
+}
+
+// demonized: If called manually, be aware of ProcessPrefetchEvents thread, which may modify spawn_events queue at the same time, maybe fix later
+void CLevel::SortSpawnEventsQueue()
+{
+    xrSRWLockGuard g(prefetch_lock);
+    auto& queue = spawn_events->queue;
+    std::stable_sort(queue.begin(), queue.end(), [this](const NET_Event& a, const NET_Event& b) { return SpawnEventCompare(a, b); });
+}
+
+void CLevel::ProcessPrefetchEvents(void* args)
+{
+    auto events = reinterpret_cast<spawn_and_prefetch_events*>(args);
+    auto spawn_events = events->spawn_events;
+    auto spawn_events_data = events->spawn_events_data;
+    auto prefetch_events = events->prefetch_events;
+    auto prefetched_models = events->prefetched_models;
+    auto closeSignal = events->closeSignal;
+    auto prefetch_lock = events->prefetch_lock;
+
+    while (true)
+    {
+        WaitForSingleObject(prefetch_thread_signal, INFINITE); // wait for prefetch queue event to be signaled
+
+        if (*closeSignal == true)
+        {
+            if (spawn_antifreeze_debug) Msg("[ProcessPrefetchEvents] closeSignal received, destroying thread");
+            closePrefetchThreadSignal();
+            delete events;
+            return;
+        }
+
+        {
+            xrSRWLockGuard g(prefetch_lock, true);
+            if (prefetch_events->empty())
+            {
+                if (spawn_antifreeze_debug) Msg("[ProcessPrefetchEvents] called, but prefetch_events queue is empty");
+                pausePrefetchThreadSignal();
+                continue;
+            }
+        }
+
+        PROF_EVENT("ProcessPrefetchEvents")
+            prefetch_event_queue saved_prefetch_events;
+        {
+            xrSRWLockGuard g(prefetch_lock);
+            if (spawn_antifreeze_debug) Msg("[ProcessPrefetchEvents] started, queue size %d", prefetch_events->size());
+            saved_prefetch_events.swap(*prefetch_events); // move the events to temp queue, so we can continue processing prefetch_events in the main thread
+            pausePrefetchThreadSignal();
+        }
+
+        for (const auto& E : saved_prefetch_events)
+        {
+            for (const auto& model : E.models)
+            {
+                bool not_prefetched = false;
+
+                {
+                    xrSRWLockGuard g(prefetch_lock, true);
+                    not_prefetched = prefetched_models->find(model) == prefetched_models->end();
+                }
+
+                if (not_prefetched)
+                {
+                    if (spawn_antifreeze_debug) Msg("[ProcessPrefetchEvents] Prefetching model '%s' for spawn event", model.c_str());
+                    ::Render->models_PrefetchOne(model.c_str(), false);
+
+                    {
+                        xrSRWLockGuard g(prefetch_lock);
+                        prefetched_models->insert(model); // add model to prefetched models set to avoid double prefetching
+                    }
+                }
+            }
+        }
+
+        {
+            xrSRWLockGuard g(prefetch_lock);
+            for (auto& E : saved_prefetch_events)
+            {
+                spawn_events->insert(E.p); // reinsert the event to spawn_events queue for further processing
+                spawn_events_data->emplace(E.id, E); // store the prefetch event data for later use in ProcessSpawnEvents
+            }
+
+            if (spawn_antifreeze_debug) Msg("[ProcessPrefetchEvents] finished, spawn_events queue size %d", spawn_events->queue.size());
+        }
+    }
+}
+
+// demonized: If called manually, be aware of ProcessPrefetchEvents thread, which may modify spawn_events queue at the same time, maybe fix later
+void CLevel::ProcessSpawnEvents()
+{
+    PROF_EVENT("ProcessSpawnEvents");
+
+    xr_vector<NET_Event> events_to_process;
+    spawn_events_data_map spawn_events_data_copy;
+	{
+		xrSRWLockGuard g(prefetch_lock);
+		if (!spawn_events->queue.empty())
+		{
+			events_to_process.swap(spawn_events->queue);
+		}
+        if (!spawn_events_data->empty())
+        {
+            spawn_events_data_copy.swap(*spawn_events_data);
+        }
+	}
+
+	for (const auto& E : events_to_process)
+	{
+		auto data = make_intrusive<ProcessNetPacket>();
+		u16 ID, dest, type;
+		NET_Packet& P = data->P;
+		ID = E.ID;
+		dest = E.destination;
+		type = E.type;
+		E.implication(P);
+
+		u16 parent_id;
+		shared_str section;
+		u16 obj_id = GetSpawnInfo(P, parent_id, section);
+
+		if (spawn_antifreeze_debug) Msg("[ProcessSpawnEvents] spawning section %s, obj_id %d, parent_id %d, event_id %d", section.c_str(), obj_id, parent_id, dest);
+
+		// demonized: If item is II_BOLT class - go through anyway
+		if (pSettings->line_exist(section.c_str(), "class") && strstr(pSettings->r_string(section.c_str(), "class"), "II_BOLT") != nullptr)
+		{
+			// demonized: this is a sin, but its an easy way
+			goto spawn;
+		}
+
+        // If the object was in alife, but now its absent, skip it
+        auto spawn_data_it = spawn_events_data_copy.find(obj_id);
+        if (spawn_data_it != spawn_events_data_copy.end())
+        {
+            if (spawn_data_it->second.hasAlifeObject)
+            {
+                auto obj = ai().alife().objects().object(obj_id);
+                if (!obj || !obj->m_bOnline)
+                {
+                    if (spawn_antifreeze_debug) Msg("![ProcessSpawnEvents] object absent or offline, do not spawn, section %s, obj_id %d, parent_id %d, event_id %d", section.c_str(), obj_id, parent_id, dest);
+                    continue;
+                }
+            }
+        }        
+
+		// If there is a parent of this object, check if its still in alife
+		if (parent_id != 0xffff)
+		{
+			auto parent_obj = ai().alife().objects().object(parent_id);
+			if (!parent_obj || !parent_obj->m_bOnline)
+			{
+				if (spawn_antifreeze_debug) Msg("![ProcessSpawnEvents] parent object is not in alife, do not spawn, section %s, obj_id %d, parent_id %d, event_id %d", section.c_str(), obj_id, parent_id, dest);
+				continue;
+			}
+		}
+
+	spawn:
+		u16 dummy16;
+		P.r_begin(dummy16);
+		cl_Process_Spawn(P);
+	}
+}
+#endif
+
+void CLevel::ProcessGameEvents()
+{
+	PROF_EVENT("ProcessGameEvents");
+
+	xr_vector<NET_Event> events_to_process;
+	xr_vector<prefetch_event> events_to_prefetch;
+	{
+		xrSRWLockGuard g(prefetch_lock);
+		if (!game_events->queue.empty())
+		{
+			events_to_process.swap(game_events->queue);
+		}
+	}
+
+	// Game events
+	{
+		for (auto it = events_to_process.begin(); it != events_to_process.end(); )
+		{
+			PROF_EVENT("ProcessGameEvents game_events queue");
+			u16 ID = it->ID;
+			u16 dest = it->destination;
+			u16 type = it->type;
+
+			auto data = make_intrusive<ProcessGameEventsData>();
+			auto& P = data->P;
+			it->implication(P);
+
+//AVO: spawn antifreeze implementation, originally by alpet, reritten by demonized
+#ifdef SPAWN_ANTIFREEZE
+			if (spawn_antifreeze && g_bootComplete)
+			{
+				// Postpone M_EVENT for postponed spawns
+				//if (M_EVENT == ID && PostponedSpawn(dest))
+				//{
+				//	game_events->insert(P);
+				//	Msg("[ProcessGameEvents] postponed M_EVENT, object in prefetch queue: obj_id %d", dest);
+				//	it = game_events->queue.erase(it); // remove current event
+				//	continue;
+				//}
+
+				// add to prefetch_events queue for postponed spawn
+				if (M_SPAWN == ID)
+				{
+					PROF_EVENT("ProcessGameEvents M_SPAWN");
+
+					u16 parent_id;
+					shared_str section;
+					u16 obj_id = GetSpawnInfo(P, parent_id, section);
+
+					static auto isValidToPrefetch = [](u16 parent_id, shared_str& section, u16 obj_id, NET_Packet& P) {
+						if (pSettings->line_exist("spawn_antifreeze_ignore", section))
+						{
+							return false;
+						}
+
+						bool valid = true;
+
+						if (pSettings->line_exist(section.c_str(), "class"))
+						{
+							auto c = pSettings->r_string(section.c_str(), "class");
+
+							// Do not prefetch fake missiles of a weapon
+							valid &= strstr(c, "G_RPG7") == nullptr;
+							valid &= strstr(c, "G_FAKE") == nullptr;
+
+							// Do not prefetch helicopters
+							valid &= strstr(c, "C_HLCP") == nullptr;
+						}
+
+						return valid;
+					};
+
+					if (isValidToPrefetch(parent_id, section, obj_id, P))
+					{
+						models_set models;
+
+						static auto safe_insert = [](models_set& models, LPCSTR model) {
+							if (model)
+							{
+								string_path modelWithoutExtension;
+								xr_strcpy(modelWithoutExtension, model);
+								xr_strlwr(modelWithoutExtension);
+								if (strext(modelWithoutExtension)) *strext(modelWithoutExtension) = 0;
+
+								if (xr_strcmp(modelWithoutExtension, "") != 0 && xr_strcmp(modelWithoutExtension, ".ogf") != 0)
+									models.insert(modelWithoutExtension);
+							}
+						};
+
+						// Insert visual from ltx
+						if (pSettings->line_exist(section, "visual"))
+						{
+							safe_insert(models, pSettings->r_string(section, "visual"));
+						}
+
+						// Corpse visual
+						/*if (pSettings->line_exist(section, "corpse_visual"))
+						{
+							safe_insert(models, pSettings->r_string(section, "corpse_visual"));
+						}*/
+
+						// Bloodsucker visual
+						/*if (pSettings->line_exist(section, "Predator_Visual"))
+						{
+							safe_insert(models, pSettings->r_string(section, "Predator_Visual"));
+						}*/
+
+						auto obj = ai().alife().objects().object(obj_id);
+
+						// Actual visual from alife object
+						if (obj && obj->visual())
+						{
+							safe_insert(models, obj->visual()->get_visual());
+						}
+
+						if (!models.empty())
+						{
+							auto& E = data->E;
+							E.p = P;
+							E.models = models;
+                            E.id = obj_id;
+                            E.hasAlifeObject = obj != nullptr;
+
+							events_to_prefetch.push_back(E);
+
+							if (spawn_antifreeze_debug) Msg("[ProcessGameEvents] added M_SPAWN to prefetch_events: section %s, obj_id %d, parent_id %d, event_id %d", section.c_str(), obj_id, parent_id, dest);
+							it++; // Move to next event
+							continue;
+						}
+					}					
+				}
+			}
+#endif
+//-AVO
+			it++; // Move to next event
+			switch (ID)
+			{
+			case M_SPAWN:
+				{
+					PROF_EVENT("ProcessGameEvents M_SPAWN");
+
+#ifdef SPAWN_ANTIFREEZE
+					if (spawn_antifreeze_debug)
+					{
+						u16 parent_id;
+						shared_str section;
+						u16 obj_id = GetSpawnInfo(P, parent_id, section);
+						Msg("[ProcessGameEvents] M_SPAWN: section %s, obj_id %d, parent_id %d, event_id %d", section.c_str(), obj_id, parent_id, dest);
+					}
+#endif
+
+					u16 dummy16;
+					P.r_begin(dummy16);
+					cl_Process_Spawn(P);
+					break;
+				}
+			case M_EVENT:
+				{
+					PROF_EVENT("ProcessGameEvents M_EVENT");
+					cl_Process_Event(dest, type, P);
+					break;
+				}
+			case M_MOVE_PLAYERS:
+				{
+					PROF_EVENT("ProcessGameEvents M_MOVE_PLAYERS");
+					u8 Count = P.r_u8();
+					for (u8 i = 0; i < Count; i++)
+					{
+						u16 ID = P.r_u16();
+						Fvector NewPos, NewDir;
+						P.r_vec3(NewPos);
+						P.r_vec3(NewDir);
+						CActor* OActor = smart_cast<CActor*>(Objects.net_Find(ID));
+						if (0 == OActor)
+							break;
+						OActor->MoveActor(NewPos, NewDir);
+					}
+					auto& PRespond = data->PRespond;
+					PRespond.w_begin(M_MOVE_PLAYERS_RESPOND);
+					Send(PRespond, net_flags(TRUE, TRUE));
+					break;
+				}
+			case M_STATISTIC_UPDATE:
+				{
+					PROF_EVENT("ProcessGameEvents M_STATISTIC_UPDATE");
+					if (GameID() != eGameIDSingle)
+						Game().m_WeaponUsageStatistic->OnUpdateRequest(&P);
+					break;
+				}
+			case M_FILE_TRANSFER:
+				{
+					PROF_EVENT("ProcessGameEvents M_FILE_TRANSFER");
+					if (m_file_transfer) // in case of net_Stop
+						m_file_transfer->on_message(&P);
+					break;
+				}
+			case M_GAMEMESSAGE:
+				{
+					PROF_EVENT("ProcessGameEvents M_GAMEMESSAGE");
+					Game().OnGameMessage(P);
+					break;
+				}
+			default:
+				{
+					VERIFY(0);
+					break;
+				}
+			}
+		}
+	}
+
+#ifdef SPAWN_ANTIFREEZE
+	if (!events_to_prefetch.empty())
+	{
+		xrSRWLockGuard g(prefetch_lock);
+		prefetch_events->insert(prefetch_events->end(), events_to_prefetch.begin(), events_to_prefetch.end());
+		unpausePrefetchThreadSignal();
+	}
+#endif
+
+	if (OnServer() && GameID() != eGameIDSingle)
+		Game().m_WeaponUsageStatistic->Send_Check_Respond();
+}
+
+#ifdef DEBUG_MEMORY_MANAGER
+extern Flags32 psAI_Flags;
+extern float debug_on_frame_gather_stats_frequency;
+
+struct debug_memory_guard
+{
+    inline debug_memory_guard()
+    {
+        mem_alloc_gather_stats(!!psAI_Flags.test(aiDebugOnFrameAllocs));
+        mem_alloc_gather_stats_frequency(debug_on_frame_gather_stats_frequency);
+    }
+};
+#endif
+
+void CLevel::MakeReconnect()
+{
+	if (!Engine.Event.Peek("KERNEL:disconnect"))
+	{
+		Engine.Event.Defer("KERNEL:disconnect");
+		char const* server_options = nullptr;
+		char const* client_options = nullptr;
+		if (m_caServerOptions.c_str())
+		{
+			server_options = xr_strdup(*m_caServerOptions);
+		}
+		else
+		{
+			server_options = xr_strdup("");
+		}
+		if (m_caClientOptions.c_str())
+		{
+			client_options = xr_strdup(*m_caClientOptions);
+		}
+		else
+		{
+			client_options = xr_strdup("");
+		}
+		Engine.Event.Defer("KERNEL:start", size_t(server_options), size_t(client_options));
+	}
+}
+
+void CLevel::OnFrame()
+{
+	PROF_EVENT("CLevel::OnFrame()");
+
+#ifdef DEBUG_MEMORY_MANAGER
+    debug_memory_guard __guard__;
+#endif
+#ifdef DEBUG
+    DBG_RenderUpdate();
+#endif
+	Fvector temp_vector;
+	m_feel_deny.feel_touch_update(temp_vector, 0.f);
+	if (GameID() != eGameIDSingle)
+		psDeviceFlags.set(rsDisableObjectsAsCrows, true);
+	else
+		psDeviceFlags.set(rsDisableObjectsAsCrows, false);
+	// commit events from bullet manager from prev-frame
+	Device.Statistic->TEST0.Begin();
+	BulletManager().CommitEvents();
+	Device.Statistic->TEST0.End();
+	// Client receive
+	if (net_isDisconnected())
+	{
+		if (OnClient() && GameID() != eGameIDSingle)
+		{
+#ifdef DEBUG
+            Msg("--- I'm disconnected, so clear all objects...");
+#endif
+			ClearAllObjects();
+		}
+		Engine.Event.Defer("kernel:disconnect");
+		return;
+	}
+	else
+	{
+		Device.Statistic->netClient1.Begin();
+		ClientReceive();
+		Device.Statistic->netClient1.End();
+	}
+	
+	ProcessGameEvents();
+#ifdef SPAWN_ANTIFREEZE
+	{
+		bool queueEmpty = false;
+		{
+			xrSRWLockGuard g(prefetch_lock);
+			queueEmpty = spawn_events->queue.empty();
+		}
+		if (!queueEmpty)
+		{
+			SortSpawnEventsQueue();
+			ProcessSpawnEvents();
+		}
+	}
+#endif
+
+	if (m_bNeed_CrPr)
+		make_NetCorrectionPrediction();
+	if (!g_dedicated_server)
+	{
+		// the map update may run on the parallel thread so removals are reported to script from here
+		MapManager().FlushRemovedNotify();
+
+		if (g_mt_config.test(mtMap))
+			Device.seqParallel.push_back(fastdelegate::FastDelegate0<>(m_map_manager, &CMapManager::Update));
+		else
+			MapManager().Update();
+		if (IsGameTypeSingle() && Device.dwPrecacheFrame == 0)
+		{
+			// XXX nitrocaster: was enabled in x-ray 1.5; to be restored or removed
+			//if (g_mt_config.test(mtMap))
+			//{
+			//    Device.seqParallel.push_back(fastdelegate::FastDelegate0<>(
+			//    m_game_task_manager,&CGameTaskManager::UpdateTasks));
+			//}
+			//else
+			GameTaskManager().UpdateTasks();
+		}
+	}
+	// Inherited update
+	inherited::OnFrame();
+	// Draw client/server stats
+	if (!g_dedicated_server && psDeviceFlags.test(rsStatistic))
+	{
+		CGameFont* F = UI().Font().pFontDI;
+		if (!psNET_direct_connect)
+		{
+			if (IsServer())
+			{
+				const IServerStatistic* S = Server->GetStatistic();
+				F->SetHeightI(0.015f);
+				F->OutSetI(0.0f, 0.5f);
+				F->SetColor(D3DCOLOR_XRGB(0, 255, 0));
+				F->OutNext("IN:  %4d/%4d (%2.1f%%)", S->bytes_in_real, S->bytes_in,
+				           100.f * float(S->bytes_in_real) / float(S->bytes_in));
+				F->OutNext("OUT: %4d/%4d (%2.1f%%)", S->bytes_out_real, S->bytes_out,
+				           100.f * float(S->bytes_out_real) / float(S->bytes_out));
+				F->OutNext("client_2_sever ping: %d", net_Statistic.getPing());
+				F->OutNext("SPS/Sended : %4d/%4d", S->dwBytesPerSec, S->dwBytesSended);
+				F->OutNext("sv_urate/cl_urate : %4d/%4d", psNET_ServerUpdate, psNET_ClientUpdate);
+				F->SetColor(D3DCOLOR_XRGB(255, 255, 255));
+				struct net_stats_functor
+				{
+					xrServer* m_server;
+					CGameFont* F;
+
+					void operator()(IClient* C)
+					{
+						m_server->UpdateClientStatistic(C);
+						F->OutNext("0x%08x: P(%d), BPS(%2.1fK), MRR(%2d), MSR(%2d), Retried(%2d), Blocked(%2d)",
+						           //Server->game->get_option_s(*C->Name,"name",*C->Name),
+						           C->ID.value(),
+						           C->stats.getPing(),
+						           float(C->stats.getBPS()), // /1024,
+						           C->stats.getMPS_Receive(),
+						           C->stats.getMPS_Send(),
+						           C->stats.getRetriedCount(),
+						           C->stats.dwTimesBlocked);
+					}
+				};
+				net_stats_functor tmp_functor;
+				tmp_functor.m_server = Server;
+				tmp_functor.F = F;
+				Server->ForEachClientDo(tmp_functor);
+			}
+			if (IsClient())
+			{
+				IPureClient::UpdateStatistic();
+				F->SetHeightI(0.015f);
+				F->OutSetI(0.0f, 0.5f);
+				F->SetColor(D3DCOLOR_XRGB(0, 255, 0));
+				F->OutNext("client_2_sever ping: %d", net_Statistic.getPing());
+				F->OutNext("sv_urate/cl_urate : %4d/%4d", psNET_ServerUpdate, psNET_ClientUpdate);
+				F->SetColor(D3DCOLOR_XRGB(255, 255, 255));
+				F->OutNext("BReceivedPs(%2d), BSendedPs(%2d), Retried(%2d), Blocked(%2d)",
+				           net_Statistic.getReceivedPerSec(),
+				           net_Statistic.getSendedPerSec(),
+				           net_Statistic.getRetriedCount(),
+				           net_Statistic.dwTimesBlocked);
+#ifdef DEBUG
+                if (!pStatGraphR)
+                {
+                    pStatGraphR = xr_new<CStatGraph>();
+                    pStatGraphR->SetRect(50, 700, 300, 68, 0xff000000, 0xff000000);
+                    //m_stat_graph->SetGrid(0, 0.0f, 10, 1.0f, 0xff808080, 0xffffffff);
+                    pStatGraphR->SetMinMax(0.0f, 65536.0f, 1000);
+                    pStatGraphR->SetStyle(CStatGraph::stBarLine);
+                    pStatGraphR->AppendSubGraph(CStatGraph::stBarLine);
+                }
+                pStatGraphR->AppendItem(float(net_Statistic.getBPS()), 0xff00ff00, 0);
+                F->OutSet(20.f, 700.f);
+                F->OutNext("64 KBS");
+#endif
+			}
+		}
+	}
+	else
+	{
+#ifdef DEBUG
+        if (pStatGraphR)
+            xr_delete(pStatGraphR);
+#endif
+	}
+#ifdef DEBUG
+    g_pGamePersistent->Environment().m_paused = m_bEnvPaused;
+#endif
+	g_pGamePersistent->Environment().SetGameTime(GetEnvironmentGameDayTimeSec(),
+	                                             game->GetEnvironmentGameTimeFactor());
+	if (!g_dedicated_server)
+		ai().script_engine().script_process(ScriptEngine::eScriptProcessorLevel)->update();
+	m_ph_commander->update();
+	m_ph_commander_scripts->update();
+	Device.Statistic->TEST0.Begin();
+	BulletManager().CommitRenderSet();
+	Device.Statistic->TEST0.End();
+	// update static sounds
+	if (!g_dedicated_server)
+	{
+		if (g_mt_config.test(mtLevelSounds))
+		{
+			Device.seqParallel.push_back(fastdelegate::FastDelegate0<>(
+				m_level_sound_manager, &CLevelSoundManager::Update));
+		}
+		else
+			m_level_sound_manager->Update();
+	}
+
+	// defer LUA-GC-STEP
+	if (!g_dedicated_server)
+	{
+		if (g_mt_config.test(mtLUA_GC))
+			Device.seqParallel.push_back(fastdelegate::FastDelegate0<>(this, &CLevel::script_gc));
+		else
+			script_gc();
+	}
+	if (pStatGraphR)
+	{
+		static float fRPC_Mult = 10.0f;
+		static float fRPS_Mult = 1.0f;
+		pStatGraphR->AppendItem(float(m_dwRPC) * fRPC_Mult, 0xffff0000, 1);
+		pStatGraphR->AppendItem(float(m_dwRPS) * fRPS_Mult, 0xff00ff00, 0);
+	}
+
+	for (auto& pair : m_script_attachments)
+		pair.second->Update();
+
+	if (auto* actor = smart_cast<CActor*>(CurrentControlEntity()))
+		VrSnapHeldItems(*actor);
+}
+
+int psLUA_GCSTEP = 300;
+int psLua_ParallelGCStep = 75;
+extern BOOL psLua_ParallelGC;
+extern BOOL psLua_ParallelGC_debug;
+
+void CLevel::script_gc()
+{
+	if (!(psLua_ParallelGC && Device.LuaGC))
+	{	
+		PROF_EVENT();	
+		lua_gc(ai().script_engine().lua(), LUA_GCSTEP, psLUA_GCSTEP);
+	}
+}
+
+// demonized: bind LuaGC call to be available in device.cpp
+bool CLevel::Load(u32 dwNum)
+{
+    inherited::Load(dwNum);
+    Msg("Device.LuaGC bind");
+    Device.LuaGC = fastdelegate::FastDelegate0<int>(&CLevel::LuaGC);
+    Device.LuaGCDebug = fastdelegate::FastDelegate0<void>(&CLevel::LuaGCDebug);
+    return true;
+}
+
+// demonized: called from Device, via Device.LuaGC pointer
+int CLevel::LuaGC()
+{
+    return lua_gc(ai().script_engine().lua(), LUA_GCSTEP, psLua_ParallelGCStep);
+}
+void CLevel::LuaGCDebug()
+{
+    static int mem_kb = 0;
+    mem_kb = lua_gc(ai().script_engine().lua(), LUA_GCCOUNT, 0);
+    Msg("[Lua] CLevel::LuaGCDebug mem_kb %llu, times performed %d", mem_kb, Device.LuaGCCount);
+}
+
+#ifdef DEBUG_PRECISE_PATH
+void test_precise_path();
+#endif
+
+#ifdef DEBUG
+extern Flags32 dbg_net_Draw_Flags;
+#endif
+
+extern void draw_wnds_rects();
+extern bool use_reshade;
+extern void render_reshade_effects();
+
+extern int ps_r4_hdr10_pda; // NOTE: this is a hack to avoid double HDR tonemapping the PDA
+
+bool CLevel::VrInventoryOpen() const
+{
+    return CurrentGameUI() && CurrentGameUI()->GetActorMenu().IsShown();
+}
+
+bool CLevel::VrPdaOpen() const
+{
+    return CurrentGameUI() && CurrentGameUI()->GetPdaMenu().IsShown();
+}
+
+void CLevel::VrToggleInventory()
+{
+    if (!CurrentGameUI()) return;
+    // Closing must work while the inventory has paused actor simulation.
+    // Anomaly's backpack, loot and trade windows are script dialogs rather
+    // than the native ActorMenu, so close any open level dialog through the
+    // same inventory key press a desktop player would use.
+    if (CUIDialogWnd* open=CurrentGameUI()->TopInputReceiver())
+    {
+        m_vr_ui_pressed_receiver=nullptr;
+        const int escape=0x01; // DIK_ESCAPE
+        const int inventory=get_action_dik(kINVENTORY);
+        // Dialogs that ignore the inventory key (NPC conversation, some
+        // script windows) still close on Escape, so X is never a dead button.
+        for (const int dik:{inventory ? inventory : escape,escape})
+        {
+            CurrentGameUI()->IR_UIOnKeyboardPress(dik);
+            CurrentGameUI()->IR_UIOnKeyboardRelease(dik);
+            if (CurrentGameUI()->TopInputReceiver()!=open) break;
+        }
+        if (VrInventoryOpen()) CurrentGameUI()->ShowActorMenu();
+        return;
+    }
+    if (VrInventoryOpen())
+    {
+        m_vr_ui_pressed_receiver=nullptr;
+        CurrentGameUI()->ShowActorMenu();
+        return;
+    }
+    CActor* actor=smart_cast<CActor*>(CurrentControlEntity());
+    if (!actor || CurrentViewEntity()!=actor || !actor->g_Alive() ||
+        actor->Remote() || actor->inventory_disabled()) return;
+    // X with the free left hand at the helmet is the quick save gesture.
+    if (VrHeadGesture(0)) return;
+    CurrentGameUI()->ShowActorMenu();
+}
+
+bool CLevel::VrUiPointerActive() const
+{
+    if (!CurrentGameUI() || Console->bVisible) return false;
+    CUIDialogWnd* target=CurrentGameUI()->TopInputReceiver();
+    if (!target && VrInventoryOpen()) target=&CurrentGameUI()->GetActorMenu();
+    return target && target->IsShown() && target->IsEnabled() && target->NeedCursor();
+}
+
+bool CLevel::VrUiPointer(float u, float v, int button, int right, bool transfer)
+{
+    CUIDialogWnd* target=CurrentGameUI() ? CurrentGameUI()->TopInputReceiver() : nullptr;
+    // Actor inventory, NPC conversation, trading, upgrades, and other level
+    // dialogs share the same holder and cursor input route.
+    if (!target && VrInventoryOpen())
+        target=&CurrentGameUI()->GetActorMenu();
+    if (!target || !target->IsShown() || !target->IsEnabled() || !target->NeedCursor() ||
+        Console->bVisible)
+    {
+        m_vr_ui_pressed_receiver=nullptr;
+        GetUICursor().SetVrPressed(false);
+        return false;
+    }
+    if (m_vr_ui_pressed_receiver!=target)
+        m_vr_ui_pressed_receiver=nullptr;
+    const bool valid=u>=0 && u<=1 && v>=0 && v<=1;
+    Fvector2 position;
+    position.set(valid ? u*UI_BASE_WIDTH : -1.f,valid ? v*UI_BASE_HEIGHT : -1.f);
+    if (valid) GetUICursor().SetVrCursorPosition(position);
+    // A click on the keyboard never reaches the window (it would take the
+    // focus from the text box); the hands type there themselves
+    // (VrUiHandPointer). A click started on the window is still let go there.
+    if (valid && !(button<0 && m_vr_ui_pressed_receiver==target) &&
+        VrKeyboardPointer(*CurrentGameUI(),position,button))
+    {
+        // B let go over the keyboard still releases the right button.
+        if (right<0) CurrentGameUI()->IR_UIOnKeyboardRelease(MOUSE_2);
+        return true;
+    }
+    // Held since an earlier click on this window: a drag (the map pans).
+    GetUICursor().SetVrPressed(valid && m_vr_ui_pressed_receiver==target);
+    target->OnMouseAction(position.x,position.y,WINDOW_MOUSE_MOVE);
+    // Stick up/down scrolls the window under the cursor: one step at once,
+    // then repeating faster the further the stick is pushed. The right
+    // stick always; the left too in a window that stops walking (the
+    // inventory, loot, trade), where the left hand points.
+    const u32 now=Device.dwTimeContinual;
+    const float dt=float(now-m_vr_ui_scroll_time)*0.001f;
+    m_vr_ui_scroll_time=now;
+    const int steps=m_vr_ui_scroll.Step(valid ? vr::UiScrollAxis(target->StopAnyMove()) : 0.f,dt);
+    for (int step=0;step<_abs(steps);++step)
+    {
+        const bool handled=target->OnMouseAction(position.x,position.y,steps>0 ? WINDOW_MOUSE_WHEEL_UP : WINDOW_MOUSE_WHEEL_DOWN);
+        if (vr::ContactDebug()>0)
+            Msg("* [VR UI] wheel %s at (%.0f %.0f) on %s: %s",steps>0 ? "up" : "down",position.x,position.y,
+                target->WindowName().size() ? target->WindowName().c_str() : typeid(*target).name(),
+                handled ? "handled" : "not handled");
+    }
+    CUIDialogWnd* current=CurrentGameUI()->TopInputReceiver();
+    if (current && current!=target)
+    {
+        m_vr_ui_pressed_receiver=nullptr;
+        return false;
+    }
+    if (button>0 && valid)
+    {
+        m_vr_ui_pressed_receiver=target;
+        // Now, not next frame: this frame's UI update must see it held.
+        GetUICursor().SetVrPressed(true);
+        // Follow the ordinary mouse input path, including dialog keyboard
+        // callbacks and inventory drag capture.
+        CurrentGameUI()->IR_UIOnKeyboardPress(MOUSE_1);
+    }
+    else if (button<0 && m_vr_ui_pressed_receiver==target)
+    {
+        m_vr_ui_pressed_receiver=nullptr;
+        GetUICursor().SetVrPressed(false);
+        if (valid) CurrentGameUI()->IR_UIOnKeyboardRelease(MOUSE_1);
+        else target->OnMouseAction(-1,-1,WINDOW_LBUTTON_UP);
+    }
+    // A double click where the cursor is, as the desktop's: moves the item
+    // between the lists (a body, box or trader and the player), or uses it.
+    if (transfer && valid && !m_vr_ui_pressed_receiver)
+        for (int click=0; click<2 && CurrentGameUI()->TopInputReceiver()==target; ++click)
+        {
+            CurrentGameUI()->IR_UIOnKeyboardPress(MOUSE_1);
+            CurrentGameUI()->IR_UIOnKeyboardRelease(MOUSE_1);
+        }
+    // B: the right mouse button (the inventory's item menu).
+    if (right>0 && valid) CurrentGameUI()->IR_UIOnKeyboardPress(MOUSE_2);
+    else if (right<0)
+    {
+        // Let go off the panel (or with the hand lost) is still a release,
+        // at off-panel coordinates, or the right button stays down.
+        if (valid) CurrentGameUI()->IR_UIOnKeyboardRelease(MOUSE_2);
+        else target->OnMouseAction(-1,-1,WINDOW_RBUTTON_UP);
+    }
+    return true;
+}
+
+bool CLevel::VrUiHandPointer(int hand, float u, float v, bool down)
+{
+    if (!CurrentGameUI() || Console->bVisible) return false;
+    Fvector2 position;
+    position.set(u>=0.f ? u*UI_BASE_WIDTH : -1.f,v>=0.f ? v*UI_BASE_HEIGHT : -1.f);
+    return VrKeyboardHand(*CurrentGameUI(),hand,position,down);
+}
+
+bool CLevel::VrOutfitHands() const
+{
+    auto* actor=smart_cast<CActor*>(CurrentControlEntity());
+    return actor && actor->m_legs_controller.vr_outfit_arms();
+}
+
+const void* CLevel::VrBodyCamera(Fmatrix& world)
+{
+    CActor* actor = smart_cast<CActor*>(CurrentControlEntity());
+    if (!actor || CurrentViewEntity() != actor || !actor->g_Alive() || !actor->Ready() || actor->Holder()) return nullptr;
+    CCameraBase* camera = actor->cam_FirstEye();
+    world.identity(); world.c = camera->Position(); world.k = camera->Direction();
+    world.c.y += actor->VrCrouchLift(Device.fTimeDelta);
+    world.k.y = 0;
+    if (world.k.square_magnitude() < EPS_S) world.k.set(0,0,1);
+    world.k.normalize(); world.i.crossproduct(world.j, world.k);
+    return actor;
+}
+void CLevel::VrQuickSave()
+{
+    // As the quick save key, so the game's own save script handles it (and
+    // can refuse it, as during a conversation or in combat).
+    CActor* actor = smart_cast<CActor*>(CurrentControlEntity());
+    const int dik = get_action_dik(kQUICK_SAVE);
+    if (!actor || !actor->g_Alive() || !dik) return;
+    IR_OnKeyboardPress(dik);
+    IR_OnKeyboardRelease(dik);
+    Msg("* [VR] hand at the head, X or A held: quick save");
+}
+void CLevel::VrConstrainHead(const Fvector& anchor, Fvector& desired)
+{
+    CActor* actor = smart_cast<CActor*>(CurrentControlEntity());
+    if (!actor) { desired = anchor; return; }
+    Fvector delta; delta.sub(desired, anchor);
+    const float distance = delta.magnitude();
+    const float limit = vr::MaxHeadOffset();
+    if (distance > limit && distance > EPS_S) delta.mul(limit / distance);
+    const float safe = vr::HeadSweepFraction(delta.magnitude(), [&](float fraction)
+    {
+        Fmatrix box; box.identity(); box.c.mad(anchor, delta, fraction);
+        return test_head_box(0.12f, box, actor);
+    });
+    desired.mad(anchor, delta, safe);
+}
+const xr_vector<u16>& CLevel::VrNearbyItems()
+{
+    if (m_vr_nearby_frame==Device.dwFrame) return m_vr_nearby_items;
+    m_vr_nearby_frame=Device.dwFrame;
+    m_vr_nearby_items.clear();
+    auto* actor=smart_cast<CActor*>(CurrentControlEntity());
+    Fvector head;
+    if (!actor || !actor->g_Alive() || actor->Holder() || !vr::HeadPosition(head))
+        return m_vr_nearby_items;
+    // Within the set range of the head across the floor, at any height
+    // from the feet to above the head.
+    const float range=vr::LabelRange();
+    if (range<=0.f) return m_vr_nearby_items;
+    xr_vector<ISpatial*> found;
+    g_SpatialSpace->q_sphere(found,0,STYPE_COLLIDEABLE,head,_sqrt(range*range+4.f));
+    xr_vector<std::pair<float,u16>> ranked;
+    for (ISpatial* spatial:found)
+    {
+        CObject* object=spatial->dcast_CObject();
+        auto* item=object ? smart_cast<CInventoryItem*>(object) : nullptr;
+        if (!item || object->H_Parent() || !object->getVisible() || object->getDestroy() ||
+            !object->Visual() || !item->CanTake()) continue;
+        Fvector across; across.sub(object->Position(),head);
+        if (across.y<-2.f || across.y>0.5f) continue;
+        across.y=0.f;
+        if (across.square_magnitude()>range*range) continue;
+        ranked.emplace_back(object->Position().distance_to_sqr(head),object->ID());
+    }
+    std::sort(ranked.begin(),ranked.end());
+    for (const auto& entry:ranked)
+    {
+        if (m_vr_nearby_items.size()>=6) break;
+        // Not named through a wall or floor: only items the head can see.
+        CObject* object=Objects.net_Find(entry.second);
+        if (!object) continue;
+        Fvector centre; object->Center(centre);
+        Fvector direction; direction.sub(centre,head);
+        const float distance=direction.magnitude();
+        collide::rq_result wall;
+        if (distance>EPS_S && ObjectSpace.RayPick(head,direction.div(distance),distance,
+            collide::rqtStatic,wall,nullptr)) continue;
+        m_vr_nearby_items.push_back(entry.second);
+    }
+    return m_vr_nearby_items;
+}
+
+void CLevel::VrRenderItemLabels()
+{
+    if (!g_vr_owns_present || !vr::GameplayActive() ||
+        (CurrentGameUI() && CurrentGameUI()->TopInputReceiver())) return;
+    CGameFont* font=UI().Font().pFontArial14;
+    if (!font) return;
+    font->SetAligment(CGameFont::alCenter);
+    font->SetColor(0xFFF2E7B8);
+    // Only names mark pickable items, and none for an item already in a hand.
+    auto* actor=smart_cast<CActor*>(CurrentControlEntity());
+    for (u16 id:VrNearbyItems())
+    {
+        if (actor && (id==actor->m_vr_pickup.grabbed_id[0] || id==actor->m_vr_pickup.grabbed_id[1]))
+            continue;
+        CObject* object=Objects.net_Find(id);
+        auto* item=object ? smart_cast<CInventoryItem*>(object) : nullptr;
+        if (!item || !object->Visual()) continue;
+        Fbox box; box.xform(object->Visual()->getVisData().box,object->XFORM());
+        Fvector top; box.getcenter(top); top.y=box.max.y+0.06f;
+        // Drawn into each eye with that eye's projection, so the name sits
+        // on the item at its depth instead of on the head-locked UI panel.
+        // Fmatrix::transform into an Fvector4 has already divided x and y by
+        // w (dividing again slid the names toward the view centre with
+        // distance, and moved them as the head moved).
+        Fvector4 clip;
+        Device.mFullTransform.transform(clip,top);
+        if (clip.w<0.05f) continue;
+        const float x=clip.x, y=clip.y;
+        if (_abs(x)>1.f || _abs(y)>1.f) continue;
+        font->Out((x+1.f)*0.5f*float(Device.dwWidth),(1.f-y)*0.5f*float(Device.dwHeight),
+            "%s",item->NameShort());
+    }
+    font->OnRender();
+}
+
+namespace
+{
+// The living character nearest the head's gaze, within a cone about as wide
+// as a body (vr::GazeTargetAngle) and in plain view of the head. One exact
+// ray had to land on the character's collision shape every frame: head
+// drift, the gap under an arm or a few tens of metres made it miss, and
+// each miss started its delay again.
+u16 VrGazeCharacter(CActor& actor, u16 current)
+{
+    Fmatrix head;
+    const float range=vr::NpcLabelRange();
+    if (range<=0.f || !vr::HeadTransform(head)) return u16(-1);
+    xr_vector<ISpatial*> found;
+    g_SpatialSpace->q_sphere(found,0,STYPE_COLLIDEABLE,head.c,range);
+    xr_vector<std::pair<float,CObject*>> ranked;
+    for (ISpatial* spatial:found)
+    {
+        CObject* object=spatial->dcast_CObject();
+        auto* alive=object ? smart_cast<CEntityAlive*>(object) : nullptr;
+        if (!alive || object==&actor || !alive->g_Alive() || !object->getVisible() ||
+            object->getDestroy() || !object->Visual()) continue;
+        // The point of the body (from the knees up) level with where the
+        // gaze reaches it.
+        Fbox box; box.xform(object->Visual()->getVisData().box,object->XFORM());
+        Fvector point; box.getcenter(point);
+        Fvector flat; flat.sub(point,head.c); flat.y=0.f;
+        const float reach=flat.magnitude();
+        const float horizontal=_sqrt(head.k.x*head.k.x+head.k.z*head.k.z);
+        const float gaze_y=horizontal>0.05f ? head.c.y+head.k.y*reach/horizontal : head.c.y;
+        point.y=clampr(gaze_y,box.min.y+0.3f*(box.max.y-box.min.y),box.max.y);
+        Fvector to; to.sub(point,head.c);
+        const float distance=to.magnitude();
+        if (distance<0.3f || distance>range) continue;
+        to.div(distance);
+        const float angle=acosf(clampr(to.dotproduct(head.k),-1.f,1.f));
+        const bool named=object->ID()==current;
+        if (angle>vr::GazeTargetAngle(distance,named)) continue;
+        // Nearest the gaze for its size; the one already named keeps ties.
+        ranked.emplace_back(angle/vr::GazeTargetAngle(distance,false)-(named ? 0.25f : 0.f),object);
+    }
+    std::sort(ranked.begin(),ranked.end(),[](const auto& a, const auto& b){ return a.first<b.first; });
+    for (const auto& [score,object]:ranked)
+    {
+        // Not through a wall, a floor or the ground.
+        Fbox box; box.xform(object->Visual()->getVisData().box,object->XFORM());
+        Fvector centre; box.getcenter(centre);
+        centre.y=box.min.y+0.75f*(box.max.y-box.min.y);
+        Fvector to; to.sub(centre,head.c);
+        const float distance=to.magnitude();
+        collide::rq_result wall;
+        if (distance>EPS_S && Level().ObjectSpace.RayPick(head.c,to.div(distance),distance,
+            collide::rqtStatic,wall,&actor)) continue;
+        return object->ID();
+    }
+    return u16(-1);
+}
+}
+
+void CLevel::VrRenderNpcLabel()
+{
+    if (!psHUD_Flags.test(HUD_INFO) || (CurrentGameUI() && CurrentGameUI()->TopInputReceiver())) return;
+    auto* actor=smart_cast<CActor*>(CurrentControlEntity());
+    if (!actor || !actor->g_Alive()) return;
+    // Once a frame: who the head looks at. Shown after 0.4 s on them, as the
+    // desktop's target information fades in, and kept through a glance away
+    // of up to 0.3 s.
+    if (m_vr_npc_frame!=Device.dwFrame)
+    {
+        m_vr_npc_frame=Device.dwFrame;
+        const u16 id=VrGazeCharacter(*actor,m_vr_npc_id);
+        if (id!=u16(-1)) m_vr_npc_seen=Device.dwTimeGlobal;
+        if ((id!=u16(-1) || Device.dwTimeGlobal-m_vr_npc_seen>300) && id!=m_vr_npc_id)
+        {
+            m_vr_npc_id=id;
+            m_vr_npc_since=Device.dwTimeGlobal;
+        }
+    }
+    if (m_vr_npc_id==u16(-1) || Device.dwTimeGlobal-m_vr_npc_since<400) return;
+    auto* alive=smart_cast<CEntityAlive*>(Objects.net_Find(m_vr_npc_id));
+    if (!alive || !alive->g_Alive() || !alive->Visual()) return;
+    // The colours and lines CHUDTarget's recon shows (HUDRecon.cpp).
+    u32 color=0xFFFFFF80;
+    LPCSTR line1=nullptr, line2=nullptr;
+    if (alive->cast_base_monster()) color=0xFFFF0000;
+    else if (auto* other=smart_cast<CInventoryOwner*>(alive))
+    {
+        switch (RELATION_REGISTRY().GetRelationType(other,smart_cast<CInventoryOwner*>(actor)))
+        {
+        case ALife::eRelationTypeEnemy: color=0xFFFF0000; break;
+        case ALife::eRelationTypeFriend: color=0xFF00FF00; break;
+        default: color=0xFFFFFF80; break;
+        }
+        CStringTable table;
+        line1=table.translate(other->Name()).c_str();
+        line2=table.translate(other->CharacterInfo().Community().id()).c_str();
+    }
+    if (!line1) return;
+    Fbox box; box.xform(alive->Visual()->getVisData().box,alive->XFORM());
+    Fvector top; box.getcenter(top); top.y=box.max.y+0.15f;
+    // Into this eye, as the item labels (Fmatrix::transform divides by w).
+    Fvector4 clip;
+    Device.mFullTransform.transform(clip,top);
+    if (clip.w<0.05f || _abs(clip.x)>1.f || _abs(clip.y)>1.f) return;
+    CGameFont* font=UI().Font().pFontArial14;
+    if (!font) return;
+    font->SetAligment(CGameFont::alCenter);
+    font->SetColor(color);
+    const float x=(clip.x+1.f)*0.5f*float(Device.dwWidth), y=(1.f-clip.y)*0.5f*float(Device.dwHeight);
+    font->Out(x,y,"%s",line1);
+    if (line2 && line2[0]) font->Out(x,y+font->CurrentHeight_(),"%s",line2);
+    font->OnRender();
+}
+
+void CLevel::OnRenderVrExtras()
+{
+    if (game) BulletManager().Render();
+    if (!vr::GameplayActive()) return;
+    VrRenderItemLabels();
+    VrRenderNpcLabel();
+    vr_world_overlay();
+    // Pouch and holsters show a single ring only while a hand is within
+    // their reach: the pouch for the support hand (with ammunition to draw),
+    // a holster for the hand holding its weapon (to put it away) or an empty
+    // hand (to draw it).
+    const auto ring=[](const Fvector& centre, float radius, u32 color)
+    {
+        Fvector previous;
+        for (int segment=0;segment<=32;++segment)
+        {
+            const float angle=PI_MUL_2*float(segment)/32.f;
+            Fvector point=centre;
+            point.x+=radius*_cos(angle); point.z+=radius*_sin(angle);
+            if (segment) vr::OverlayDraw().DrawLine(previous,point,color);
+            previous=point;
+        }
+    };
+    if (auto* actor=smart_cast<CActor*>(CurrentControlEntity()); actor && actor->g_Alive())
+    {
+        auto* active=smart_cast<CWeapon*>(actor->inventory().ActiveItem());
+        // The pouch is there only while a weapon is in the hand. Its ring
+        // shows for a free support hand, or one carrying ammunition to it.
+        auto* pouch_weapon=active;
+        const int support=active ? 1-active->VrWeaponHand() : 1-vr::DominantHand();
+        const Fvector pouch=VrPouchPoint(*actor);
+        Fmatrix hand;
+        const u16 carried=actor->m_vr_pickup.grabbed_id[support];
+        const bool ammo=carried!=u16(-1) && smart_cast<CWeaponAmmo*>(Objects.net_Find(carried));
+        if (pouch_weapon && vr::HandTransform(support,false,hand) && hand.c.distance_to(pouch)<=vr_pouch_reach &&
+            (ammo || (pouch_weapon->VrPouchHasAmmo() && !VrHandHoldsItem(*actor,support))))
+            ring(pouch,vr_pouch_reach,0xFFFFD870);
+        // Just after the support hand changed the pouch's rounds: their
+        // short name over it, into this eye as the item labels are.
+        shared_str rounds;
+        if (pouch_weapon && pouch_weapon->VrPouchAmmoShown(rounds) && pSettings->section_exist(rounds))
+        {
+            Fvector above=pouch; above.y+=0.10f;
+            Fvector4 clip;
+            Device.mFullTransform.transform(clip,above);
+            CGameFont* font=UI().Font().pFontArial14;
+            if (font && clip.w>0.05f && _abs(clip.x)<=1.f && _abs(clip.y)<=1.f)
+            {
+                LPCSTR name=READ_IF_EXISTS(pSettings,r_string,rounds,"inv_name_short",
+                    READ_IF_EXISTS(pSettings,r_string,rounds,"inv_name",rounds.c_str()));
+                font->SetAligment(CGameFont::alCenter);
+                font->SetColor(0xFFFFD870);
+                font->Out((clip.x+1.f)*0.5f*float(Device.dwWidth),(1.f-clip.y)*0.5f*float(Device.dwHeight),
+                    "%s",CStringTable().translate(name).c_str());
+                font->OnRender();
+                vr_world_overlay();
+            }
+        }
+        for (u16 slot:{INV_SLOT_2,INV_SLOT_3})
+        {
+            auto* weapon=smart_cast<CWeapon*>(actor->inventory().ItemFromSlot(slot));
+            Fvector centre;
+            float range=0.f;
+            if (!weapon || !weapon->VrHolsterPoint(*actor,centre,range)) continue;
+            bool in_reach=false;
+            if (active==weapon)
+                in_reach=vr::HandTransform(weapon->VrWeaponHand(),false,hand) && hand.c.distance_to(centre)<=range;
+            else if (!active)
+                for (int side=0;side<2 && !in_reach;++side)
+                    in_reach=vr::HandTransform(side,false,hand) && hand.c.distance_to(centre)<=range;
+            if (in_reach) ring(centre,0.1f,0xFF7CFF8E);
+        }
+        // Body slots: a small ring at the slot a free hand is within reach of.
+        if (vr::BodySlotRings())
+            for (int side=0;side<2;++side)
+            {
+                Fvector centre;
+                const int kind=actor->m_vr_pickup.body_hover[side];
+                if (kind>=0 && VrBodySlotPoint(*actor,kind,centre)) ring(centre,0.06f,0xFF8EC8FF);
+            }
+        RenderVrWristDisplay(*actor);
+        RenderVrDeviceUI(*actor);
+        // The screen drew with its own shader and matrix: the lines after it
+        // (magazine boxes, body, hand rays) need the overlay state back.
+        vr_world_overlay();
+        RenderVrBinoculars(*actor);
+    }
+    if (auto* actor=smart_cast<CActor*>(CurrentControlEntity()))
+        for (auto* item:actor->inventory().m_all)
+            if (auto* weapon=item->cast_weapon())
+                weapon->VrRenderBasicMagazines();
+    if (auto* actor=smart_cast<CActor*>(CurrentControlEntity()))
+        if (auto* weapon=smart_cast<CWeapon*>(actor->inventory().ActiveItem()))
+            weapon->VrRenderSight();
+    if (vr::HandsVisible() && !VrOutfitHands())
+    {
+        Fmatrix body, hands[2];
+        if (VrBodyCamera(body))
+        {
+            const bool tracked[2]={vr::HandTransform(0,false,hands[0]),
+                                   vr::HandTransform(1,false,hands[1])};
+            const vr::OverlayDraw draw;
+            vr::DrawBodyIK(draw,body,hands,tracked);
+        }
+    }
+    if (!vr::HandRaysVisible()) return;
+    CObject* actor = CurrentControlEntity();
+    auto* holder = smart_cast<CActor*>(actor);
+    for (int hand = 0; hand < 2; ++hand)
+    {
+        if (vr::HandHiddenForFrame(hand) || (holder && VrHandHolding(*holder, hand))) continue;
+        Fmatrix aim;
+        if (!vr::HandTransform(hand, true, aim)) continue;
+        collide::rq_result hit;
+        const bool found = ObjectSpace.RayPick(aim.c, aim.k, 2.f, collide::rqtBoth, hit, actor) != FALSE;
+        // Require body-to-hand line of sight too, so a controller cannot point
+        // through a wall after physically reaching through it.
+        Fmatrix body;
+        if (!VrBodyCamera(body)) continue;
+        Fvector to_hand; to_hand.sub(aim.c, body.c);
+        const float hand_distance = to_hand.magnitude();
+        collide::rq_result obstruction;
+        if (hand_distance > vr::MaxHeadOffset() + 1.f) continue;
+        if (hand_distance > EPS_S)
+        {
+            to_hand.div(hand_distance);
+            if (ObjectSpace.RayPick(body.c, to_hand, hand_distance, collide::rqtBoth, obstruction, actor)) continue;
+        }
+        Fvector end; end.mad(aim.c, aim.k, found ? hit.range : 2.f);
+        CGameObject* object = found ? smart_cast<CGameObject*>(hit.O) : nullptr;
+        const auto* item = object ? object->cast_inventory_item() : nullptr;
+        auto* holder = object ? object->cast_physics_shell_holder() : nullptr;
+        const bool pickup = item && holder && holder->PPhysicsShell() &&
+            holder->PPhysicsShell()->isActive() && object->getVisible() &&
+            !object->getDestroy() && !object->H_Parent() && item->CanTake() &&
+            hit.range<=2.f;
+        const bool usable = object && object->getVisible() && object->tip_text();
+        const u32 color = pickup ? 0xff40e878 : usable ? 0xff7190a8 : 0xff304b60;
+        const vr::OverlayDraw draw;
+        draw.DrawLine(aim.c, end, color);
+        if (found) draw.DrawCross(end, pickup ? 0.065f : 0.015f, color);
+        // Mark the pointed-at object's centre as well as the ray impact so
+        // the target remains clear on uneven or partly obscured meshes.
+        if (pickup && object)
+            draw.DrawCross(object->Position(),0.11f,0xff60ff98);
+    }
+}
+
+void CLevel::VrRenderOverlayUI()
+{
+    if (!g_vr_owns_present || !game) return;
+    // Render the HUD and its font atlas on the dedicated head-locked quad,
+    // with the usual postprocess UI scale. Per-eye world render must not
+    // consume glyph batches into the scene's perspective target.
+    UI().pp_start();
+    HUD().RenderUI();
+    if (CurrentGameUI()) VrKeyboardDraw(*CurrentGameUI());
+    UI().pp_stop();
+}
+
+void CLevel::OnRender()
+{
+	// PDA
+	if (game && CurrentGameUI() && &CurrentGameUI()->GetPdaMenu() != nullptr)
+	{
+		CUIPdaWnd* pda = &CurrentGameUI()->GetPdaMenu();
+		if (Pda3D() && pda->IsShown())
+		{
+			ps_r4_hdr10_pda = 1; // !!! HACK !!!
+
+			pda->Draw();
+			CUICursor* cursor = &UI().GetUICursor();
+
+			if (cursor)
+			{
+				static bool need_reset;
+				bool is_top = CurrentGameUI()->TopInputReceiver() == pda;
+
+				if (pda->IsEnabled() && is_top && !Console->bVisible)
+				{
+					if (need_reset)
+					{
+						need_reset = false;
+						pda->ResetCursor();
+					}
+
+					Frect &pda_border = pda->m_cursor_box;
+					Fvector2 cursor_pos = cursor->GetCursorPosition();
+
+					if (!pda_border.in(cursor_pos))
+					{
+						clamp(cursor_pos.x, pda_border.left, pda_border.right);
+						clamp(cursor_pos.y, pda_border.top, pda_border.bottom);
+						cursor->SetUICursorPosition(cursor_pos);
+					}
+
+					Fvector2 cursor_pos_dif;
+					cursor_pos_dif.set(cursor_pos);
+					cursor_pos_dif.sub(pda->last_cursor_pos);
+					pda->last_cursor_pos.set(cursor_pos);
+					pda->MouseMovement(cursor_pos_dif.x, cursor_pos_dif.y);
+				}
+				else
+					need_reset = true;
+
+				if (is_top)
+					cursor->OnRender();
+			}
+			Render->RenderToTarget(Render->rtPDA);
+
+			ps_r4_hdr10_pda = 0;
+		}
+
+		if (Actor() && Actor()->m_bDelayDrawPickupItems)
+		{
+			Actor()->m_bDelayDrawPickupItems = false;
+			Actor()->DrawPickupItems();
+		}
+	}
+
+	inherited::OnRender();
+	if (!game)
+		return;
+	Game().OnRender();
+	if (!g_vr_owns_present) BulletManager().Render();
+
+	if (Device.m_SecondViewport.IsSVPFrame())
+		Render->RenderToTarget(Render->rtSVP);
+
+	if (use_reshade)
+		render_reshade_effects();
+
+	if (!g_vr_owns_present)
+		HUD().RenderUI();
+
+	ScriptDebugRender();
+
+#ifdef DEBUG
+    draw_wnds_rects();
+    physics_world()->OnRender();
+#endif
+#ifdef DEBUG
+    if (ai().get_level_graph())
+        ai().level_graph().render();
+#ifdef DEBUG_PRECISE_PATH
+    test_precise_path();
+#endif
+    CAI_Stalker* stalker = smart_cast<CAI_Stalker*>(Level().CurrentEntity());
+    if (stalker)
+        stalker->OnRender();
+    if (bDebug)
+    {
+        for (u32 I = 0; I < Level().Objects.o_count(); I++)
+        {
+            CObject* _O = Level().Objects.o_get_by_iterator(I);
+            CAI_Stalker* stalker = smart_cast<CAI_Stalker*>(_O);
+            if (stalker)
+                stalker->OnRender();
+            CCustomMonster* monster = smart_cast<CCustomMonster*>(_O);
+            if (monster)
+                monster->OnRender();
+            CPhysicObject* physic_object = smart_cast<CPhysicObject*>(_O);
+            if (physic_object)
+                physic_object->OnRender();
+            CSpaceRestrictor* space_restrictor = smart_cast<CSpaceRestrictor*>(_O);
+            if (space_restrictor)
+                space_restrictor->OnRender();
+            CClimableObject* climable = smart_cast<CClimableObject*>(_O);
+            if (climable)
+                climable->OnRender();
+            CTeamBaseZone* team_base_zone = smart_cast<CTeamBaseZone*>(_O);
+            if (team_base_zone)
+                team_base_zone->OnRender();
+            if (GameID() != eGameIDSingle)
+            {
+                CInventoryItem* pIItem = smart_cast<CInventoryItem*>(_O);
+                if (pIItem)
+                    pIItem->OnRender();
+            }
+            if (dbg_net_Draw_Flags.test(dbg_draw_skeleton)) //draw skeleton
+            {
+                CGameObject* pGO = smart_cast<CGameObject*>	(_O);
+                if (pGO && pGO != Level().CurrentViewEntity() && !pGO->H_Parent())
+                {
+                    if (pGO->Position().distance_to_sqr(Device.vCameraPosition) < 400.0f)
+                    {
+                        pGO->dbg_DrawSkeleton();
+                    }
+                }
+            }
+        }
+        //  [7/5/2005]
+        if (Server && Server->game) Server->game->OnRender();
+        //  [7/5/2005]
+        ObjectSpace.dbgRender();
+        UI().Font().pFontStat->OutSet(170, 630);
+        UI().Font().pFontStat->SetHeight(16.0f);
+        UI().Font().pFontStat->SetColor(0xffff0000);
+        if (Server)
+            UI().Font().pFontStat->OutNext("Client Objects:      [%d]", Server->GetEntitiesNum());
+        UI().Font().pFontStat->OutNext("Server Objects:      [%d]", Objects.o_count());
+        UI().Font().pFontStat->OutNext("Interpolation Steps: [%d]", Level().GetInterpolationSteps());
+        if (Server)
+        {
+            UI().Font().pFontStat->OutNext("Server updates size: [%d]", Server->GetLastUpdatesSize());
+        }
+        UI().Font().pFontStat->SetHeight(8.0f);
+    }
+#endif
+	debug_renderer().render();
+#ifdef DEBUG
+    if (bDebug)
+    {
+        DBG().draw_object_info();
+        DBG().draw_text();
+        DBG().draw_level_info();
+    }
+    DBG().draw_debug_text();
+    if (psAI_Flags.is(aiVision))
+    {
+        for (u32 I = 0; I < Level().Objects.o_count(); I++)
+        {
+            CObject* object = Objects.o_get_by_iterator(I);
+            CAI_Stalker* stalker = smart_cast<CAI_Stalker*>(object);
+            if (!stalker)
+                continue;
+            stalker->dbg_draw_vision();
+        }
+    }
+
+    if (psAI_Flags.test(aiDrawVisibilityRays))
+    {
+        for (u32 I = 0; I < Level().Objects.o_count(); I++)
+        {
+            CObject* object = Objects.o_get_by_iterator(I);
+            CAI_Stalker* stalker = smart_cast<CAI_Stalker*>(object);
+            if (!stalker)
+                continue;
+            stalker->dbg_draw_visibility_rays();
+        }
+    }
+#endif
+	// The outer level render runs after both stereo eyes have finished and the
+	// UI texture has been rebound. Flush dialogue/HUD font batches here, after
+	// game/script overlays have queued their text, once rather than per eye.
+	if (g_vr_owns_present && !g_vr_rendering_eye &&
+		CurrentGameUI() && g_pGamePersistent &&
+		!(g_pGamePersistent->m_pMainMenu && g_pGamePersistent->m_pMainMenu->IsActive()))
+		VrRenderOverlayUI();
+}
+
+void CLevel::ScriptDebugRender()
+{
+	if (!m_debug_render_queue.size())
+		return;
+
+	bool hasVisibleObj = false;
+	auto it = m_debug_render_queue.begin();
+	auto it_e = m_debug_render_queue.end();
+	for (; it != it_e; ++it)
+	{
+		DBG_ScriptObject* obj = (*it).second;
+		if (obj->m_visible) {
+			hasVisibleObj = true;
+			obj->Render();
+		}
+	}
+
+	// demonized: fix of showing console window when there are no visible gizmos 
+	if (hasVisibleObj)
+		DRender->OnFrameEnd();
+}
+
+script_attachment* CLevel::add_attachment(LPCSTR name, script_attachment* att)
+{
+	R_ASSERT(att);
+	remove_child(name, true);
+	m_script_attachments.emplace(mk_pair(name, att));
+	return att;
+}
+
+script_attachment* CLevel::get_attachment(LPCSTR name)
+{
+	if (m_script_attachments.size())
+	{
+		auto& att = m_script_attachments.find(name);
+		if (att != m_script_attachments.end())
+			return att->second;
+	}
+
+	return nullptr;
+}
+
+void CLevel::remove_child(LPCSTR name, bool destroy)
+{
+	script_attachment* attachment = get_attachment(name);
+	if (!attachment)
+		return;
+
+	if (destroy)
+		xr_delete(attachment);
+
+	m_script_attachments.erase(name);
+}
+
+void CLevel::remove_attachment(script_attachment* child)
+{
+	if (!child) return;
+	if (m_script_attachments.size())
+	{
+		script_attachment* attachment = get_attachment(child->GetName());
+		if (!attachment || attachment != child)
+			return;
+
+		remove_child(child->GetName(), true);
+	}
+}
+
+void CLevel::iterate_attachments(::luabind::functor<bool> functor)
+{
+	if (!m_script_attachments.size())
+		return;
+
+	for (auto& pair : m_script_attachments)
+		if (functor(pair.first.c_str(), pair.second) == true)
+			return;
+}
+
+void CLevel::OnEvent(EVENT E, u64 P1, u64 /**P2/**/)
+{
+	if (E == eEntitySpawn)
+	{
+		char Name[128];
+		Name[0] = 0;
+		sscanf(LPCSTR(P1), "%s", Name);
+		Level().g_cl_Spawn(Name, 0xff, M_SPAWN_OBJECT_LOCAL, Fvector().set(0, 0, 0));
+	}
+	else if (E == eChangeRP && P1)
+	{
+	}
+	else if (E == eDemoPlay && P1)
+	{
+		char* name = (char*)P1;
+		string_path RealName;
+		xr_strcpy(RealName, name);
+		xr_strcat(RealName, ".xrdemo");
+		Cameras().AddCamEffector(xr_new<CDemoPlay>(RealName, 1.3f, 0));
+	}
+	else if (E == eChangeTrack && P1)
+	{
+		// int id = atoi((char*)P1);
+		// Environment->Music_Play(id);
+	}
+	else if (E == eEnvironment)
+	{
+		// int id=0; float s=1;
+		// sscanf((char*)P1,"%d,%f",&id,&s);
+		// Environment->set_EnvMode(id,s);
+	}
+}
+
+void CLevel::AddObject_To_Objects4CrPr(CGameObject* pObj)
+{
+	if (!pObj)
+		return;
+	for (CGameObject* obj : pObjects4CrPr)
+	{
+		if (obj == pObj)
+			return;
+	}
+	pObjects4CrPr.push_back(pObj);
+}
+
+void CLevel::AddActor_To_Actors4CrPr(CGameObject* pActor)
+{
+	if (!pActor)
+		return;
+	if (!smart_cast<CActor*>(pActor)) return;
+	for (CGameObject* act : pActors4CrPr)
+	{
+		if (act == pActor)
+			return;
+	}
+	pActors4CrPr.push_back(pActor);
+}
+
+void CLevel::RemoveObject_From_4CrPr(CGameObject* pObj)
+{
+	if (!pObj)
+		return;
+	auto objIt = std::find(pObjects4CrPr.begin(), pObjects4CrPr.end(), pObj);
+	if (objIt != pObjects4CrPr.end())
+	{
+		pObjects4CrPr.erase(objIt);
+	}
+	auto aIt = std::find(pActors4CrPr.begin(), pActors4CrPr.end(), pObj);
+	if (aIt != pActors4CrPr.end())
+	{
+		pActors4CrPr.erase(aIt);
+	}
+}
+
+void CLevel::make_NetCorrectionPrediction()
+{
+	m_bNeed_CrPr = false;
+	m_bIn_CrPr = true;
+	u64 NumPhSteps = physics_world()->StepsNum();
+	physics_world()->StepsNum() -= m_dwNumSteps;
+	if (ph_console::g_bDebugDumpPhysicsStep && m_dwNumSteps > 10)
+	{
+		Msg("!!!TOO MANY PHYSICS STEPS FOR CORRECTION PREDICTION = %d !!!", m_dwNumSteps);
+		m_dwNumSteps = 10;
+	}
+	physics_world()->Freeze();
+	//setting UpdateData and determining number of PH steps from last received update
+	for (CGameObject* obj : pObjects4CrPr)
+	{
+		if (!obj)
+			continue;
+		obj->PH_B_CrPr();
+	}
+	//first prediction from "delivered" to "real current" position
+	//making enought PH steps to calculate current objects position based on their updated state
+	for (u32 i = 0; i < m_dwNumSteps; i++)
+	{
+		physics_world()->Step();
+
+		for (CGameObject* act : pActors4CrPr)
+		{
+			if (!act || act->CrPr_IsActivated())
+				continue;
+			act->PH_B_CrPr();
+		}
+	}
+	for (CGameObject* obj : pObjects4CrPr)
+	{
+		if (!obj)
+			continue;
+		obj->PH_I_CrPr();
+	}
+	if (!InterpolationDisabled())
+	{
+		for (u32 i = 0; i < lvInterpSteps; i++) //second prediction "real current" to "future" position
+		{
+			physics_world()->Step();
+		}
+		for (CGameObject* obj : pObjects4CrPr)
+		{
+			if (!obj)
+				continue;
+			obj->PH_A_CrPr();
+		}
+	}
+	physics_world()->UnFreeze();
+	physics_world()->StepsNum() = NumPhSteps;
+	m_dwNumSteps = 0;
+	m_bIn_CrPr = false;
+	pObjects4CrPr.clear();
+	pActors4CrPr.clear();
+}
+
+u32 CLevel::GetInterpolationSteps()
+{
+	return lvInterpSteps;
+}
+
+void CLevel::UpdateDeltaUpd(u32 LastTime)
+{
+	u32 CurrentDelta = LastTime - m_dwLastNetUpdateTime;
+	if (CurrentDelta < m_dwDeltaUpdate)
+		CurrentDelta = iFloor(float(m_dwDeltaUpdate * 10 + CurrentDelta) / 11);
+	m_dwLastNetUpdateTime = LastTime;
+	m_dwDeltaUpdate = CurrentDelta;
+	if (0 == g_cl_lvInterp)
+		ReculcInterpolationSteps();
+	else if (g_cl_lvInterp > 0)
+	{
+		lvInterpSteps = iCeil(g_cl_lvInterp / fixed_step);
+	}
+}
+
+void CLevel::ReculcInterpolationSteps()
+{
+	lvInterpSteps = iFloor(float(m_dwDeltaUpdate) / (fixed_step * 1000));
+	if (lvInterpSteps > 60)
+		lvInterpSteps = 60;
+	if (lvInterpSteps < 3)
+		lvInterpSteps = 3;
+}
+
+bool CLevel::InterpolationDisabled()
+{
+	return g_cl_lvInterp < 0;
+}
+
+void CLevel::PhisStepsCallback(u32 Time0, u32 Time1)
+{
+	if (!Level().game)
+		return;
+	if (GameID() == eGameIDSingle)
+		return;
+	//#pragma todo("Oles to all: highly inefficient and slow!!!")
+	//fixed (Andy)
+	/*
+	for (xr_vector<CObject*>::iterator O=Level().Objects.objects.begin(); O!=Level().Objects.objects.end(); ++O)
+	{
+	if( smart_cast<CActor*>((*O)){
+	CActor* pActor = smart_cast<CActor*>(*O);
+	if (!pActor || pActor->Remote()) continue;
+	pActor->UpdatePosStack(Time0, Time1);
+	}
+	};
+	*/
+}
+
+void CLevel::SetNumCrSteps(u32 NumSteps)
+{
+	m_bNeed_CrPr = true;
+	if (m_dwNumSteps > NumSteps)
+		return;
+	m_dwNumSteps = NumSteps;
+	if (m_dwNumSteps > 1000000)
+	{
+		VERIFY(0);
+	}
+}
+
+ALife::_TIME_ID CLevel::GetStartGameTime()
+{
+	return (game->GetStartGameTime());
+}
+
+ALife::_TIME_ID CLevel::GetGameTime()
+{
+	return (game->GetGameTime());
+}
+
+ALife::_TIME_ID CLevel::GetEnvironmentGameTime()
+{
+	return (game->GetEnvironmentGameTime());
+}
+
+u8 CLevel::GetDayTime()
+{
+	u32 dummy32, hours;
+	GetGameDateTime(dummy32, dummy32, dummy32, hours, dummy32, dummy32, dummy32);
+	VERIFY(hours < 256);
+	return u8(hours);
+}
+
+float CLevel::GetGameDayTimeSec()
+{
+	return (float(s64(GetGameTime() % (24 * 60 * 60 * 1000))) / 1000.f);
+}
+
+u32 CLevel::GetGameDayTimeMS()
+{
+	return (u32(s64(GetGameTime() % (24 * 60 * 60 * 1000))));
+}
+
+float CLevel::GetEnvironmentGameDayTimeSec()
+{
+	return (float(s64(GetEnvironmentGameTime() % (24 * 60 * 60 * 1000))) / 1000.f);
+}
+
+void CLevel::GetGameDateTime(u32& year, u32& month, u32& day, u32& hours, u32& mins, u32& secs, u32& milisecs)
+{
+	split_time(GetGameTime(), year, month, day, hours, mins, secs, milisecs);
+}
+
+float CLevel::GetGameTimeFactor()
+{
+	return (game ? game->GetGameTimeFactor() : 1.0f);
+}
+
+void CLevel::SetGameTimeFactor(const float fTimeFactor)
+{
+	game->SetGameTimeFactor(fTimeFactor);
+}
+
+void CLevel::SetGameTimeFactor(ALife::_TIME_ID GameTime, const float fTimeFactor)
+{
+	game->SetGameTimeFactor(GameTime, fTimeFactor);
+}
+
+void CLevel::SetEnvironmentGameTimeFactor(u64 const& GameTime, float const& fTimeFactor)
+{
+	if (!game)
+		return;
+	game->SetEnvironmentGameTimeFactor(GameTime, fTimeFactor);
+}
+
+bool CLevel::IsServer()
+{
+	if (!Server || IsDemoPlayStarted())
+		return false;
+	return true;
+}
+
+bool CLevel::IsClient()
+{
+	if (IsDemoPlayStarted())
+		return true;
+	if (Server)
+		return false;
+	return true;
+}
+
+void CLevel::OnAlifeSimulatorUnLoaded()
+{
+	MapManager().ResetStorage();
+	GameTaskManager().ResetStorage();
+	delete_data(m_debug_render_queue);
+}
+
+void CLevel::OnAlifeSimulatorLoaded()
+{
+	MapManager().ResetStorage();
+	GameTaskManager().ResetStorage();
+	delete_data(m_debug_render_queue);
+}
+
+void CLevel::OnSessionTerminate(LPCSTR reason)
+{
+	MainMenu()->OnSessionTerminate(reason);
+}
+
+u32 GameID()
+{
+	return Game().Type();
+}
+
+CZoneList* CLevel::create_hud_zones_list()
+{
+	hud_zones_list = xr_new<CZoneList>();
+	hud_zones_list->clear();
+	return hud_zones_list;
+}
+
+bool CZoneList::feel_touch_contact(CObject* O)
+{
+	TypesMapIt it = m_TypesMap.find(O->cNameSect());
+	bool res = (it != m_TypesMap.end());
+	CCustomZone* pZone = smart_cast<CCustomZone*>(O);
+	if (pZone && !pZone->IsEnabled())
+	{
+		res = false;
+	}
+	return res;
+}
+
+CZoneList::CZoneList()
+{
+}
+
+CZoneList::~CZoneList()
+{
+	clear();
+	destroy();
+}

@@ -1,0 +1,65 @@
+#include "blood_common.h"
+
+struct p_stamp
+{
+	float4 hpos : SV_Position;
+	float2 local : TEXCOORD0;
+	float4 A : TEXCOORD1;
+	float4 B : TEXCOORD2;
+};
+
+// Procedural splat shape. Output (additive): R = fluid amount, G = wet
+// amount (R * wetness). Coordinates are in splat radii: x along the drop's
+// travel, y across it.
+float4 main(p_stamp I) : SV_Target
+{
+	float e = max(I.B.x, 1.0);
+	float2 q = float2(I.local.x * I.B.y * e, I.local.y * I.B.z);
+	float seed = I.A.z * 97.0;
+	int kind = int(I.A.w + 0.5);
+
+	// Main body: an ellipse with a noisy rim, thicker in the middle.
+	float2 c = float2(q.x / e, q.y);
+	float r = length(c);
+	float ang = atan2(c.y, c.x);
+	float rim_noise = kind == 2 ? 0.55 : 0.3;
+	float rim = 1.0 + (blood_noise(float2(ang * 2.5 + seed, seed)) - 0.5) * rim_noise
+		+ (blood_noise(float2(ang * 9.0 - seed, seed * 1.3)) - 0.5) * rim_noise * 0.4;
+	float body = saturate((rim - r) * 6.0);
+	float amount = body * lerp(0.7, 1.0, saturate(1.0 - r));
+
+	// Splashes throw satellites and short streaks ahead of the body.
+	if (kind == 1)
+	{
+		[unroll] for (int k = 0; k < 7; ++k)
+		{
+			float h1 = blood_hash1(seed + k * 13.1);
+			float h2 = blood_hash1(seed + k * 7.7 + 3.0);
+			float h3 = blood_hash1(seed + k * 3.3 + 11.0);
+			float2 s = float2(e * (0.95 + 0.75 * h1), (h2 - 0.5) * 1.1);
+			float rad = 0.08 + 0.2 * h3;
+			amount = max(amount, saturate((rad - length(q - s)) * 14.0) * 0.8);
+			// streak from the body edge towards the satellite
+			float2 a = float2(e * 0.8, s.y * 0.6);
+			float2 ab = s - a;
+			float t = saturate(dot(q - a, ab) / max(dot(ab, ab), 1e-4));
+			float d = length(q - (a + ab * t));
+			amount = max(amount, saturate((rad * 0.35 - d) * 18.0) * 0.6);
+		}
+	}
+	// A droplet keeps one or two tiny satellites.
+	else if (kind == 0)
+	{
+		[unroll] for (int k = 0; k < 2; ++k)
+		{
+			float h1 = blood_hash1(seed + k * 5.9);
+			float h2 = blood_hash1(seed + k * 2.3 + 1.0);
+			float2 s = float2(0.9 + 0.3 * h1, (h2 - 0.5) * 1.6);
+			amount = max(amount, saturate((0.12 - length(c - s)) * 20.0) * 0.6 * step(0.5, h2));
+		}
+	}
+
+	amount *= I.A.x;
+	float wetness = I.A.y / max(I.A.x, 1e-3);
+	return float4(amount, amount * wetness, 0.0, 0.0);
+}

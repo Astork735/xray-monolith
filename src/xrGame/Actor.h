@@ -1,0 +1,1086 @@
+#pragma once
+
+#include "../xrEngine/feel_touch.h"
+#include "../xrEngine/feel_sound.h"
+#include "../xrEngine/iinputreceiver.h"
+#include "../Include/xrRender/KinematicsAnimated.h"
+#include "actor_flags.h"
+#include "actor_defs.h"
+#include "fire_disp_controller.h"
+#include "entity_alive.h"
+#include "PHMovementControl.h"
+#include "../xrphysics/PhysicsShell.h"
+#include "InventoryOwner.h"
+#include "../xrEngine/StatGraph.h"
+#include "PhraseDialogManager.h"
+#include "ui_defs.h"
+#include "HUDManager.h"
+
+#include "step_manager.h"
+#include "script_export_space.h"
+
+#include "player_hud_legs.h"
+
+#ifdef STATIONARYMGUN_NEW
+#include "WeaponStatMgun.h"
+#endif
+
+using namespace ACTOR_DEFS;
+
+class CInfoPortion;
+struct GAME_NEWS_DATA;
+class CActorCondition;
+class CCustomOutfit;
+class CGameTaskRegistryWrapper;
+class CGameNewsRegistryWrapper;
+class CCharacterPhysicsSupport;
+class CActorCameraManager;
+// refs
+class ENGINE_API CCameraBase;
+class ENGINE_API CBoneInstance;
+class ENGINE_API CBlend;
+class CWeaponList;
+class CEffectorBobbing;
+class CHolderCustom;
+class CUsableScriptObject;
+
+struct SShootingEffector;
+struct SSleepEffector;
+class CSleepEffectorPP;
+class CInventoryBox;
+
+class CHudItem;
+class CArtefact;
+
+struct SActorMotions;
+struct SActorVehicleAnims;
+class CActorCondition;
+class SndShockEffector;
+class CActorFollowerMngr;
+
+struct CameraRecoil;
+class CCameraShotEffector;
+class CActorInputHandler;
+
+class CActorMemory;
+class CActorStatisticMgr;
+
+class CLocationManager;
+
+class CNightVisionEffector;
+class CFPCamEffector;
+class CPhysicsShell;
+class IRenderVisual;
+
+class CActor :
+	public CEntityAlive,
+	public IInputReceiver,
+	public Feel::Touch,
+	public CInventoryOwner,
+	public CPhraseDialogManager,
+	public CStepManager,
+	public Feel::Sound
+#ifdef DEBUG
+    ,public pureRender
+#endif
+{
+	friend class CActorCondition;
+private:
+	typedef CEntityAlive inherited;
+public:
+	CActor();
+	virtual ~CActor();
+
+// demonized: First Person Death
+public:
+	CFPCamEffector* m_FPCam;
+
+public:
+	void initFPCam();
+	void removeFPCam();
+
+public:
+	virtual BOOL AlwaysTheCrow() { return TRUE; }
+
+	virtual CAttachmentOwner* cast_attachment_owner() { return this; }
+	virtual CInventoryOwner* cast_inventory_owner() { return this; }
+	virtual CActor* cast_actor() { return this; }
+	virtual CGameObject* cast_game_object() { return this; }
+	virtual IInputReceiver* cast_input_receiver() { return this; }
+	virtual CCharacterPhysicsSupport* character_physics_support() { return m_pPhysics_support; }
+	virtual CCharacterPhysicsSupport* character_physics_support() const { return m_pPhysics_support; }
+	virtual CPHDestroyable* ph_destroyable();
+	CHolderCustom* Holder() { return m_holder; }
+
+public:
+    Fmatrix XFORMShadow;
+    player_legs_controller m_legs_controller;
+
+public:
+
+	virtual void Load(LPCSTR section);
+	virtual void RenderCamAttached();
+
+	virtual void shedule_Update(u32 T);
+	virtual void UpdateCL();
+
+	virtual void OnEvent(NET_Packet& P, u16 type);
+
+	// Render
+	virtual void renderable_Render();
+	virtual BOOL renderable_ShadowGenerate();
+	virtual bool AllowActorShadow();
+	virtual void feel_sound_new(CObject* who, int type, CSound_UserDataPtr user_data, const Fvector& Position,
+	                            float power);
+	virtual Feel::Sound* dcast_FeelSound() { return this; }
+	float m_snd_noise;
+#ifdef DEBUG
+    virtual void						OnRender			();
+
+#endif
+
+
+public:
+	virtual bool OnReceiveInfo(shared_str info_id) const;
+	virtual void OnDisableInfo(shared_str info_id) const;
+
+	virtual void NewPdaContact(CInventoryOwner*);
+	virtual void LostPdaContact(CInventoryOwner*);
+
+#ifdef DEBUG
+    void			 DumpTasks();
+#endif
+
+	struct SDefNewsMsg
+	{
+		GAME_NEWS_DATA* news_data;
+		u32 time;
+		bool operator <(const SDefNewsMsg& other) const { return time > other.time; }
+	};
+
+	xr_vector<SDefNewsMsg> m_defferedMessages;
+	void UpdateDefferedMessages();
+public:
+	void AddGameNews_deffered(GAME_NEWS_DATA& news_data, u32 delay);
+	virtual void AddGameNews(GAME_NEWS_DATA& news_data);
+protected:
+	CActorStatisticMgr* m_statistic_manager;
+public:
+	virtual void StartTalk(CInventoryOwner* talk_partner);
+	void RunTalkDialog(CInventoryOwner* talk_partner, bool disable_break);
+	CActorStatisticMgr& StatisticMgr() { return *m_statistic_manager; }
+	CGameNewsRegistryWrapper* game_news_registry;
+	CCharacterPhysicsSupport* m_pPhysics_support;
+
+	virtual LPCSTR Name() const { return CInventoryOwner::Name(); }
+
+public:
+	//PhraseDialogManager
+	virtual void ReceivePhrase(DIALOG_SHARED_PTR& phrase_dialog);
+	virtual void UpdateAvailableDialogs(CPhraseDialogManager* partner);
+	virtual void TryToTalk();
+	bool OnDialogSoundHandlerStart(CInventoryOwner* inv_owner, LPCSTR phrase);
+	bool OnDialogSoundHandlerStop(CInventoryOwner* inv_owner);
+
+
+	virtual void reinit();
+	virtual void reload(LPCSTR section);
+	virtual bool use_bolts() const;
+
+	virtual void OnItemTake(CInventoryItem* inventory_item);
+
+	virtual void OnItemRuck(CInventoryItem* inventory_item, const SInvItemPlace& previous_place);
+	virtual void OnItemBelt(CInventoryItem* inventory_item, const SInvItemPlace& previous_place);
+
+	virtual void OnItemDrop(CInventoryItem* inventory_item, bool just_before_destroy);
+	virtual void OnItemDropUpdate();
+
+	virtual void OnPlayHeadShotParticle(NET_Packet P);
+
+	virtual void set_actor_box_y_offset(u32 box_num, float offset);
+	virtual void Die(CObject* who);
+	virtual void Hit(SHit* pHDS);
+	virtual void PHHit(SHit& H);
+	virtual void HitSignal(float P, Fvector& vLocalDir, CObject* who, s16 element);
+	void HitSector(CObject* who, CObject* weapon);
+	void HitMark(float P, Fvector dir, CObject* who, s16 element, Fvector position_in_bone_space, float impulse,
+	             ALife::EHitType hit_type);
+
+    void Feel_Grenade_Update( float rad );
+
+	virtual float GetMass();
+	virtual float Radius() const;
+	virtual void g_PerformDrop();
+
+	virtual bool use_default_throw_force();
+	virtual float missile_throw_force();
+
+	virtual bool unlimited_ammo();
+
+	virtual bool NeedToDestroyObject() const;
+	virtual ALife::_TIME_ID TimePassedAfterDeath() const;
+
+
+public:
+
+	//свойства артефактов
+	virtual void UpdateArtefactsOnBeltAndOutfit();
+	float HitArtefactsOnBelt(float hit_power, ALife::EHitType hit_type);
+	float GetProtection_ArtefactsOnBelt(ALife::EHitType hit_type);
+
+protected:
+	//звук тяжелого дыхания
+	ref_sound m_HeavyBreathSnd;
+	ref_sound m_BloodSnd;
+	ref_sound m_DangerSnd;
+
+protected:
+	// Death
+	float m_hit_slowmo;
+	float m_hit_probability;
+	s8 m_block_sprint_counter;
+
+	// media
+	SndShockEffector* m_sndShockEffector;
+	xr_vector<ref_sound> sndHit[ALife::eHitTypeMax];
+	ref_sound sndDie[SND_DIE_COUNT];
+
+
+	float m_fLandingTime;
+	float m_fJumpTime;
+	float m_fFallTime;
+	float m_fCamHeightFactor;
+
+	// Dropping
+	BOOL b_DropActivated;
+	float f_DropPower;
+
+	//random seed для Zoom mode
+	s32 m_ZoomRndSeed;
+	//random seed для Weapon Effector Shot
+	s32 m_ShotRndSeed;
+
+	bool m_bOutBorder;
+	//сохраняет счетчик объектов в feel_touch, для которых необходимо обновлять размер колижена с актером
+	u32 m_feel_touch_characters;
+private:
+	void SwitchOutBorder(bool new_border_state);
+public:
+	bool m_bAllowDeathRemove;
+
+	void SetZoomRndSeed(s32 Seed = 0);
+	s32 GetZoomRndSeed() { return m_ZoomRndSeed; };
+	void SetShotRndSeed(s32 Seed = 0);
+	s32 GetShotRndSeed() { return m_ShotRndSeed; };
+
+public:
+#ifdef HOLDERCUSTOM_NEW
+	void detach_Vehicle(bool bForce);
+	void steer_Vehicle(float angle);
+	bool attach_Vehicle(CHolderCustom *object, bool bForce);
+#else
+	void detach_Vehicle();
+	void steer_Vehicle(float angle);
+	void attach_Vehicle(CHolderCustom* vehicle);
+#endif
+	bool use_HolderEx(CHolderCustom* object, bool bForce);
+
+	virtual bool can_attach(const CInventoryItem* inventory_item) const;
+protected:
+	CHolderCustom* m_holder;
+	u16 m_holderID;
+	bool use_Holder(CHolderCustom* holder);
+	void ActorUse();
+
+protected:
+	BOOL m_bAnimTorsoPlayed;
+	static void AnimTorsoPlayCallBack(CBlend* B);
+
+	// Rotation
+	SRotation r_torso;
+	float r_torso_tgt_roll;
+	//положение торса без воздействия эффекта отдачи оружия
+	SRotation unaffected_r_torso;
+
+	//ориентация модели
+	float r_model_yaw_dest;
+	float r_model_yaw; // orientation of model
+	float r_model_yaw_delta; // effect on multiple "strafe"+"something"
+
+
+public:
+	SActorMotions* m_anims;
+#ifdef ENABLE_CAR
+	SActorVehicleAnims* m_vehicle_anims;
+#endif
+
+	CBlend* m_current_legs_blend;
+	CBlend* m_current_torso_blend;
+	CBlend* m_current_jump_blend;
+	MotionID m_current_legs;
+	MotionID m_current_torso;
+	MotionID m_current_head;
+
+	// callback на анимации модели актера
+	void SetCallbacks();
+	void ResetCallbacks();
+	static void _BCL Spin0Callback(CBoneInstance*);
+	static void _BCL Spin1Callback(CBoneInstance*);
+	static void _BCL ShoulderCallback(CBoneInstance*);
+	static void _BCL HeadCallback(CBoneInstance*);
+	static void _BCL VehicleHeadCallback(CBoneInstance*);
+
+	virtual const SRotation Orientation() const { return r_torso; };
+	SRotation& Orientation() { return r_torso; };
+
+	void g_SetAnimation(u32 mstate_rl);
+	void g_SetSprintAnimation(u32 mstate_rl, MotionID& head, MotionID& torso, MotionID& legs);
+public:
+	virtual void OnHUDDraw(CCustomHUD* hud);
+	BOOL HUDview() const;
+
+	//visiblity
+	virtual float ffGetFov() const { return 90.f; }
+	virtual float ffGetRange() const { return 500.f; }
+
+
+public:
+	CActorCameraManager& Cameras()
+	{
+		VERIFY(m_pActorEffector);
+		return *m_pActorEffector;
+	}
+
+	IC CCameraBase* cam_Active() { return cameras[cam_active]; }
+	IC CCameraBase* cam_FirstEye() { return cameras[eacFirstEye]; }
+	//Swartz: actor shadow
+	IC EActorCameras active_cam() { return cam_active; } //KD: need to know which cam active outside actor methods
+	virtual void cam_Set(EActorCameras style); //Alundaio: made public
+	//-Swartz
+
+	// Rezy - Freelook
+	u8 cam_freelook;
+	float freelook_cam_control;
+	float old_torso_yaw;
+
+protected:
+	//virtual	void			cam_Set					(EActorCameras style);
+	void cam_Update(float dt, float fFOV);
+	void cam_Lookout(const Fmatrix& xform, float camera_height);
+	void camUpdateLadder(float dt);
+	void cam_SetLadder();
+	void cam_UnsetLadder();
+	void camUpdateFreelook(float dt);
+	void cam_SetFreelook();
+	void cam_UnsetFreelook();
+	bool CanUseFreelook();
+	float currentFOV();
+
+	// Cameras
+	CCameraBase* cameras[eacMaxCam];
+	EActorCameras cam_active;
+	float fPrevCamPos;
+	float current_ik_cam_shift;
+	Fvector vPrevCamDir;
+	float fCurAVelocity;
+	CEffectorBobbing* pCamBobbing;
+
+
+	//менеджер эффекторов, есть у каждого актрера
+	CActorCameraManager* m_pActorEffector;
+	static float f_Ladder_cam_limit;
+public: //--#SM+#--
+	float fFPCamYawMagnitude;
+	float fFPCamPitchMagnitude;
+public:
+	virtual void feel_touch_new(CObject* O);
+	virtual void feel_touch_delete(CObject* O);
+	virtual bool feel_touch_contact(CObject* O);
+	virtual bool feel_touch_on_contact(CObject* O);
+
+	CGameObject* ObjectWeLookingAt() { return m_pObjectWeLookingAt; }
+	CInventoryOwner* PersonWeLookingAt() { return m_pPersonWeLookingAt; }
+	LPCSTR GetDefaultActionForObject() { return *m_sDefaultObjAction; }
+protected:
+	CUsableScriptObject* m_pUsableObject;
+	// Person we're looking at
+	CInventoryOwner* m_pPersonWeLookingAt;
+	CHolderCustom* m_pVehicleWeLookingAt;
+	CGameObject* m_pObjectWeLookingAt;
+	CInventoryBox* m_pInvBoxWeLookingAt;
+
+	// Tip for action for object we're looking at
+	shared_str m_sDefaultObjAction;
+	shared_str m_sCharacterUseAction;
+	shared_str m_sDeadCharacterUseAction;
+	shared_str m_sDeadCharacterUseOrDragAction;
+	shared_str m_sDeadCharacterDontUseAction;
+	shared_str m_sCarCharacterUseAction;
+	shared_str m_sInventoryItemUseAction;
+	shared_str m_sInventoryBoxUseAction;
+
+	bool m_bPickupMode;
+	// Finds what the actor looks at and the use action shown for it.
+	void UpdateUseTarget();
+
+    float					m_fFeelGrenadeRadius;
+    float					m_fFeelGrenadeTime;
+	float m_fPickupInfoRadius;
+protected:
+	struct pickup_result_t
+	{
+		bool allow_pickup;
+		bool callback_handled;
+	};
+	pickup_result_t PickupModeUpdate();
+	void PickupInfoDraw(CObject* object);
+	void PickupModeUpdate_COD(pickup_result_t pickup_state);
+
+public:
+	void DrawPickupItems();
+	bool m_bDelayDrawPickupItems;
+
+	//////////////////////////////////////////////////////////////////////////
+	// Motions (передвижения актрера)
+	//////////////////////////////////////////////////////////////////////////
+public:
+	Fvector m_vr_move{0,0,0};
+	bool m_vr_sprint_down = false;
+	bool m_vr_jump_down = false;
+	int m_vr_stance = 0; // 0 standing, 1 crouching, 2 low crouch
+	int m_vr_physical_stance = 0; // stance from ducking the real head
+	int m_vr_applied_stance = 0;  // stance whose wishful flags are applied
+	bool m_vr_was_crouched = false; // last update's real crouch (diagnostics)
+	float m_vr_stand_height = -1.f; // camera height last seen standing
+	float m_vr_crouch_lift = 0.f;   // view raise cancelling a head-driven crouch box
+	bool m_vr_lift_tracking = false; // lift follows the camera exactly
+	u32 m_vr_lift_frame = u32(-1);
+	void VrApplyStance();
+	// Raise for the VR eye anchor: a crouch caused by the real head already
+	// lowers the tracked view, so the crouched box must not lower it again.
+	float VrCrouchLift(float dt);
+	// Roomscale (vr_roomscale): VrControls walks the body after a head that
+	// walked away from it (direction in world, remaining distance); the
+	// part of the body's move that followed the head is taken out of the
+	// tracking origin after the camera update, so the head stays put.
+	Fvector m_vr_room_dir{0,0,0};
+	float m_vr_room_remaining = 0.f;
+	bool m_vr_room_requested = false;
+	bool m_vr_room_following = false; // past the start, until within 5 cm
+	Fvector m_vr_room_anchor{0,0,0};
+	bool m_vr_room_anchor_valid = false;
+	bool VrRoomscaleRequest();
+	// The weapon's aim in the body's frame last frame: its turn rate is the
+	// angular velocity weapon spread uses in VR, not the body's snap turns.
+	Fvector m_vr_prev_aim{0,0,0};
+	bool m_vr_prev_aim_valid = false;
+	// After the camera update: roomscale follow, this frame's tracked body,
+	// and the weapon's angular velocity (VR only).
+	void VrAfterCameraUpdate();
+    // VR hand state; arrays are indexed by physical hand (0 left, 1 right).
+    struct VrPickupState
+    {
+        u16 grabbed_id[2]{u16(-1),u16(-1)};
+        Fmatrix grab_offset[2];
+        Fvector previous_grab_position[2]{};
+        bool pickup_armed[2]{};
+        bool use_trigger_down[2]{};
+        bool use_pressed=false;
+        int use_hand=-1;
+        bool weapon_grip_armed[2]{};
+        bool native_reload_down=false;
+        bool native_reload_armed=false;
+        bool grip_held[2]{};
+        u16 gripped_weapon_id=u16(-1);
+        // Hand motion for throwing, and a pending throw.
+        bool hand_valid[2]{};
+        Fmatrix hand_previous[2];
+        Fvector hand_velocity[2]{}, hand_angular[2]{};
+        // hand_previous holds each hand in the body's frame. body_k is the
+        // body's heading last frame; body_turned, whether it turned this one.
+        Fvector body_k{};
+        bool body_k_valid=false, body_turned=false;
+        // A weapon let go and a bolt thrown, each until its world physics is
+        // live: both can be on their way at once (one per hand).
+        struct VrThrown
+        {
+            u16 id=u16(-1);
+            Fvector velocity{}, angular{};
+            u32 expires=0;
+            // A thrown bolt is also put at the hand that let it go once it
+            // is in the world, and readied as the game readies a thrown bolt.
+            bool place=false, limited=false;
+            Fmatrix matrix;
+        } thrown[2];
+        // What a free hand's pointer ray rests on, for the use action.
+        u16 pick_id=u16(-1);
+        float pick_range=0.f;
+        int pick_element=0;
+        // A weapon picked up by hand, wielded in that hand once it arrives.
+        u16 wield_id=u16(-1);
+        int wield_hand=1;
+        u32 wield_expires=0;
+        // Physical hands (spheres at the palms).
+        CPhysicsShell* hand_body[2]{};
+        float hand_blocked[2]{};
+        CPhysicsShell* weapon_body=nullptr;
+        u16 weapon_body_id=u16(-1);
+        // Hand-over-hand ladder climbing, and the ladder held.
+        u16 climb_ladder=u16(-1);
+        int climb_hand=-1;
+        float climb_previous=0.f;
+        // Body slot each hand is within reach of, for the hover pulse.
+        int body_hover[2]{-1,-1};
+        // Quick slot (0-3) each hand holds an item from, taken from a chest
+        // pocket; since when it has been at the mouth; the trigger last frame.
+        int pocket_held[2]{-1,-1};
+        u32 pocket_mouth_since[2]{};
+        bool pocket_trigger_down[2]{};
+        // The hand holding a grenade or bolt (-1 until one is taken: the
+        // dominant hand), its grip last frame, and a throw released before
+        // the missile was ready, kept for a moment.
+        int missile_hand=-1;
+        bool missile_grip=false;
+        u32 missile_grip_since=0;
+        bool missile_pending=false;
+        u32 missile_pending_until=0;
+        Fmatrix missile_matrix;
+        Fvector missile_velocity{};
+        // Each hand's fastest velocity relative to the body over the last
+        // 100 ms: a throw is let go as the hand already slows.
+        Fvector throw_peak[2]{};
+        u32 throw_peak_time[2]{};
+        // The active bolt waits in its pouch on the belt, not in a hand:
+        // after a throw, or when let go gently. A hand at the pouch takes it.
+        bool missile_stowed=false;
+        // The pouch drawn at the bolt slot, and whether its model is missing.
+        IRenderVisual* bolt_pouch=nullptr;
+        bool bolt_pouch_missing=false;
+        // Each grip last frame, so a squeeze at the chest puts the open PDA away.
+        bool pda_grip[2]{};
+        // A knife or binoculars without a VR weapon profile, taken from the
+        // belt: kept only while that hand's grip is held.
+        u16 slot_hold_id=u16(-1);
+        int slot_hold_hand=-1;
+        // The hand holding the detector or flashlight taken from the belt
+        // (kept while its grip is held), and its trigger last frame.
+        int device_hand=-1;
+        bool device_trigger_down=false;
+        // When the device was taken (its show is still on its way), whether it
+        // is held flipped in the fist (overhand), and its flip button state.
+        u32 device_taken_time=0;
+        bool device_flipped=false, device_button_down=false;
+        // The held knife's blade tip last frame, and when it may hit again.
+        // The knife's blade tip last frame, in the body's frame.
+        Fvector knife_tip{};
+        bool knife_valid=false;
+        u32 knife_ready=0;
+        // Where the detector or flashlight and the knife are held this frame
+        // (VrUpdateHudItems).
+        Fmatrix device_pose, knife_pose, device_hold, knife_hold;
+        bool device_pose_valid=false, knife_pose_valid=false;
+        // The hand holding a bolt taken from the pouch (the active item is
+        // left as it is), and until when an emptied bolt slot is refilled.
+        int bolt_hand=-1;
+        u32 bolt_refill_until=0;
+        // The support hand's upper face button in the ammunition pouch last
+        // frame (it changes the rounds the pouch gives).
+        bool pouch_swap_down=false;
+    } m_vr_pickup;
+    // What the climbing hand pulled since the body last moved (metres, +
+    // lifts the body), applied directly to the body on the ladder.
+    float m_vr_climb_delta = 0.f;
+    // The stick may get on a ladder again (it was let go since stepping off).
+    bool m_vr_ladder_rearm = true;
+    // Hand-over-hand climbing moves the body directly (gravity off).
+    bool m_vr_hand_climbing = false;
+    void VrControls(float dt);
+    // VR ladder climbing, done directly on the body (see VrClimbLadder).
+    class CClimableObject* VrLadder();
+    void VrClimbLadder(class CClimableObject* ladder);
+    u16 m_vr_ladder_id = u16(-1);
+    float m_vr_stick_forward = 0.f;
+    // What the use action acts on: the camera ray, or in VR a hand's pointer.
+    collide::rq_result UseRQ();
+    // Horizontal direction to the ladder a hand holds, if any.
+    bool VrLadderDirection(Fvector& direction);
+	void g_cl_CheckControls(u32 mstate_wf, Fvector& vControlAccel, float& Jump, float dt);
+	void g_cl_ValidateMState(float dt, u32 mstate_wf);
+	void g_cl_Orientate(u32 mstate_rl, float dt);
+	void g_sv_Orientate(u32 mstate_rl, float dt);
+	void g_Orientate(u32 mstate_rl, float dt);
+	bool g_LadderOrient();
+	//	void					UpdateMotionIcon		(u32 mstate_rl);
+
+	bool CanAccelerate();
+	bool CanJump();
+	bool CanMove();
+	float CameraHeight();
+
+	// Alex ADD: for smooth crouch fix
+	float CurrentHeight;
+
+	bool CanSprint();
+	bool CanRun();
+	void StopAnyMove();
+	void StopSprint() { mstate_wishful &= ~mcSprint; }
+
+	bool AnyAction() { return (mstate_real & mcAnyAction) != 0; };
+	bool AnyMove() { return (mstate_real & mcAnyMove) != 0; };
+
+	bool is_jump();
+	u32 MovingState() const { return mstate_real; }
+protected:
+	u32 mstate_wishful;
+	u32 mstate_old;
+	u32 mstate_real;
+
+	BOOL m_bJumpKeyPressed;
+
+public:
+	float m_fWalkAccel;
+	float m_fJumpSpeed;
+	float m_fRunFactor;
+	float m_fRunBackFactor;
+	float m_fWalkBackFactor;
+	float m_fCrouchFactor;
+	float m_fClimbFactor;
+	float m_fSprintFactor;
+
+	float m_fWalk_StrafeFactor;
+	float m_fRun_StrafeFactor;
+	float m_fSprint_StrafeFactor;
+
+	// demonized: lookout modifier
+	float m_fLookoutFactor = 1;
+
+    // verdatim: damage stagger time factor
+    float DamageStaggerTimeFactor = 1;
+
+public:
+	Fvector GetMovementSpeed() { return NET_SavedAccel; };
+	//////////////////////////////////////////////////////////////////////////
+	// User input/output
+	//////////////////////////////////////////////////////////////////////////
+public:
+	virtual void IR_OnMouseMove(int x, int y);
+	virtual void IR_OnKeyboardPress(int dik);
+	virtual void IR_OnKeyboardRelease(int dik);
+	virtual void IR_OnKeyboardHold(int dik);
+	virtual void IR_OnMouseWheel(int direction);
+	virtual float GetLookFactor();
+
+public:
+	SPickParam& GetPick();
+
+	virtual void g_WeaponBones(int& L, int& R1, int& R2);
+	virtual void g_fireParams(const CHudItem* pHudItem, Fvector& P, Fvector& D);
+	virtual bool g_stateFire() { return ! ((mstate_wishful & mcLookout) && !IsGameTypeSingle()); }
+
+	virtual BOOL g_State(SEntityState& state) const;
+	virtual float GetWeaponAccuracy() const;
+	float GetFireDispertion() const { return m_fdisp_controller.GetCurrentDispertion(); }
+	bool IsZoomAimingMode() const { return m_bZoomAimingMode; }
+	virtual float MaxCarryWeight() const;
+	float MaxWalkWeight() const;
+	float get_additional_weight() const;
+
+#ifdef STATIONARYMGUN_NEW
+	float GetWeaponAccuracyStm();
+#endif
+
+protected:
+	CFireDispertionController m_fdisp_controller;
+	//если актер целится в прицел
+	void SetZoomAimingMode(bool val) { m_bZoomAimingMode = val; }
+	bool m_bZoomAimingMode;
+
+	//настройки аккуратности стрельбы
+	//базовая дисперсия (когда игрок стоит на месте)
+	float m_fDispBase;
+	float m_fDispAim;
+	//коэффициенты на сколько процентов увеличится базовая дисперсия
+	//учитывает скорость актера
+	float m_fDispVelFactor;
+	//если актер бежит
+	float m_fDispAccelFactor;
+	//если актер сидит
+	float m_fDispCrouchFactor;
+	//crouch+no acceleration
+	float m_fDispCrouchNoAccelFactor;
+	Fvector m_vMissileOffset;
+public:
+	// Получение, и запись смещения для гранат
+	Fvector GetMissileOffset() const;
+	void SetMissileOffset(const Fvector& vNewOffset);
+
+	int m_head;
+protected:
+	//косточки используемые при стрельбе
+	int m_r_hand;
+	int m_l_finger1;
+	int m_r_finger2;
+	int m_eye_left;
+	int m_eye_right;
+
+	int m_l_clavicle;
+	int m_r_clavicle;
+	int m_spine2;
+	int m_spine1;
+	int m_spine;
+	int m_neck;
+
+
+	//////////////////////////////////////////////////////////////////////////
+	// Network
+	//////////////////////////////////////////////////////////////////////////
+	void ConvState(u32 mstate_rl, string128* buf);
+public:
+	virtual BOOL net_Spawn(CSE_Abstract* DC);
+	virtual void net_Export(NET_Packet& P); // export to server
+	virtual void net_Import(NET_Packet& P); // import from server
+	virtual void net_Destroy();
+	virtual BOOL net_Relevant(); //	{ return getSVU() | getLocal(); };		// relevant for export to server
+	virtual void net_Relcase(CObject* O); //
+	virtual void xr_stdcall on_requested_spawn(CObject* object);
+	//object serialization
+	virtual void save(NET_Packet& output_packet);
+	virtual void load(IReader& input_packet);
+	virtual void net_Save(NET_Packet& P);
+	virtual BOOL net_SaveRelevant();
+protected:
+	xr_deque<net_update> NET;
+	Fvector NET_SavedAccel;
+	net_update NET_Last;
+	BOOL NET_WasInterpolating; // previous update was by interpolation or by extrapolation
+	u32 NET_Time; // server time of last update
+
+	//---------------------------------------------
+	void net_Import_Base(NET_Packet& P);
+	void net_Import_Physic(NET_Packet& P);
+	void net_Import_Base_proceed();
+	void net_Import_Physic_proceed();
+	//---------------------------------------------
+
+
+	////////////////////////////////////////////////////////////////////////////
+	virtual bool can_validate_position_on_spawn() { return false; }
+	///////////////////////////////////////////////////////
+	// апдайт с данными физики
+	xr_deque<net_update_A> NET_A;
+
+	//---------------------------------------------
+	//	bool					m_bHasUpdate;
+	/// spline coeff /////////////////////
+	float SCoeff[3][4]; //коэффициэнты для сплайна Бизье
+	float HCoeff[3][4]; //коэффициэнты для сплайна Эрмита
+	Fvector IPosS, IPosH, IPosL; //положение актера после интерполяции Бизье, Эрмита, линейной
+
+#ifdef DEBUG
+    DEF_DEQUE		(VIS_POSITION, Fvector);
+
+    VIS_POSITION	LastPosS;
+    VIS_POSITION	LastPosH;
+    VIS_POSITION	LastPosL;
+#endif
+
+
+	SPHNetState LastState;
+	SPHNetState RecalculatedState;
+	SPHNetState PredictedState;
+
+	InterpData IStart;
+	InterpData IRec;
+	InterpData IEnd;
+
+	bool m_bInInterpolation;
+	bool m_bInterpolate;
+	u32 m_dwIStartTime;
+	u32 m_dwIEndTime;
+	u32 m_dwILastUpdateTime;
+
+	//---------------------------------------------
+	DEF_DEQUE(PH_STATES, SPHNetState);
+	PH_STATES m_States;
+	u16 m_u16NumBones;
+	void net_ExportDeadBody(NET_Packet& P);
+	//---------------------------------------------
+	void CalculateInterpolationParams();
+	//---------------------------------------------
+	virtual void make_Interpolation();
+#ifdef DEBUG
+    //---------------------------------------------
+    virtual void			OnRender_Network();
+    //---------------------------------------------
+#endif
+
+	// Igor	ref_geom 				hFriendlyIndicator;
+	//////////////////////////////////////////////////////////////////////////
+	// Actor physics
+	//////////////////////////////////////////////////////////////////////////
+public:
+	void g_Physics(Fvector& accel, float jump, float dt);
+	virtual void ForceTransform(const Fmatrix& m);
+	void SetPhPosition(const Fmatrix& pos);
+	virtual void PH_B_CrPr(); // actions & operations before physic correction-prediction steps
+	virtual void PH_I_CrPr(); // actions & operations after correction before prediction steps
+	virtual void PH_A_CrPr(); // actions & operations after phisic correction-prediction steps
+	//	virtual void			UpdatePosStack	( u32 Time0, u32 Time1 );
+	virtual void MoveActor(Fvector NewPos, Fvector NewDir);
+
+	virtual void SpawnAmmoForWeapon(CInventoryItem* pIItem);
+	virtual void RemoveAmmoForWeapon(CInventoryItem* pIItem);
+	virtual void spawn_supplies();
+
+	virtual bool human_being() const
+	{
+		return (true);
+	}
+
+	virtual shared_str GetDefaultVisualOutfit() const { return m_DefaultVisualOutfit; };
+	virtual void SetDefaultVisualOutfit(shared_str DefaultOutfit) { m_DefaultVisualOutfit = DefaultOutfit; };
+	virtual void UpdateAnimation() { g_SetAnimation(mstate_real); };
+
+	virtual void ChangeVisual(shared_str NewVisual);
+	virtual void OnChangeVisual();
+
+	virtual void RenderIndicator(Fvector dpos, float r1, float r2, const ui_shader& IndShader);
+	virtual void RenderText(LPCSTR Text, Fvector dpos, float* pdup, u32 color);
+
+	//////////////////////////////////////////////////////////////////////////
+	// Controlled Routines
+	//////////////////////////////////////////////////////////////////////////
+
+	void set_input_external_handler(CActorInputHandler* handler);
+	bool input_external_handler_installed() const { return (m_input_external_handler != 0); }
+
+	IC void lock_accel_for(u32 time) { m_time_lock_accel = Device.dwTimeGlobal + time; }
+
+private:
+	CActorInputHandler* m_input_external_handler;
+	u32 m_time_lock_accel;
+
+	/////////////////////////////////////////
+	// DEBUG INFO
+protected:
+	CStatGraph* pStatGraph;
+
+	shared_str m_DefaultVisualOutfit;
+
+	LPCSTR invincibility_fire_shield_3rd;
+	LPCSTR invincibility_fire_shield_1st;
+	shared_str m_sHeadShotParticle;
+	u32 last_hit_frame;
+#ifdef DEBUG
+        friend class CLevelGraph;
+#endif
+	Fvector m_AutoPickUp_AABB;
+	Fvector m_AutoPickUp_AABB_Offset;
+
+	void Check_for_AutoPickUp();
+	void SelectBestWeapon(CObject* O);
+public:
+	void SetWeaponHideState(u16 State, bool bSet);
+private: //IPhysicsShellHolder
+
+	virtual void _BCL HideAllWeapons(bool v) { SetWeaponHideState(INV_STATE_BLOCK_ALL, v); }
+
+public:
+	void SetCantRunState(bool bSet);
+private:
+	CActorCondition* m_entity_condition;
+
+protected:
+	virtual CEntityConditionSimple* create_entity_condition(CEntityConditionSimple* ec);
+
+public:
+	IC CActorCondition& conditions() const;
+	virtual DLL_Pure* _construct();
+	virtual bool natural_weapon() const { return false; }
+	virtual bool natural_detector() const { return false; }
+	virtual bool use_center_to_aim() const;
+protected:
+	u16 m_iLastHitterID;
+	u16 m_iLastHittingWeaponID;
+	s16 m_s16LastHittedElement;
+	Fvector m_vLastHitDir;
+	Fvector m_vLastHitPos;
+	float m_fLastHealth;
+	bool m_bWasHitted;
+	bool m_bWasBackStabbed;
+
+	virtual bool Check_for_BackStab_Bone(u16 element);
+public:
+	virtual void SetHitInfo(CObject* who, CObject* weapon, s16 element, Fvector Pos, Fvector Dir);
+
+	virtual void OnHitHealthLoss(float NewHealth);
+	virtual void OnCriticalHitHealthLoss();
+	virtual void OnCriticalWoundHealthLoss();
+	virtual void OnCriticalRadiationHealthLoss();
+
+	virtual bool InventoryAllowSprint();
+	virtual void OnNextWeaponSlot();
+	virtual void OnPrevWeaponSlot();
+	void SwitchNightVision();
+	void SwitchTorch();
+#ifdef DEBUG
+            void				NoClipFly						(int cmd);
+#endif //DEBUG
+
+public:
+
+	virtual void on_weapon_shot_start(CWeapon* weapon);
+	virtual void on_weapon_shot_update();
+	virtual void on_weapon_shot_stop();
+	virtual void on_weapon_shot_remove(CWeapon* weapon);
+	virtual void on_weapon_hide(CWeapon* weapon);
+	Fvector weapon_recoil_delta_angle();
+	Fvector weapon_recoil_last_delta();
+protected:
+	virtual void update_camera(CCameraShotEffector* effector);
+	//step manager
+	virtual bool is_on_ground();
+
+private:
+	CActorMemory* m_memory;
+
+public:
+	IC CActorMemory& memory() const
+	{
+		VERIFY(m_memory);
+		return (*m_memory);
+	};
+
+	void OnDifficultyChanged();
+
+	IC float HitProbability() { return m_hit_probability; }
+	virtual CVisualMemoryManager* visual_memory() const;
+
+	virtual BOOL BonePassBullet(int boneID);
+	virtual void On_B_NotCurrentEntity();
+
+private:
+	collide::rq_results RQR;
+	BOOL CanPickItem(const CFrustum& frustum, const Fvector& from, CObject* item);
+	xr_vector<ISpatial*> ISpatialResult;
+
+private:
+	CLocationManager* m_location_manager;
+
+public:
+	IC const CLocationManager& locations() const
+	{
+		VERIFY(m_location_manager);
+		return (*m_location_manager);
+	}
+
+private:
+	ALife::_OBJECT_ID m_holder_id;
+
+public:
+	virtual bool register_schedule() const { return false; }
+	virtual bool is_ai_obstacle() const;
+
+	float GetRestoreSpeed(ALife::EConditionRestoreType const& type);
+
+public:
+	virtual void On_SetEntity();
+
+	virtual void On_LostEntity()
+	{
+	};
+
+	void DisableHitMarks(bool disable) { m_disabled_hitmarks = disable; };
+	bool DisableHitMarks() { return m_disabled_hitmarks; };
+
+	void set_inventory_disabled(bool is_disabled) { m_inventory_disabled = is_disabled; }
+	bool inventory_disabled() const { return m_inventory_disabled; }
+private:
+	void set_state_box(u32 mstate);
+private:
+	bool m_disabled_hitmarks;
+	bool m_inventory_disabled;
+	//static CPhysicsShell		*actor_camera_shell;
+
+	IC u32 get_state() const
+	{
+		return this->mstate_real;
+	}
+
+	IC void set_state(u32 state)
+	{
+		mstate_real = state;
+	}
+
+	IC u32 get_state_wishful() const
+	{
+		return this->mstate_wishful;
+	}
+
+	IC void set_state_wishful(u32 state)
+	{
+		mstate_wishful = state;
+	}
+
+public:
+	void SwitchNightVision(bool light_on, bool use_sounds = true, bool send_event = true);
+
+	bool GetNightVisionStatus() { return m_bNightVisionOn; }
+	void SetNightVisionAllowed(bool bAllow) { m_bNightVisionAllow = bAllow; }
+	CNightVisionEffector* GetNightVision() { return m_night_vision; }
+protected:
+	bool m_bNightVisionOn;
+	bool m_bNightVisionAllow;
+	bool m_bSafemode;
+public:
+	bool is_safemode() { return m_bSafemode; }
+	void set_safemode(bool status);
+
+	void RPC_UpdateFaction();
+	void RPC_UpdateRank();
+	void RPC_UpdateReputation();
+
+	CNightVisionEffector* m_night_vision;
+
+private:
+    struct npc_visibility
+    {
+        u16 id;
+        float value;
+
+        bool operator ==(const u16& _id)
+        {
+            return id == _id;
+        }
+
+        bool operator <(const npc_visibility& m) const
+        {
+            return (value < m.value);
+        }
+    };
+
+    xr_vector<npc_visibility> m_npc_visibility;
+    float m_visibility_tgt = 0.0f;
+    float m_visibility_cur = 0.0f;
+    bool m_visibility_changed = false;
+
+public:
+    float GetVisibility();
+    void SetVisibilityValue(float value);
+    void SetVisibilityFromObject(u16 who_id, float value);
+
+public:
+    DECLARE_SCRIPT_REGISTER_FUNCTION
+};
+
+extern bool isActorAccelerated(u32 mstate, bool ZoomMode);
+
+IC CActorCondition& CActor::conditions() const
+{
+	VERIFY(m_entity_condition);
+	return (*m_entity_condition);
+}
+
+extern CActor* g_actor;
+CActor* Actor();
+extern const float s_fFallTime;

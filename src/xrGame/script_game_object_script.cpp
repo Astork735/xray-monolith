@@ -1,0 +1,199 @@
+////////////////////////////////////////////////////////////////////////////
+//	Module 		: script_game_object_script.cpp
+//	Created 	: 25.09.2003
+//  Modified 	: 29.06.2004
+//	Author		: Dmitriy Iassenev
+//	Description : XRay Script game object script export
+////////////////////////////////////////////////////////////////////////////
+
+#include "pch_script.h"
+#include "script_game_object.h"
+#include "game_object_space.h"
+#include "script_ini_file.h"
+#include "sight_manager_space.h"
+#include "ai/monsters/state_defs.h"
+#include "inventory_space.h"
+
+using namespace luabind;
+
+extern class_<CScriptGameObject> script_register_game_object1(class_<CScriptGameObject> &&);
+extern class_<CScriptGameObject> script_register_game_object2(class_<CScriptGameObject> &&);
+extern class_<CScriptGameObject> script_register_game_object_trader(class_<CScriptGameObject> &&);
+
+#pragma optimize("s",on)
+void CScriptGameObject::script_register(lua_State* L)
+{
+	class_<CScriptGameObject> instance("game_object");
+
+	module(L)
+	[
+		class_<CSightParams>("CSightParams")
+		.enum_("bla-bla")
+		[
+			value("eSightTypeCurrentDirection", int(SightManager::eSightTypeCurrentDirection)),
+			value("eSightTypePathDirection", int(SightManager::eSightTypePathDirection)),
+			value("eSightTypeDirection", int(SightManager::eSightTypeDirection)),
+			value("eSightTypePosition", int(SightManager::eSightTypePosition)),
+			value("eSightTypeObject", int(SightManager::eSightTypeObject)),
+			value("eSightTypeCover", int(SightManager::eSightTypeCover)),
+			value("eSightTypeSearch", int(SightManager::eSightTypeSearch)),
+			value("eSightTypeLookOver", int(SightManager::eSightTypeLookOver)),
+			value("eSightTypeCoverLookOver", int(SightManager::eSightTypeCoverLookOver)),
+			value("eSightTypeFireObject", int(SightManager::eSightTypeFireObject)),
+			value("eSightTypeFirePosition", int(SightManager::eSightTypeFirePosition)),
+			value("eSightTypeAnimationDirection", int(SightManager::eSightTypeAnimationDirection)),
+			value("eSightTypeDummy", int(SightManager::eSightTypeDummy))
+		]
+		.def(constructor<>())
+		.def_readonly("m_object", &CSightParams::m_object)
+		.def_readonly("m_vector", &CSightParams::m_vector)
+		.def_readonly("m_sight_type", &CSightParams::m_sight_type),
+
+		script_register_game_object2(
+			script_register_game_object1(
+				script_register_game_object_trader(std::move(instance))
+			)
+		),
+
+		class_<enum_exporter<EInventorySlots>>("inventory")
+		.enum_("slot")
+		[
+			value("no_active", int(NO_ACTIVE_SLOT)),
+			value("knife", int(KNIFE_SLOT)),
+			value("slot_2", int(INV_SLOT_2)),
+			value("slot_3", int(INV_SLOT_3)),
+			value("grenade", int(GRENADE_SLOT)),
+			value("binocular", int(BINOCULAR_SLOT)),
+			value("bolt", int(BOLT_SLOT)),
+			value("outfit", int(OUTFIT_SLOT)),
+			value("pda", int(PDA_SLOT)),
+			value("detector", int(DETECTOR_SLOT)),
+			value("torch", int(TORCH_SLOT)),
+			value("artefact", int(ARTEFACT_SLOT)),
+			value("helmet", int(HELMET_SLOT)),
+			value("backpack", int(BACKPACK_SLOT)),
+#ifdef MORE_INVENTORY_SLOTS
+			value("custom_1", int(CUSTOM_SLOT_1)),
+			value("custom_2", int(CUSTOM_SLOT_2)),
+			value("custom_3", int(CUSTOM_SLOT_3)),
+			value("custom_4", int(CUSTOM_SLOT_4)),
+			value("custom_5", int(CUSTOM_SLOT_5)),
+#endif
+			value("last", int(LAST_SLOT))
+		],
+
+		class_<enum_exporter<GameObject::ECallbackType>>("callback")
+		.enum_("callback_types")
+		[
+			value("trade_start", int(GameObject::eTradeStart)),
+			value("trade_stop", int(GameObject::eTradeStop)),
+			value("trade_sell_buy_item", int(GameObject::eTradeSellBuyItem)),
+			value("trade_perform_operation", int(GameObject::eTradePerformTradeOperation)),
+			value("trader_global_anim_request", int(GameObject::eTraderGlobalAnimationRequest)),
+			value("trader_head_anim_request", int(GameObject::eTraderHeadAnimationRequest)),
+			value("trader_sound_end", int(GameObject::eTraderSoundEnd)),
+			value("zone_enter", int(GameObject::eZoneEnter)),
+			value("zone_exit", int(GameObject::eZoneExit)),
+			value("level_border_exit", int(GameObject::eExitLevelBorder)),
+			value("level_border_enter", int(GameObject::eEnterLevelBorder)),
+			value("death", int(GameObject::eDeath)),
+			value("patrol_path_in_point", int(GameObject::ePatrolPathInPoint)),
+			value("inventory_pda", int(GameObject::eInventoryPda)),
+			value("inventory_info", int(GameObject::eInventoryInfo)),
+			value("article_info", int(GameObject::eArticleInfo)),
+			value("use_object", int(GameObject::eUseObject)),
+			value("hit", int(GameObject::eHit)),
+			value("sound", int(GameObject::eSound)),
+			value("action_removed", int(GameObject::eActionTypeRemoved)),
+			value("action_movement", int(GameObject::eActionTypeMovement)),
+			value("action_watch", int(GameObject::eActionTypeWatch)),
+			value("action_animation", int(GameObject::eActionTypeAnimation)),
+			value("action_sound", int(GameObject::eActionTypeSound)),
+			value("action_particle", int(GameObject::eActionTypeParticle)),
+			value("action_object", int(GameObject::eActionTypeObject)),
+			value("actor_sleep", int(GameObject::eActorSleep)),
+			value("helicopter_on_point", int(GameObject::eHelicopterOnPoint)),
+			value("helicopter_on_hit", int(GameObject::eHelicopterOnHit)),
+			value("on_item_take", int(GameObject::eOnItemTake)),
+			value("on_item_drop", int(GameObject::eOnItemDrop)),
+			value("script_animation", int(GameObject::eScriptAnimation)),
+			value("task_state", int(GameObject::eTaskStateChange)),
+			value("take_item_from_box", int(GameObject::eInvBoxItemTake)),
+			value("weapon_no_ammo", int(GameObject::eWeaponNoAmmoAvailable)),
+
+			//Alundaio:
+			value("hud_animation_end", int(GameObject::eActorHudAnimationEnd)),
+			//AVO: custom callbacks
+			// input
+#ifdef INPUT_CALLBACKS
+			value("key_press", int(GameObject::eKeyPress)),
+			value("key_release", int(GameObject::eKeyRelease)),
+			value("key_hold", int(GameObject::eKeyHold)),
+#endif
+#ifdef MOUSE_INPUT_CALLBACKS
+                value("mouse_move",                 int(GameObject::eMouseMove)),
+                value("mouse_wheel",                int(GameObject::eMouseWheel)),
+#endif
+			// actor
+#ifdef ACTOR_BEFORE_DEATH_CALLBACK
+			value("actor_before_death", int(GameObject::eActorBeforeDeath)),
+#endif
+			// vehicle
+#ifdef ENABLE_CAR
+			value("on_attach_vehicle", int(GameObject::eAttachVehicle)),
+			value("on_detach_vehicle", int(GameObject::eDetachVehicle)),
+			value("on_use_vehicle", int(GameObject::eUseVehicle)),
+#endif
+#ifdef EXTENDED_WEAPON_CALLBACKS
+			//weapon
+			value("weapon_fired", int(GameObject::eOnWeaponFired)),
+			value("weapon_jammed", int(GameObject::eOnWeaponJammed)),
+			value("weapon_zoom_in", int(GameObject::eOnWeaponZoomIn)),
+			value("weapon_zoom_out", int(GameObject::eOnWeaponZoomOut)),
+			value("weapon_magazine_empty", int(GameObject::eOnWeaponMagazineEmpty)),
+			value("weapon_lowered", int(GameObject::eOnWeaponLowered)),
+			value("weapon_raised", int(GameObject::eOnWeaponRaised)),
+#endif
+#ifdef EXTENDED_ITEM_CALLBACKS
+			// inventory
+			value("item_to_belt", int(GameObject::eItemToBelt)),
+			value("item_to_slot", int(GameObject::eItemToSlot)),
+			value("item_to_ruck", int(GameObject::eItemToRuck)),
+#endif
+#ifdef NET_SPAWN_AFTER_CALLBACKS
+			value("net_spawn_after", int(GameObject::eNetSpawnAfter)),
+#endif
+			//-AVO
+			value("on_foot_step", int(GameObject::eOnFootStep)),
+
+			value("map_location_added", int(GameObject::eMapLocationAdded))
+		],
+
+		// Attack substates the monster_on_combat_action callback can propose in flags.substate.
+		// These are the states the shared monster and group attack selectors register
+		// (monster_state_attack_inline.h, group_state_attack_inline.h); any other EMonsterState
+		// is ignored and the vanilla selection runs.
+		class_<enum_exporter<EMonsterState>>("monster_state")
+		.enum_("substate")
+		[
+			value("eStateAttack_Run", int(eStateAttack_Run)),
+			value("eStateAttack_Melee", int(eStateAttack_Melee)),
+			value("eStateAttack_RunAttack", int(eStateAttack_RunAttack)),
+			value("eStateAttack_RunAway", int(eStateAttack_RunAway)),
+			value("eStateAttack_FindEnemy", int(eStateAttack_FindEnemy)),
+			value("eStateAttack_Steal", int(eStateAttack_Steal)),
+			value("eStateAttack_AttackHidden", int(eStateAttack_AttackHidden)),
+			value("eStateAttack_ControlFire", int(eStateAttack_ControlFire)),
+			value("eStateAttackCamp", int(eStateAttackCamp)),
+			value("eStateAttack_MoveToHomePoint", int(eStateAttack_MoveToHomePoint)),
+			value("eStateAttack_Attack_On_Run", int(eStateAttack_Attack_On_Run)),
+			value("eStateCustom", int(eStateCustom))
+		],
+
+		def("buy_condition", (void (*)(CScriptIniFile*, LPCSTR))(&::buy_condition)),
+		def("buy_condition", (void (*)(float, float))(&::buy_condition)),
+		def("sell_condition", (void (*)(CScriptIniFile*, LPCSTR))(&::sell_condition)),
+		def("sell_condition", (void (*)(float, float))(&::sell_condition)),
+		def("show_condition", &::show_condition)
+	];
+}
