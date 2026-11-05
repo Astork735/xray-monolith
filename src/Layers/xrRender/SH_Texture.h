@@ -66,6 +66,13 @@ public:
 
 #if defined(USE_DX10) || defined(USE_DX11)
 	ID3DShaderResourceView*				get_SRView() {return m_pSRView;}
+	// Exchanges the surface and its view with the given pair, references
+	// and all (VR: a render target's smaller twin while the scope renders).
+	void surface_swap(ID3DBaseTexture*& surface, ID3DShaderResourceView*& view)
+	{
+		std::swap(pSurface, surface);
+		std::swap(m_pSRView, view);
+	}
 #endif	//	USE_DX10
 
 private:

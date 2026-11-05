@@ -46,6 +46,9 @@
 #include "characterphysicssupport.h"
 #include "game_cl_base_weapon_usage_statistic.h"
 #include "../xrengine/xr_collide_form.h"
+#include "VrWeaponInteraction.h"
+#include "VrBodySlots.h"
+#include "../xrEngine/Vr/vr_gameplay.h"
 #ifdef DEBUG
 #	include "debug_renderer.h"
 #	include "../xrPhysics/phvalide.h"
@@ -720,6 +723,9 @@ namespace crash_saving {
 
 void CActor::net_Destroy()
 {
+	vr::ForgetGameplayBody(this);
+	ReleaseVrHandBodies(*this);
+	ReleaseVrBodySlots(*this);
 	inherited::net_Destroy();
 
 	if (m_holder_id != ALife::_OBJECT_ID(-1))

@@ -819,9 +819,13 @@ struct zero_wm_pred
 
 void CKinematics::CalculateWallmarks()
 {
-	if (!wallmarks.empty() && (wm_frame != RDEVICE.dwFrame))
+	// The wallmark engine consumes its skeleton list in every scene pass, and
+	// in VR each eye (and the scope view) is its own pass within one frame:
+	// register once per pass, or only the first eye shows body marks.
+	const u32 pass = RDEVICE.dwFrame * 4 + (g_vr_rendering_eye ? u32(g_vr_eye_index + 1) : 0);
+	if (!wallmarks.empty() && (wm_frame != pass))
 	{
-		wm_frame = RDEVICE.dwFrame;
+		wm_frame = pass;
 		bool need_remove = false;
 		for (SkeletonWMVecIt it = wallmarks.begin(); it != wallmarks.end(); it++)
 		{

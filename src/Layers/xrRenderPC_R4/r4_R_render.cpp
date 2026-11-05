@@ -5,6 +5,7 @@
 #include "../../xrEngine/xr_object.h"
 
 #include "../xrRender/QueryHelper.h"
+#include "r4_blood.h"
 
 IC bool pred_sp_sort(ISpatial* _1, ISpatial* _2)
 {
@@ -148,9 +149,9 @@ void CRender::render_main(Fmatrix& m_ViewProjection, bool _fportals)
 		if (g_pGameLevel && (phase == PHASE_NORMAL))
 		{
 			g_hud->Render_Last(); // HUD
-			if (g_hud->RenderActiveItemUIQuery())
+			if (!g_vr_rendering_eye && g_hud->RenderActiveItemUIQuery())
 				r_dsgraph_render_hud_ui();
-			if (g_hud->RenderCamAttachedUIQuery())
+			if (!g_vr_rendering_eye && g_hud->RenderCamAttachedUIQuery())
 				r_dsgraph_render_cam_ui();
 		}
 	}
@@ -160,9 +161,9 @@ void CRender::render_main(Fmatrix& m_ViewProjection, bool _fportals)
 		if (g_pGameLevel && (phase == PHASE_NORMAL))
 		{
 			g_hud->Render_Last(); // HUD
-			if (g_hud->RenderActiveItemUIQuery())
+			if (!g_vr_rendering_eye && g_hud->RenderActiveItemUIQuery())
 				r_dsgraph_render_hud_ui();
-			if (g_hud->RenderCamAttachedUIQuery())
+			if (!g_vr_rendering_eye && g_hud->RenderCamAttachedUIQuery())
 				r_dsgraph_render_cam_ui();
 		}
 	}
@@ -222,6 +223,23 @@ extern u32 g_r;
 
 void CRender::Render()
 {
+    struct RestoreEffects
+    {
+        CRender& render; CRender::_options options; Flags32 flags; float blur; bool active;
+        ~RestoreEffects() { if (active) { render.o = options; ps_r2_ls_flags = flags; ps_r2_mblur = blur; } }
+    } restore{*this, o, ps_r2_ls_flags, ps_r2_mblur, g_vr_rendering_eye};
+    if (g_vr_rendering_eye)
+    {
+        o.ssfx_taa = o.ssfx_motionblur = o.ssfx_motionvectors = 0;
+        o.ssfx_ao = o.ssfx_il = o.ssfx_ssr = o.ssfx_sss = 0;
+        o.ssfx_water = o.ssfx_fog = o.ssfx_rain = o.ssfx_volumetric = 0;
+        ps_r2_mblur = 0;
+        // The depth pre-pass (r2_zfill) builds a symmetric projection from the
+        // FOV envelope, which does not match the eye's asymmetric one.
+        ps_r2_ls_flags.set(R2FLAG_EXP_MT_CALC | R2FLAG_DOF | R2FLAG_ZFILL, FALSE);
+        ps_r2_ls_flags.set(R2FLAG_EXP_DONT_TEST_UNSHADOWED | R2FLAG_EXP_DONT_TEST_SHADOWED, TRUE);
+    }
+
 	PIX_EVENT(CRender_Render);
 
 	VERIFY(0 == mapDistort.size() + mapHUDDistort.size());
@@ -252,6 +270,9 @@ void CRender::Render()
 	}
 
 	//.	VERIFY					(g_pGameLevel && g_pGameLevel->pHUD);
+
+	// Blood simulation runs once per frame, before the first eye's G-buffer.
+	if (Blood) Blood->FrameUpdate();
 
 	// Configure
 	RImplementation.o.distortion = FALSE; // disable distorion
@@ -302,7 +323,7 @@ void CRender::Render()
 	//*******
 	// Sync point
 	Device.Statistic->RenderDUMP_Wait_S.Begin();
-	if (ps_r2_qsync)
+	if (ps_r2_qsync && !g_vr_rendering_eye)
 	{
 		CTimer T;
 		T.Start();
@@ -385,6 +406,7 @@ void CRender::Render()
 		r_dsgraph_render_lods(true, true);
 		if (Details) Details->Render();
 		if (ps_r2_ls_flags.test(R2FLAG_TERRAIN_PREPASS)) r_dsgraph_render_landscape(1, true);
+		if (Blood) Blood->RenderParticles();
 		Target->phase_scene_end();
 	}
 	else
@@ -397,7 +419,7 @@ void CRender::Render()
 	}
 
 	//  Redotix99: for 3D Shader Based Scopes 	
-	if (scope_3D_fake_enabled)
+	if (scope_3D_fake_enabled && !g_vr_rendering_eye)
 	{
 		ID3D11Resource* zbuffer_res;
 		HW.pBaseZB->GetResource(&zbuffer_res);
@@ -484,6 +506,7 @@ void CRender::Render()
 		r_dsgraph_render_lods(true, true);
 		if (Details) Details->Render();
 		if (ps_r2_ls_flags.test(R2FLAG_TERRAIN_PREPASS)) r_dsgraph_render_landscape(1, true);
+		if (Blood) Blood->RenderParticles();
 		Target->phase_scene_end();
 	}
 
@@ -494,6 +517,7 @@ void CRender::Render()
 		Target->phase_wallmarks();
 
 		Wallmarks->Render(); // wallmarks has priority as normal geometry
+		if (Blood) Blood->RenderDecals();
 	}
 
 	// Update incremental shadowmap-visibility solver
@@ -647,6 +671,7 @@ void CRender::Render()
 	{
 		PIX_EVENT(DEFER_LIGHT_COMBINE);
 		Target->phase_combine();
+    if (g_vr_rendering_eye) g_vr_eye_rendered = true;
 	}
 
 	if (Details)

@@ -307,6 +307,15 @@ void CWeaponAutomaticShotgun::OnMotionMark(u32 state, const motion_marks& M)
 
 }
 
+// One shell pressed in by hand. AddCartridge returns the count it could not
+// add, so success is judged by the magazine growing.
+bool CWeaponAutomaticShotgun::VrLoadShell()
+{
+	const size_t before = m_magazine.size();
+	AddCartridge(1);
+	return m_magazine.size() > before;
+}
+
 u8 CWeaponAutomaticShotgun::AddCartridge(u8 cnt)
 {
 	if (IsMisfire()) bMisfire = false;

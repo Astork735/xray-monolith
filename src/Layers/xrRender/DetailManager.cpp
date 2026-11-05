@@ -277,10 +277,10 @@ extern ECORE_API float r_ssaDISCARD;
 
 void CDetailManager::UpdateVisibleM()
 {
-	Fvector EYE = RDEVICE.vCameraPosition_saved;
+	Fvector EYE = g_vr_rendering_eye ? RDEVICE.vCameraPosition : RDEVICE.vCameraPosition_saved;
 
 	CFrustum View;
-	View.CreateFromMatrix(RDEVICE.mFullTransform_saved, FRUSTUM_P_LRTB + FRUSTUM_P_FAR);
+	View.CreateFromMatrix(g_vr_rendering_eye ? RDEVICE.mFullTransform : RDEVICE.mFullTransform_saved, FRUSTUM_P_LRTB + FRUSTUM_P_FAR);
 
 	CFrustum View_old;
 	Fmatrix Viewm_old = RDEVICE.mFullTransform;
@@ -435,6 +435,7 @@ void CDetailManager::Render()
 
 	// MT
 	MT_SYNC();
+	if (g_vr_rendering_eye) UpdateVisibleM();
 
 	RDEVICE.Statistic->RenderDUMP_DT_Render.Begin();
 	g_pGamePersistent->m_pGShaderConstants->m_blender_mode.w = 1.0f; //--#SM+#-- Флaa нaчaлa ?aндa?a o?aвu [begin of grass render]

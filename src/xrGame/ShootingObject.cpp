@@ -244,7 +244,7 @@ void CShootingObject::StartParticles(CParticlesObject*& pParticles, LPCSTR parti
 	UpdateParticles(pParticles, pos, vel);
 
 	CSpectator* tmp_spectr = smart_cast<CSpectator*>(Level().CurrentControlEntity());
-	bool in_hud_mode = IsHudModeNow();
+	bool in_hud_mode = ParticlesInHudMode();
 	if (in_hud_mode && tmp_spectr &&
 		(tmp_spectr->GetActiveCam() != CSpectator::eacFirstEye))
 	{
@@ -322,7 +322,7 @@ void CShootingObject::OnShellDrop(const Fvector& play_pos,
                                   const Fvector& parent_vel)
 {
     shared_str particles = m_sShellParticles;
-    bool in_hud_mode = IsHudModeNow();
+    bool in_hud_mode = ParticlesInHudMode();
     if (in_hud_mode)
     {
         auto weaponObj = smart_cast<CWeapon*>(this);
@@ -380,7 +380,7 @@ void CShootingObject::StartFlameParticles()
 
 
 	CSpectator* tmp_spectr = smart_cast<CSpectator*>(Level().CurrentControlEntity());
-	bool in_hud_mode = IsHudModeNow();
+	bool in_hud_mode = ParticlesInHudMode();
 	if (in_hud_mode && tmp_spectr &&
 		(tmp_spectr->GetActiveCam() != CSpectator::eacFirstEye))
 	{

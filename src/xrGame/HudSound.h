@@ -71,6 +71,7 @@ class HUD_SOUND_COLLECTION
 public:
 	~HUD_SOUND_COLLECTION();
 	shared_str m_alias; //Alundaio: For use when it's part of a layered Collection
+	shared_str m_layer_file; // the file a layer plays (layered collections)
 	xr_vector<HUD_SOUND_ITEM> m_sound_items; //Alundaio: made public
 
 	HUD_SOUND_ITEM* FindSoundItem(LPCSTR alias, bool b_assert); //AVO: made public to check if sound is loaded
@@ -101,5 +102,9 @@ public:
 	               int type = sg_SourceType);
 	void SetPosition(LPCSTR alias, const Fvector& pos);
 	void UpdateAllSoundsPositions(const Fvector& P);
+	// VR: drops the layers of a sound whose file names a hand-worked action
+	// (a bolt-action's shot layered with its bolt cycle), keeping at least
+	// one layer. Returns how many were dropped.
+	unsigned DropActionLayers(LPCSTR alias);
 };
 //-Alundaio

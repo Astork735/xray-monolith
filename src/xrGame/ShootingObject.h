@@ -212,6 +212,8 @@ protected:
 	virtual void UpdateLight();
 	virtual void StopLight();
 	virtual bool IsHudModeNow() =0;
+	// Weapon particles (flame, shells, smoke) in HUD mode.
+	virtual bool ParticlesInHudMode() { return IsHudModeNow(); }
 	//////////////////////////////////////////////////////////////////////////
 	// партикловая система
 	//////////////////////////////////////////////////////////////////////////

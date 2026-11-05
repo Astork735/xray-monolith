@@ -90,6 +90,14 @@ void CUICustomEdit::InitCustomEdit(Fvector2 pos, Fvector2 size)
 	inherited::SetWndSize(size);
 }
 
+void CUICustomEdit::VrTypeKey(int dik, bool shift)
+{
+	if (shift)
+		ec().set_key_state(text_editor::ks_LShift, true);
+	OnKeyboardAction(dik, WINDOW_KEY_PRESSED);
+	OnKeyboardAction(dik, WINDOW_KEY_RELEASED);
+}
+
 void CUICustomEdit::SetPasswordMode(bool mode)
 {
 	TextItemControl()->SetPasswordMode(mode);

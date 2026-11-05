@@ -35,6 +35,10 @@ public:
 	virtual float GetHotness() { return 0.0; }			//--DSR-- HeatVision
 	virtual float GetTransparency() { return 0.0; }		//--DSR-- HeatVision
 	virtual float GetGlowing() { return 0.0; }			//--DSR-- SilencerOverheat
+	// Blood running from wounds, drawn by the object's own shaders
+	// (r__blood_body): per wound a row (world centre, radius) and a row
+	// (world run vector, wetness). Returns the wound count, at most max_wounds.
+	virtual u32 GetBloodWounds(Fvector4* rows, u32 max_wounds) { return 0; }
 
 };
 

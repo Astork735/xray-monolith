@@ -120,6 +120,7 @@ ShaderElement::ShaderElement()
 	flags.isWater = FALSE;
 
 	flags.iScopeLense = 0; 	//  Redotix99: for 3D Shader Based Scopes
+	flags.bVrSight = FALSE;
 	//	0 = eNoLense, 
 	//  1 = eBackLense, 
 	//  2 = eZwriteLense, 
@@ -133,6 +134,7 @@ BOOL ShaderElement::equal(ShaderElement& S)
 	if (flags.bEmissive != S.flags.bEmissive) return FALSE;
 
 	if (flags.iScopeLense != S.flags.iScopeLense) return FALSE;		//  Redotix99: for 3D Shader Based Scopes
+	if (flags.bVrSight != S.flags.bVrSight) return FALSE;
 
 	if (flags.bLandscape != S.flags.bLandscape) return FALSE;
 	if (flags.bWmark != S.flags.bWmark) return FALSE;

@@ -194,6 +194,7 @@ Shader* CResourceManager::_cpp_Create(IBlender* B, LPCSTR s_shader, LPCSTR s_tex
 	// Parse names
 	_ParseList(C.L_textures, s_textures);
 	_ParseList(C.L_constants, s_constants);
+	C.VrSight = CBlender_Compile::IsVrSight(s_shader, s_textures);
 	_ParseList(C.L_matrices, s_matrices);
 
 #if defined(USE_DX11)

@@ -150,7 +150,7 @@ void CPda::OnStateSwitch(u32 S, u32 oldState)
 
 			if (pda->IsShown())
 			{
-				if (!psActorFlags.test(AF_3D_PDA))
+				if (!Pda3D())
 					pda->Enable(true);
 				else
 					pda->HideDialog();
@@ -292,7 +292,7 @@ void CPda::UpdateCL()
 	CUIPdaWnd* pda = &CurrentGameUI()->GetPdaMenu();
 	pda->m_power = condition;
 
-	if (!psActorFlags.test(AF_3D_PDA))
+	if (!Pda3D())
 	{
 		if (GetState() != eHidden)
 			Actor()->inventory().Activate(NO_ACTIVE_SLOT);

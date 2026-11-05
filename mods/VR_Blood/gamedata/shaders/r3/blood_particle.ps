@@ -1,0 +1,26 @@
+#include "common.h"
+#include "blood_common.h"
+
+struct p_blood_drop
+{
+	float4 hpos : SV_Position;
+	float3 pv : TEXCOORD0;
+	float2 local : TEXCOORD1;
+	float2 axis : TEXCOORD2;
+};
+
+// Opaque droplets in the G-buffer: lit and shadowed like the scene, no
+// sorting and no blended overdraw.
+f_deffer main(p_blood_drop I)
+{
+	float r2 = dot(I.local, I.local);
+	if (r2 > 1.0) discard;
+	float z = sqrt(1.0 - r2);
+	float2 side = float2(-I.axis.y, I.axis.x);
+	float3 N = normalize(float3(I.axis * I.local.x + side * I.local.y, -z));
+	// Lit like an ordinary surface: material 0.125 is what the engine gives a
+	// texture with the default material (r4.h set_material); 1.0 picked
+	// another lighting model and read far brighter than its surroundings.
+	// Modest ambient (hemi) and gloss so a droplet in shade stays dark.
+	return pack_gbuffer(float4(N, 0.35), float4(I.pv, 0.125), float4(blood_fresh * 0.6, 0.45));
+}

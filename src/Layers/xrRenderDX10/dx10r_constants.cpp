@@ -385,6 +385,11 @@ BOOL R_constant_table::parse(void* _desc, u32 destination)
 		for (u16 iBuf = 0; iBuf < ShaderDesc.ConstantBuffers; ++iBuf)
 		{
 			pTable = pReflection->GetConstantBufferByIndex(iBuf);
+			// Structured buffers (blood compute shaders) are reflected as
+			// "$Element" buffers too; they are resources, not constants.
+			D3D_SHADER_BUFFER_DESC BufferDesc;
+			if (pTable && SUCCEEDED(pTable->GetDesc(&BufferDesc)) && BufferDesc.Type != D3D_CT_CBUFFER)
+				continue;
 			if (pTable)
 			{
 				//	Encode buffer index into destination

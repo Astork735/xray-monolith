@@ -41,6 +41,12 @@ public:
 	virtual void Enable(bool status);
 
 	void SetPasswordMode(bool mode = true);
+	// Typed into now (the VR keyboard shows while one is).
+	bool InputFocused() const { return m_bInputFocus; }
+	// A key typed on the VR keyboard, with Shift held for it. Shift is set
+	// on the editor itself: a separate Shift press is undone at its own
+	// release, which reads the physical keyboard.
+	void VrTypeKey(int dik, bool shift);
 
 protected:
 	void Register_callbacks();

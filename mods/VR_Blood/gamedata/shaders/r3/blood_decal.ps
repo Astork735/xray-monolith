@@ -1,0 +1,71 @@
+#include "common.h"
+#include "blood_common.h"
+
+// The physical page cache of the blood virtual texture.
+Texture2DArray s_blood_pages;
+uniform float4 blood_params;	// page size, dry time, tile size
+
+struct p_blood_decal
+{
+	float4 hpos : SV_Position;
+	nointerpolation float4 page : TEXCOORD0;
+	nointerpolation float4 extent : TEXCOORD1;
+};
+
+// Drawn into the albedo target (gloss in alpha) after the G-buffer: the
+// scene position comes from the position target, so the stain lies exactly
+// on the surface whatever its shape.
+float4 main(p_blood_decal I) : SV_Target
+{
+	float4 G = s_position.Load(int3(I.hpos.xy, 0));
+	if (G.z <= 0.01) discard;
+	float3 Pv = float3(G.z * (I.hpos.xy * pos_decompression_params.zw - pos_decompression_params.xy), G.z);
+	float3 Nv = gbuf_unpack_normal(G.xy);
+	float3 Pw = mul(m_inv_V, float4(Pv, 1.0));
+	float3 Nw = normalize(mul(m_inv_V, float4(Nv, 0.0)));
+
+	int axis = int(I.page.x + 0.5);
+	int main_axis = blood_main_axis(axis);
+	int t1, t2;
+	blood_tangent_axes(main_axis, t1, t2);
+	float tile = I.extent.w;
+
+	// Only the surface inside this page's box: its tile, slab and the
+	// stained height range (the box's front faces are not drawn).
+	float2 tc = float2(Pw[t1], Pw[t2]);
+	float2 uv = tc / tile - I.page.zw;
+	if (any(uv < 0.0) || any(uv > 1.0)) discard;
+	// Half-open, so a surface on a slab boundary is drawn by one page only.
+	float along = Pw[main_axis];
+	if (along < I.extent.y || along >= I.extent.z) discard;
+	// Most of a page box is clean: read the page first and stop there, before
+	// the relief and noise.
+	float half_texel = 0.5 / blood_params.x;
+	uv = clamp(uv, half_texel, 1.0 - half_texel);
+	float4 s = s_blood_pages.Sample(smp_rtlinear, float3(uv, I.page.y));
+	float amount = s.r;
+	if (amount < 0.004) discard;
+	float weight = blood_axis_weight(Nw, axis);
+	if (weight <= 0.001) discard;
+	float wet = saturate(s.g / max(amount, 1e-3));
+
+	// Thin films gather in the low parts of the surface relief; fine noise
+	// breaks up their edges so no two stains repeat. Both only shape blood
+	// that is there: a hollow alone shows nothing.
+	float h = blood_surface_height(tc, float(axis));
+	float n = blood_noise(tc * 60.0);
+	float present = saturate(amount * 8.0);
+	float film = amount + ((0.5 - h) * 0.10 + (n - 0.5) * 0.03) * present;
+	float coverage = smoothstep(0.035, 0.12, film);
+	if (coverage <= 0.0) discard;
+
+	// Fresh blood is bright and wet; as it dries it darkens to brown and
+	// turns patchy. Thick pools are darker than thin smears.
+	float thick = saturate(amount * 1.4);
+	float3 colour = lerp(blood_dried, blood_fresh, wet) * lerp(1.0, 0.55, thick);
+	colour *= lerp(1.0, 0.8 + 0.4 * n, 1.0 - wet);
+
+	// Alpha also blends the gloss channel: wet, thick blood reads glossy.
+	float alpha = coverage * weight * lerp(0.75, 0.97, thick) * lerp(0.85, 1.0, wet);
+	return float4(colour, alpha);
+}

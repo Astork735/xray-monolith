@@ -173,6 +173,7 @@ public:
 	CDetailManager* Details;
 	CModelPool* Models;
 	CWallmarksEngine* Wallmarks;
+	class CBlood* Blood = nullptr; // per level; absent with MSAA
 
 	CRenderTarget* Target; // Render-target
 
@@ -188,6 +189,7 @@ public:
 	shared_str c_sbase;
 	shared_str c_lmaterial;
 	bool o_hotness_own = false;
+	bool o_blood_own = false;
 	float o_hemi;
 	float o_hemi_cube[CROS_impl::NUM_FACES];
 	float o_sun;
@@ -228,6 +230,7 @@ public:
 	void render_rain();
 
 	void render_sun_cascade(u32 cascade_ind);
+	void accumulate_sun_cascade(u32 cascade_ind);
 	void init_cacades();
 	void render_sun_cascades();
 
@@ -253,6 +256,20 @@ public:
 	{
 		RCache.bus_object.apply(O);
 		if (0 == O) return;
+		// Blood running from this object's wounds, drawn by its own shaders
+		// (gbuffer_stage.h in the blood shader mod); cleared again by
+		// apply_lmaterial for anything that does not set it.
+		o_blood_own = false;
+		if (ps_r__blood_body && ps_r__blood)
+		{
+			Fvector4 rows[16];
+			const u32 wounds = O->GetBloodWounds(rows, 8);
+			if (wounds)
+			{
+				RCache.hemi.set_blood(rows, wounds);
+				o_blood_own = true;
+			}
+		}
 		if (0 == O->renderable_ROS()) return;
 		CROS_impl& LT = *((CROS_impl*)O->renderable_ROS());
 		LT.update_smooth(O);
@@ -277,6 +294,9 @@ public:
 		// an object's own obj_hotness skips the hot texture check, only for the draw right after apply_object
 		const bool hotness_own = o_hotness_own;
 		o_hotness_own = false;
+		// Wounds only for the draw right after their object's apply_object.
+		if (!o_blood_own) RCache.hemi.set_blood(nullptr, 0);
+		o_blood_own = false;
 		R_constant* C = RCache.get_c(c_sbase); // get sampler
 		if (0 == C) return;
 		VERIFY(RC_dest_sampler == C->destination);
@@ -357,6 +377,10 @@ public:
 	                                  const Fvector& dir, float size, float ttl = 0.f, bool ignore_opt = false);
 	virtual void add_SkeletonWallmark(const Fmatrix* xf, IKinematics* obj, IWallMarkArray* pArray, const Fvector& start,
 	                                  const Fvector& dir, float size, float ttl = 0.f, bool ignore_opt = false);
+
+	virtual bool blood_active();
+	virtual void blood_emit(const BloodEmit& e);
+	virtual void blood_splat(const BloodSplatRequest& s);
 
 	//
 	virtual IBlender* blender_create(CLASS_ID cls);

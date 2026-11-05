@@ -44,6 +44,16 @@ void addIncludedShaderCrc32(LPCSTR shaderPath, LPCSTR includeName, u32& crc)
 
     addShaderSourceCrc32(includeReader->pointer(), includeReader->length(), shaderPath, crc);
     FS.r_close(includeReader);
+
+    // The renderer's includer wraps gbuffer_stage.h with blood_body.h when the
+    // blood shader mod is installed: installing, updating or removing it must
+    // recompile what uses the G-buffer.
+    if (0 == xr_strcmp(includeName, "gbuffer_stage.h"))
+        if (IReader* blood = openShaderInclude(shaderPath, "blood_body.h"))
+        {
+            addShaderSourceCrc32(blood->pointer(), blood->length(), shaderPath, crc);
+            FS.r_close(blood);
+        }
 }
 
 void parseShaderIncludes(const char* sourceData, u32 sourceSize, LPCSTR shaderPath, u32& crc)

@@ -33,11 +33,59 @@
 #include "xrSash.h"
 #include "igame_persistent.h"
 #include "shader_bus.h"
+#include "Vr/vr_frame_work.h"
+
+#ifdef VR_ENABLED
+#include "Vr/vr_stereo.h"
+#include "Vr/vr_system.h"
+#endif
 
 #pragma comment( lib, "d3dx9.lib" )
 
 ENGINE_API CRenderDevice Device;
 ENGINE_API CLoadScreenRenderer load_screen_renderer;
+
+// Read by the render layer to select VR resources and nonblocking mirror presentation.
+bool g_vr_owns_present = false;
+bool g_vr_rendering_eye = false;
+bool g_vr_eye_rendered = false;
+int g_vr_shadow_share = 0;
+int g_vr_eye_index = -1;
+bool g_vr_ui_pass = false;
+Fmatrix g_vr_shadow_view = Fidentity, g_vr_shadow_project = Fidentity;
+bool vr_engine_prepare(unsigned long& low, long& high, unsigned& feature)
+{
+#ifdef VR_ENABLED
+    return vr::PrepareVr(low, high, feature);
+#else
+    return false;
+#endif
+}
+void vr_engine_stop()
+{
+#ifdef VR_ENABLED
+    vr::StopVr();
+#endif
+}
+void vr_engine_dimensions(unsigned& width, unsigned& height)
+{
+#ifdef VR_ENABLED
+    if (CVrSystem::Get().HasSession()) { width = CVrSystem::Get().Width(); height = CVrSystem::Get().Height(); }
+#endif
+}
+
+// Entry point used by the render layer (dxRenderDeviceRender::Create) once the
+// D3D11 device exists. Compiled in every configuration; only does work under
+// VR_ENABLED and when VR was requested.
+bool vr_engine_start(void* d3d11_device, unsigned width, unsigned height, int dxgi_format)
+{
+#ifdef VR_ENABLED
+	return vr::StartVr(reinterpret_cast<ID3D11Device*>(d3d11_device), width, height, dxgi_format);
+#else
+	(void)d3d11_device; (void)width; (void)height; (void)dxgi_format;
+	return false;
+#endif
+}
 
 
 ENGINE_API BOOL g_bRendering = FALSE;
@@ -87,6 +135,9 @@ BOOL CRenderDevice::Begin()
 	}
 
 	m_pRender->Begin();
+#ifdef VR_ENABLED
+    vr::BeginStereoFrame();
+#endif
 
 	FPU::m24r();
 	g_bRendering = TRUE;
@@ -155,6 +206,9 @@ void CRenderDevice::End(void)
 		}
 	}
 
+#ifdef VR_ENABLED
+    vr::FinishStereoFrame();
+#endif
 	g_bRendering = FALSE;
 	// end scene
 	// Present goes here, so call OA Frame end.
@@ -195,15 +249,9 @@ void mt_Thread(void* ptr)
 		mt_Thread_marker = device.dwFrame;
 		STOP_PROFILE;
 
-		START_PROFILE("Process seqParallel");
-		for (u32 pit = 0; pit < device.seqParallel.size(); pit++)
-			device.seqParallel[pit]();
-		device.seqParallel.clear_not_free();
-		STOP_PROFILE;
-
-		START_PROFILE("Process seqFrameMT");
-		device.seqFrameMT.Process(rp_Frame);
-		STOP_PROFILE;
+        START_PROFILE("Process frame work");
+        vr::RunFrameWork(device.seqParallel, [&] { device.seqFrameMT.Process(rp_Frame); });
+        STOP_PROFILE;
 
 		// demonized: While Renderer prepares frame and GPU renders it, use time opportunity to repeatedly call Lua GC with small step value
 		// Reduces stutters since less work will be done in main GC step or no work at all
@@ -421,6 +469,9 @@ void CRenderDevice::on_idle()
 	else g_bEnableStatGather = FALSE;
 	STOP_PROFILE;
 
+#ifdef VR_ENABLED
+    vr::PollVrEvents(); // before simulation/loading; recovery can pause safely
+#endif
 	if (g_loading_events.size())
 	{
 		PROF_EVENT("Pop loading event");
@@ -436,7 +487,11 @@ void CRenderDevice::on_idle()
 		g_SASH.StartBenchmark();
 	}
 
+#ifdef VR_ENABLED
+    vr::PrepareStereoSimulation();
+#endif
 	FrameMove();
+
 
 	// Precache
 	if (dwPrecacheFrame)
@@ -451,6 +506,7 @@ void CRenderDevice::on_idle()
 
 		mView.build_camera_dir(vCameraPosition, vCameraDirection, vCameraTop);
 	}
+
 
 	// Matrices
 	START_PROFILE("Matrices");
@@ -498,13 +554,29 @@ void CRenderDevice::on_idle()
 	// *** Resume threads
 	// Capture end point - thread must run only ONE cycle
 	// Release start point - allow thread to run
-	START_PROFILE("Resume threads");
-	mt_csLeave.Enter();
-	mt_csEnter.Leave();
-	STOP_PROFILE;
+    // Camera head probes borrow ODE's camera shell and contact data. In VR,
+    // finish all worker work before rendering and leave the worker parked.
+    // Snapshot the mode: recovery during Begin/End must not change lock pairing.
+    const bool serial_vr_work = g_vr_owns_present;
+    START_PROFILE("Resume threads");
+    if (serial_vr_work)
+    {
+        vr::RunFrameWork(seqParallel, [&] { seqFrameMT.Process(rp_Frame); });
+        if (psLua_ParallelGC && LuaGC)
+        {
+            ++LuaGCCount;
+            LuaGCDone = LuaGC() == 1;
+        }
+    }
+    else
+    {
+        mt_csLeave.Enter();
+        mt_csEnter.Leave();
+    }
+    STOP_PROFILE;
 
 #ifdef ECO_RENDER // ECO_RENDER START
-	if (Device.Paused() || IsMainMenuActive() || ps_framelimiter)
+	if (!g_vr_owns_present && (Device.Paused() || IsMainMenuActive() || ps_framelimiter))
 	{
 		PROF_EVENT("Eco Render");
 
@@ -532,11 +604,14 @@ void CRenderDevice::on_idle()
 	Statistic->RenderTOTAL_Real.FrameStart();
 	Statistic->RenderTOTAL_Real.Begin();
 
-	if (b_is_Active && Begin())
+	if ((b_is_Active || g_vr_owns_present) && Begin())
 	{
+		// Always run the engine's per-frame render pass first (loading screen,
+		// menu, level callbacks, ...). Bypassing it deadlocks level loading.
 		START_PROFILE("Process seqRender");
 		seqRender.Process(rp_Render);
 		STOP_PROFILE;
+
 
 		if (psDeviceFlags.test(rsCameraPos) || psDeviceFlags.test(rsStatistic) || Statistic->errors.size())
 		{
@@ -546,6 +621,9 @@ void CRenderDevice::on_idle()
 
 		End();
 	}
+#ifdef VR_ENABLED
+    else vr::SubmitPendingStereoFrame();
+#endif
 	Statistic->RenderTOTAL_Real.End();
 	Statistic->RenderTOTAL_Real.FrameEnd();
 	Statistic->RenderTOTAL.accum = Statistic->RenderTOTAL_Real.accum;
@@ -555,20 +633,16 @@ void CRenderDevice::on_idle()
 	// *** Suspend threads
 	// Capture startup point
 	// Release end point - allow thread to wait for startup point
-	START_PROFILE("Suspend threads");
-	mt_csEnter.Enter();
-	mt_csLeave.Leave();
-	STOP_PROFILE;
-
-	// Ensure, that second thread gets chance to execute anyway
-	if (dwFrame != mt_Thread_marker)
-	{
-		PROF_EVENT("Execute second thread");
-		for (u32 pit = 0; pit < Device.seqParallel.size(); pit++)
-			Device.seqParallel[pit]();
-		Device.seqParallel.clear_not_free();
-		seqFrameMT.Process(rp_Frame);
-	}
+    START_PROFILE("Suspend threads");
+    if (!serial_vr_work)
+    {
+        mt_csEnter.Enter();
+        mt_csLeave.Leave();
+        // Preserve the ordinary desktop fallback if the worker did not run.
+        if (dwFrame != mt_Thread_marker)
+            vr::RunFrameWork(seqParallel, [&] { seqFrameMT.Process(rp_Frame); });
+    }
+    STOP_PROFILE;
 
 	if (psLua_ParallelGC_debug && psLua_ParallelGC && Device.LuaGCDebug)
 	{
@@ -952,7 +1026,7 @@ void CLoadScreenRenderer::OnRender()
 
 void CRenderDevice::CSecondVPParams::SetSVPActive(bool bState) //--#SM+#-- +SecondVP+
 {
-	isActive = bState;
+	isActive = bState && !g_vr_owns_present;
 	if (g_pGamePersistent != NULL)
 		g_pGamePersistent->m_pGShaderConstants->m_blender_mode.z = (isActive ? 1.0f : 0.0f);
 }

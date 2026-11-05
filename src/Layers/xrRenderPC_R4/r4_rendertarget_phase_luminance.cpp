@@ -19,6 +19,11 @@ struct v_filter
 
 void CRenderTarget::phase_luminance()
 {
+    // VR: the first eye measures the scene and advances the adaptation once
+    // a frame, as the desktop does; the second eye and the scope view use
+    // that result (see phase_combine), so both eyes match.
+    if (g_vr_rendering_eye && g_vr_eye_index != 0)
+        return;
 	u32 Offset = 0;
 	//	float	eps		= EPS_S;
 	float eps = 0;

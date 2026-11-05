@@ -75,7 +75,9 @@ void R_dsgraph_structure::r_dsgraph_insert_dynamic(dxRender_Visual* pVisual, Fve
 	_MatrixItem item = {SSA, RI.val_pObject, pVisual, *RI.val_pTransform};
 
 #if defined(USE_DX11) //  Redotix99: for 3D Shader Based Scopes 		
-	switch (sh->flags.iScopeLense) {	
+	// VR draws its own scope lens and red dot (VrWeaponInteraction).
+	if (g_vr_rendering_eye && (sh->flags.iScopeLense || sh->flags.bVrSight)) return;
+	switch (sh->flags.iScopeLense) {
 		case 0:
 			break;
 

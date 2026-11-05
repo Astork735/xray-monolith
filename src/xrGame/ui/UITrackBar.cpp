@@ -4,6 +4,7 @@
 #include "UI3tButton.h"
 #include "UITextureMaster.h"
 #include "../../xrEngine/xr_input.h"
+#include "../UICursor.h"
 
 #define DEF_CONTROL_HEIGHT		16.0f
 
@@ -32,7 +33,7 @@ bool CUITrackBar::OnMouseAction(float x, float y, EUIMessages mouse_action)
 		{
 			if (m_bCursorOverWindow && m_b_mouse_capturer)
 			{
-				if (pInput->iGetAsyncBtnState(0))
+				if (GetUICursor().PrimaryHeld())
 					UpdatePosRelativeToMouse();
 			}
 		}
@@ -122,7 +123,7 @@ void CUITrackBar::Update()
 
 	if (m_b_mouse_capturer)
 	{
-		if (!pInput->iGetAsyncBtnState(0))
+		if (!GetUICursor().PrimaryHeld())
 			m_b_mouse_capturer = false;
 	}
 }

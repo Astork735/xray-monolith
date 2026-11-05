@@ -54,6 +54,11 @@ public:
 	virtual void _BCL OnFrame();
 	virtual bool UseIndicators() { return true; }
 
+	// A dialog destroyed while still shown (e.g. a script window collected
+	// with its holder alive) is dropped without being touched again.
+	void ForgetDialog(CUIDialogWnd* pDialog);
+	static bool IsAlive(const CDialogHolder* holder);
+
 	virtual void StartDialog(CUIDialogWnd* pDialog, bool bDoHideIndicators);
 	virtual void StopDialog(CUIDialogWnd* pDialog);
 	virtual bool IgnorePause() { return false; }

@@ -563,7 +563,7 @@ void CActor::ActorUse()
 	{
 		bool bCaptured = false;
 
-		collide::rq_result& RQ = HUD().GetRQ();
+		collide::rq_result RQ = UseRQ();
 		CPhysicsShellHolder* object = smart_cast<CPhysicsShellHolder*>(RQ.O);
 		u16 element = BI_NONE;
 		if (object)

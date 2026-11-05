@@ -21,6 +21,10 @@
 #include "Inventory.h"
 #include "map_manager.h"
 #include "player_hud.h"
+#include "Weapon.h"
+#include "VrWeaponInteraction.h"
+#include "VrBodySlots.h"
+#include "../xrEngine/Vr/vr_gameplay.h"
 #include "script_attachment_manager.h"
 
 extern CUIGameCustom* CurrentGameUI()
@@ -137,6 +141,21 @@ void CHUDManager::OnFrame()
 		pUIGame->OnFrame();
 
 	PP.CameraPick();
+	// VR: what the player targets is what a free hand points at (the hand
+	// that uses), else what the head looks at, not the body camera's line.
+	// Scripts read this as the crosshair target (level.get_target_obj).
+	if (g_vr_owns_present)
+		if (auto* actor = smart_cast<CActor*>(Level().CurrentControlEntity()))
+		{
+			Fmatrix ray;
+			const int hand = actor->m_vr_pickup.use_hand;
+			if ((hand >= 0 && vr::HandTransform(hand, true, ray)) || vr::HeadTransform(ray))
+			{
+				PP.defs.start = ray.c;
+				PP.defs.dir = ray.k;
+				PP.barrel_matrix = ray;
+			}
+		}
 	g_player_hud->OnFrame();
 	DoPick(PP);
 }
@@ -179,11 +198,74 @@ void CHUDManager::Render_Last()
 {
 	if (0 == pUIGame) return;
 	if (g_actor) g_actor->RenderCamAttached();
+	CObject* O = g_pGameLevel->CurrentViewEntity();
+	// Temporary dropped magazines are world props, not a weapon HUD feature.
+	// Keep them visible when the active weapon HUD is hidden or another item is selected.
+	if (auto* actor = smart_cast<CActor*>(O))
+	{
+		::Render->set_Object(O->H_Root());
+		for (auto* item:actor->inventory().m_all)
+			if (auto* weapon=item->cast_weapon())
+			{
+				weapon->VrRenderLooseMagazines();
+				weapon->VrRenderHolster();
+			}
+		RenderVrPouch(*actor);
+		RenderVrBodySlots(*actor);
+		// The tracked arms, every eye, whether or not the body's own box is in
+		// view (see CActor::renderable_Render).
+		extern bool canRenderLegs(CActor* actor, CHolderCustom* m_holder) noexcept;
+		if (g_vr_owns_present && actor->cam_Active()==actor->cam_FirstEye() &&
+			canRenderLegs(actor, actor->Holder()))
+			actor->m_legs_controller.render();
+	}
 	if (!psHUD_Flags.is(HUD_WEAPON | HUD_WEAPON_RT | HUD_WEAPON_RT2 | HUD_DRAW_RT2))return;
 	if (!need_render_hud()) return;
 
-	CObject* O = g_pGameLevel->CurrentViewEntity();
 	// hud itself
+	::Render->set_Object(O->H_Root());
+	if (auto* actor = smart_cast<CActor*>(O))
+		if (auto* weapon = smart_cast<CWeapon*>(actor->inventory().ActiveItem()))
+		{
+			if (weapon->VrRender()) return;
+			// No flat desktop weapon/arm geometry inside the stereo view,
+			// including transient tracking failures. A weapon with no VR
+			// profile (the knife) is drawn at the hand below.
+			if (g_vr_owns_present && weapon->VrSupported()) return;
+		}
+    if (g_vr_owns_present)
+    {
+        // The stock bolt/knife HUD includes flat FPS arms. Draw the active
+        // item's world visual at the tracked hand instead of that HUD rig:
+        // a grenade or bolt in the hand that took it, and not once thrown;
+        // a knife in its weapon hand.
+        if (auto* actor=smart_cast<CActor*>(O))
+            if (auto* item=actor->inventory().ActiveItem())
+                if (auto* visual=item->object().Visual())
+                {
+                    auto* missile=smart_cast<CMissile*>(item);
+                    auto* weapon=item->cast_weapon();
+                    const int side=missile ? VrMissileHand(*actor) : weapon ? weapon->VrWeaponHand() : 1;
+                    Fmatrix hand;
+                    // The knife's or binoculars' first-person model, held as
+                    // in first person; not the binoculars while looked
+                    // through (their view is on lenses at the eyes).
+                    auto* hud=weapon ? weapon->HudItemData() : nullptr;
+                    if (VrBinocularsAtEyes(*actor)) {}
+                    else if (hud && hud->m_model && VrKnifePose(*actor,hand))
+                    {
+                        ::Render->set_Transform(&hand);
+                        ::Render->add_Visual(hud->m_model->dcast_RenderVisual());
+                    }
+                    else if ((!missile || !missile->VrThrown()) && side>=0 && !VrBinocularsAtEyes(*actor) &&
+                        VrHeldItemPose(side,hand))
+                    {
+                        ::Render->set_Transform(&hand);
+                        ::Render->add_Visual(visual);
+                    }
+                }
+        return;
+    }
 	::Render->set_HUD(TRUE);
 	::Render->set_Object(O->H_Root());
 	O->OnHUDDraw(this);
@@ -260,7 +342,11 @@ void CHUDManager::RenderUI()
 		UI().RenderFont();
 	}
 
-	m_pHUDTarget->Render();
+	// VR: the crosshair would sit at the centre of the head-locked panel and
+	// its target from the body camera; the weapon's own sights aim, and the
+	// hand rays and item labels name what is pointed at.
+	if (!g_vr_owns_present)
+		m_pHUDTarget->Render();
 
 	if (Device.Paused() && bShowPauseString)
 	{

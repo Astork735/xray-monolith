@@ -30,5 +30,8 @@ enum
 
 extern Flags32 psActorFlags;
 extern BOOL GodMode();
+// The PDA is held as a 3D model with its screen on it (g_3d_pda). Not in VR,
+// where it opens as a window on the pointer panel.
+extern bool Pda3D();
 
 extern int psActorSleepTime;

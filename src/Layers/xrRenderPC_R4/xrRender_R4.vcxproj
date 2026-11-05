@@ -476,6 +476,10 @@
     <ClInclude Include="blender_lut.h" />
     <ClInclude Include="blender_nightvision.h" />
     <ClInclude Include="blender_gasmask_drops.h" />
+    <ClInclude Include="blender_blood.h" />
+    <ClInclude Include="r4_blood.h" />
+    <ClInclude Include="..\..\xrEngine\Blood\blood_logic.h" />
+    <ClInclude Include="..\..\xrEngine\Blood\blood_types.h" />
     <ClInclude Include="blender_gasmask_dudv.h" />
     <ClInclude Include="blender_light_direct.h" />
     <ClInclude Include="blender_light_mask.h" />
@@ -673,6 +677,8 @@
     <ClCompile Include="blender_lut.cpp" />
     <ClCompile Include="blender_nightvision.cpp" />
     <ClCompile Include="blender_gasmask_drops.cpp" />
+    <ClCompile Include="blender_blood.cpp" />
+    <ClCompile Include="r4_blood.cpp" />
     <ClCompile Include="blender_gasmask_dudv.cpp" />
     <ClCompile Include="blender_light_direct.cpp" />
     <ClCompile Include="blender_light_mask.cpp" />

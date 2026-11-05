@@ -287,6 +287,9 @@ float ui_core::get_current_kx()
 	ui_core* core = GamePersistent().m_pUI_core;
 	if (core && (core->m_currentPointType == IUIRender::pttLIT || core->m_bAspectNeutral))
 		return 1.0f;
+	// VR shows the UI at 4:3 (vr::kUiPanelAspect): no widescreen correction.
+	if (g_vr_owns_present)
+		return 1.0f;
 
 	float h = float(Device.dwHeight);
 	float w = float(Device.dwWidth);

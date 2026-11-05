@@ -6,6 +6,7 @@
 #include "stdafx.h"
 #include "Level_Bullet_Manager.h"
 #include "entity.h"
+#include "entity_alive.h"
 #include "../xrEngine/gamemtllib.h"
 #include "level.h"
 #include "gamepersistent.h"
@@ -224,6 +225,14 @@ void CBulletManager::FireShotmark(SBullet* bullet, const Fvector& vDir, const Fv
 	LPCSTR ps_name = (!mtl_pair || mtl_pair->CollideParticles.empty())
 		                 ? NULL
 		                 : *mtl_pair->CollideParticles[::Random.randI(0, mtl_pair->CollideParticles.size())];
+
+	// With the blood system the wound itself sprays (CEntityAlive::BloodyWallmarks)
+	// instead of the flesh-hit particle effect.
+	if (ps_name && R.O && ::Render->blood_active())
+	{
+		const CEntityAlive* victim = smart_cast<CEntityAlive*>(R.O);
+		if (victim && !victim->use_simplified_visual()) ps_name = NULL;
+	}
 
 	SGameMtl* tgt_mtl = GMLib.GetMaterialByIdx(target_material);
 	BOOL bStatic = !tgt_mtl->Flags.test(SGameMtl::flDynamic);

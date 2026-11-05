@@ -23,6 +23,9 @@ public:
 	virtual void activate_physic_shell();
 
 	void PutNextToSlot();
+	// VR: let go from a hand into the world as a thrown bolt. Unlimited bolts
+	// cannot be taken back; either kind is removed after a while.
+	void VrPrepareThrown(bool limited);
 	virtual void State(u32 state, u32 old_state);
 
 	virtual BOOL UsedAI_Locations() { return FALSE; }

@@ -1,0 +1,283 @@
+; VR weapon mechanics overrides.
+;
+; Every weapon's mechanics are worked out from its engine class, its ltx,
+; its first-person animations and its model, and written to the log:
+;   * [VR mechanics] wpn_svd: rifle, self_loading, detachable(10), ...
+; A section here, named after the weapon section (or its parent_section),
+; corrects any of them. Only the keys given change.
+;
+; family    = unknown | pistol | revolver | bolt_action | lever_action |
+;             pump_shotgun | break_action | semi_shotgun | rifle | smg |
+;             machine_gun | launcher
+; action    = none | self_loading | manual_bolt | lever | pump | break |
+;             revolver | launcher
+; feed      = none | detachable | internal_rounds | tube | belt | cylinder |
+;             chambers | muzzle
+; capacity  = rounds
+; has_bolt_catch, has_bolt_release, has_slide_stop, has_slide_release,
+; requires_manual_charging, supports_last_round_hold_open,
+; has_charging_handle, has_dust_cover, magazine_removable,
+; vr_reload_supported = true | false
+;   (vr_reload_supported = false leaves the weapon on the game's own reload)
+;
+; Examples:
+;
+; [wpn_some_semi_rifle]
+; family = rifle
+; action = self_loading
+;
+; [wpn_some_bolt_rifle]
+; family = bolt_action
+; action = manual_bolt
+; feed = internal_rounds
+;
+; [wpn_some_ar15]
+; has_bolt_catch = true
+; supports_last_round_hold_open = true
+
+; ---------------------------------------------------------------------------
+; Firearm knowledge the vanilla models do not show (their animations have no
+; last-shot hold-open). Variants use these through their parent_section or
+; their name trimmed at underscores (wpn_m4a1_custom -> wpn_m4a1).
+;
+; Holds open on the last round; released by its bolt catch / release lever
+; (the support trigger on it, or A).
+; AR-15 family, SCAR, SIG 55x, G36/XM8, L85, AUG A3, F2000, MDR, MSBS, FAL,
+; M14, MP7, Vector, Skorpion vz.61, UMP.
+
+[wpn_m4]
+supports_last_round_hold_open = true
+has_bolt_catch = true
+requires_manual_charging = false
+
+[wpn_m4a1]
+supports_last_round_hold_open = true
+has_bolt_catch = true
+requires_manual_charging = false
+
+[wpn_m16]
+supports_last_round_hold_open = true
+has_bolt_catch = true
+requires_manual_charging = false
+
+[wpn_hk416]
+supports_last_round_hold_open = true
+has_bolt_catch = true
+requires_manual_charging = false
+
+[wpn_hk417]
+supports_last_round_hold_open = true
+has_bolt_catch = true
+requires_manual_charging = false
+
+[wpn_lr300]
+supports_last_round_hold_open = true
+has_bolt_catch = true
+requires_manual_charging = false
+
+[wpn_sr25]
+supports_last_round_hold_open = true
+has_bolt_catch = true
+requires_manual_charging = false
+
+[wpn_ar15]
+supports_last_round_hold_open = true
+has_bolt_catch = true
+requires_manual_charging = false
+
+[wpn_ar15_freedom]
+supports_last_round_hold_open = true
+has_bolt_catch = true
+requires_manual_charging = false
+
+[wpn_adar2_15]
+supports_last_round_hold_open = true
+has_bolt_catch = true
+requires_manual_charging = false
+
+[wpn_xm4]
+supports_last_round_hold_open = true
+has_bolt_catch = true
+requires_manual_charging = false
+
+[wpn_mk47]
+supports_last_round_hold_open = true
+has_bolt_catch = true
+requires_manual_charging = false
+
+[wpn_brn180]
+supports_last_round_hold_open = true
+has_bolt_catch = true
+requires_manual_charging = false
+
+[wpn_howa20]
+supports_last_round_hold_open = true
+has_bolt_catch = true
+requires_manual_charging = false
+
+[wpn_scar]
+supports_last_round_hold_open = true
+has_bolt_catch = true
+requires_manual_charging = false
+
+[wpn_sig550]
+supports_last_round_hold_open = true
+has_bolt_catch = true
+requires_manual_charging = false
+
+[wpn_sig552]
+supports_last_round_hold_open = true
+has_bolt_catch = true
+requires_manual_charging = false
+
+[wpn_sig550_sniper]
+supports_last_round_hold_open = true
+has_bolt_catch = true
+requires_manual_charging = false
+
+[wpn_g36]
+supports_last_round_hold_open = true
+has_bolt_catch = true
+requires_manual_charging = false
+
+[wpn_g36c]
+supports_last_round_hold_open = true
+has_bolt_catch = true
+requires_manual_charging = false
+
+[wpn_g36k]
+supports_last_round_hold_open = true
+has_bolt_catch = true
+requires_manual_charging = false
+
+[wpn_g36ka4]
+supports_last_round_hold_open = true
+has_bolt_catch = true
+requires_manual_charging = false
+
+[wpn_g36v]
+supports_last_round_hold_open = true
+has_bolt_catch = true
+requires_manual_charging = false
+
+[wpn_xm8]
+supports_last_round_hold_open = true
+has_bolt_catch = true
+requires_manual_charging = false
+
+[wpn_l85]
+supports_last_round_hold_open = true
+has_bolt_catch = true
+requires_manual_charging = false
+
+[wpn_aug_a3]
+supports_last_round_hold_open = true
+has_bolt_catch = true
+requires_manual_charging = false
+
+[wpn_fn2000]
+supports_last_round_hold_open = true
+has_bolt_catch = true
+requires_manual_charging = false
+
+[wpn_dtmdr]
+supports_last_round_hold_open = true
+has_bolt_catch = true
+requires_manual_charging = false
+
+[wpn_grot]
+supports_last_round_hold_open = true
+has_bolt_catch = true
+requires_manual_charging = false
+
+[wpn_fal]
+supports_last_round_hold_open = true
+has_bolt_catch = true
+requires_manual_charging = false
+
+[wpn_mk14]
+supports_last_round_hold_open = true
+has_bolt_catch = true
+requires_manual_charging = false
+
+[wpn_mp7]
+supports_last_round_hold_open = true
+has_bolt_catch = true
+requires_manual_charging = false
+
+[wpn_kriss_vector]
+supports_last_round_hold_open = true
+has_bolt_catch = true
+requires_manual_charging = false
+
+[wpn_vz61]
+supports_last_round_hold_open = true
+has_bolt_catch = true
+requires_manual_charging = false
+
+[wpn_ump45]
+supports_last_round_hold_open = true
+has_bolt_catch = true
+requires_manual_charging = false
+
+; Holds open on the last round (the magazine follower); no release button:
+; pull the handle back a little and let go.
+
+[wpn_svt40]
+supports_last_round_hold_open = true
+has_bolt_catch = false
+requires_manual_charging = true
+
+[wpn_g43]
+supports_last_round_hold_open = true
+has_bolt_catch = false
+requires_manual_charging = true
+
+[wpn_m82]
+supports_last_round_hold_open = true
+has_bolt_catch = false
+requires_manual_charging = true
+
+[wpn_sks]
+supports_last_round_hold_open = true
+has_bolt_catch = false
+requires_manual_charging = true
+
+[wpn_type63]
+supports_last_round_hold_open = true
+has_bolt_catch = false
+requires_manual_charging = true
+
+; HK roller-delayed: no hold-open. The charging handle hooks into its notch
+; (pull fully back, lift ~2 cm) to hold the bolt open; a slap down on it
+; (or a short pull) releases it.
+
+[wpn_mp5]
+supports_last_round_hold_open = false
+has_bolt_catch = false
+handle_notch = true
+
+[wpn_mp5sd]
+supports_last_round_hold_open = false
+has_bolt_catch = false
+handle_notch = true
+
+[wpn_mp5_kurtz]
+supports_last_round_hold_open = false
+has_bolt_catch = false
+handle_notch = true
+
+[wpn_g3]
+supports_last_round_hold_open = false
+has_bolt_catch = false
+handle_notch = true
+
+[wpn_g3sg1]
+supports_last_round_hold_open = false
+has_bolt_catch = false
+handle_notch = true
+
+[wpn_hk21]
+supports_last_round_hold_open = false
+has_bolt_catch = false
+handle_notch = true

@@ -4,6 +4,7 @@
 #include "ui/UIStatic.h"
 #include "ui/UIBtnHint.h"
 #include "xrEngine/IInputReceiver.h"
+#include "xrEngine/xr_input.h"
 
 #define C_DEFAULT	D3DCOLOR_XRGB(0xff,0xff,0xff)
 
@@ -133,4 +134,17 @@ void CUICursor::SetUICursorPosition(Fvector2 pos)
 	if (m_b_use_win_cursor)
 		ClientToScreen(Device.m_hWnd, (LPPOINT)&p);
 	SetCursorPos(p.x, p.y);
+}
+
+bool CUICursor::PrimaryHeld() const
+{
+    return pInput->iGetAsyncBtnState(0) || (g_vr_owns_present && m_vr_pressed);
+}
+
+void CUICursor::SetVrCursorPosition(Fvector2 pos)
+{
+    // UI-local cursor only: do not warp the user's Windows desktop pointer.
+    vPrevPos = vPos;
+    clamp(pos.x, 0.f, UI_BASE_WIDTH); clamp(pos.y, 0.f, UI_BASE_HEIGHT);
+    vPos = pos;
 }

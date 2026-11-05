@@ -112,6 +112,28 @@ public:
 
 	virtual void _BCL OnFrame(void);
 	virtual void OnRender(void);
+	// Draw-only world effects replayed for each VR eye; never advances simulation.
+	virtual void OnRenderVrExtras() {}
+    // Return the controlled actor's first-person eye anchor, independently of
+    // the desktop camera. Called once in simulation (after the actor's
+    // camera update) and again before the eyes are rendered.
+    virtual const void* VrBodyCamera(Fmatrix& world) { return nullptr; }
+    virtual void VrConstrainHead(const Fvector& anchor, Fvector& desired) {}
+    virtual bool VrInventoryOpen() const { return false; }
+    // The PDA window is open (its map takes A as the right button too).
+    virtual bool VrPdaOpen() const { return false; }
+    virtual void VrToggleInventory() {}
+    virtual bool VrUiPointerActive() const { return false; }
+    // button and right: +1 press, -1 release, 0 none (left and right mouse).
+    // transfer: a double click at the cursor (quick transfer, use).
+    virtual bool VrUiPointer(float u, float v, int button, int right, bool transfer = false) { return false; }
+    // Each hand's own ray on the panel (negative: off it) and trigger, every
+    // frame a window has the pointer, for the on-screen keyboard: both hands
+    // type. True when that hand typed a key.
+    virtual bool VrUiHandPointer(int hand, float u, float v, bool down) { return false; }
+    virtual bool VrOutfitHands() const { return false; }
+    // Long press of the controller menu button: the quick save key's action.
+    virtual void VrQuickSave() {}
 
 	virtual shared_str OpenDemoFile(const char* demo_file_name) = 0;
 	virtual void net_StartPlayDemo() = 0;

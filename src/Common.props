@@ -16,7 +16,7 @@
     <dxSdkDir>$(xrSdkDir)include\dxsdk\</dxSdkDir>
   </PropertyGroup>
   <PropertyGroup>
-    <IncludePath>$(SolutionDir)..\src\3rd party;$(SolutionDir)3rd party\icu\include;$(IncludePath);$(xrSdkDir)include;$(xrSdkDir)include\OpenAutomate;$(xrSdkDir)include\nvapi;$(xrSdkDir)include\dxsdk</IncludePath>
+    <IncludePath>$(SolutionDir)..\src\3rd party;$(SolutionDir)3rd party\icu\include;$(IncludePath);$(xrSdkDir)include;$(xrSdkDir)include\OpenAutomate;$(xrSdkDir)include\nvapi;$(xrSdkDir)include\dxsdk;$(xrSdkDir)include\openxr</IncludePath>
     <OutDir>$(xrGameDir)bin_dbg\</OutDir>
   </PropertyGroup>
   <ItemDefinitionGroup>

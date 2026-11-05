@@ -223,6 +223,17 @@ public:
 
 	//абсолютные координаты
 	IC void GetAbsoluteRect(Frect& r);
+	// VR: the in-game HUD panel magnified k times draws the children of a
+	// HUD root (and the root of a full-screen child) this much closer to
+	// the centre, so each grows inward from its edge (see vr::HudInsetOffset).
+	static float s_vr_hud_inset;
+	bool m_vr_hud_root = false;
+	static void DrawHudElement(CUIWindow& element, float k);
+private:
+	// The children of a HUD root: pieces that touch (a panel's frame, text
+	// and icon) move together, anchored on their joint outline.
+	void DrawHudChildren(float k);
+public:
 	IC void GetAbsolutePos(Fvector2& p)
 	{
 		Frect abs;

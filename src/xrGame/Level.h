@@ -10,6 +10,7 @@
 #include "alife_space.h"
 #include "xrCore/xrDebug.h"
 #include "xrServer.h"
+#include "xrEngine/Vr/vr_ui_policy.h"
 #include "GlobalFeelTouch.hpp"
 #include "Level_network_map_sync.h"
 #include "secure_messaging.h"
@@ -29,6 +30,7 @@ class CAutosaveManager;
 class CPHCommander;
 class CLevelDebug;
 class CLevelSoundManager;
+class CUIDialogWnd;
 class CGameTaskManager;
 class CZoneList;
 class message_filter;
@@ -82,6 +84,16 @@ protected:
 	CClientSpawnManager* m_client_spawn_manager = nullptr;
 	CAutosaveManager* m_autosave_manager = nullptr;
     CDebugRenderer* m_debug_renderer = nullptr;
+    CUIDialogWnd* m_vr_ui_pressed_receiver = nullptr;
+    vr::UiScrollRepeat m_vr_ui_scroll;
+    u32 m_vr_ui_scroll_time = 0;
+    xr_vector<u16> m_vr_nearby_items;
+    u32 m_vr_nearby_frame = 0;
+    // The living character the head looks at, since when, when the gaze was
+    // last on it, and for which frame that was worked out (see
+    // VrRenderNpcLabel).
+    u16 m_vr_npc_id = u16(-1);
+    u32 m_vr_npc_since = 0, m_vr_npc_seen = 0, m_vr_npc_frame = u32(-1);
 	CPHCommander* m_ph_commander = nullptr;
 	CPHCommander* m_ph_commander_scripts = nullptr;
 	CPHCommander* m_ph_commander_physics_worldstep = nullptr;
@@ -226,6 +238,24 @@ public:
 	virtual void OnEvent(EVENT E, u64 P1, u64 P2);
 	virtual void _BCL OnFrame(void);
 	virtual void OnRender();
+	void OnRenderVrExtras() override;
+    // Takeable world items near the tracked head, nearest first.
+    const xr_vector<u16>& VrNearbyItems();
+    void VrRenderItemLabels();
+    // The name, faction and relation colour of the character the head looks
+    // at, above it in the world (the desktop shows it at the crosshair).
+    void VrRenderNpcLabel();
+    void VrRenderOverlayUI();
+    const void* VrBodyCamera(Fmatrix& world) override;
+    void VrConstrainHead(const Fvector& anchor, Fvector& desired) override;
+    void VrQuickSave() override;
+    bool VrInventoryOpen() const override;
+    bool VrPdaOpen() const override;
+    void VrToggleInventory() override;
+    bool VrUiPointerActive() const override;
+    bool VrUiPointer(float u, float v, int button, int right, bool transfer = false) override;
+    bool VrUiHandPointer(int hand, float u, float v, bool down) override;
+    bool VrOutfitHands() const override;
 
 	enum DBG_RENDER_FLAGS
 	{

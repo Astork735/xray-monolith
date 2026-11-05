@@ -86,6 +86,21 @@ extern ECORE_API float ps_r__WallmarkTTL;
 extern ECORE_API float ps_r__WallmarkSHIFT;
 extern ECORE_API float ps_r__WallmarkSHIFT_V;
 
+extern ECORE_API int ps_r__blood;
+extern ECORE_API int ps_r__blood_quality;
+extern ECORE_API int ps_r__blood_particles;
+extern ECORE_API int ps_r__blood_pages;
+extern ECORE_API int ps_r__blood_page_size;
+extern ECORE_API int ps_r__blood_fluid;
+extern ECORE_API int ps_r__blood_stats;
+extern ECORE_API int ps_r__blood_bench;
+extern ECORE_API int ps_r__blood_body;
+extern ECORE_API float ps_r__blood_tile;
+extern ECORE_API float ps_r__blood_range;
+extern ECORE_API float ps_r__blood_particle_range;
+extern ECORE_API float ps_r__blood_gpu_budget;
+extern ECORE_API float ps_r__blood_dry_time;
+
 extern ECORE_API float ps_r__GLOD_ssa_start;
 extern ECORE_API float ps_r__GLOD_ssa_end;
 extern ECORE_API float ps_r__LOD;

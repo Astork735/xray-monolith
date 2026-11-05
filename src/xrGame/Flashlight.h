@@ -46,6 +46,8 @@ public:
 	void SetLanim(LPCSTR name, bool bFlicker, int flickerChance, float flickerDelay, float framerate);
 	void ResetLanim();
 	bool torch_active() const;
+	// VR: the trigger of the hand holding it switches the light.
+	void VrToggleLight();
 
 protected:
 	virtual void TurnDeviceInternal(bool b);

@@ -6,6 +6,45 @@
 
 dx10StateManager StateManager;
 
+#ifdef USE_DX11
+namespace
+{
+// The VR UI layer is composited as premultiplied colour over the world by
+// its alpha. Shaders blend alpha like colour (src_a, 1-src_a), which stores
+// a*a for one layer on the cleared target: translucent panels came out more
+// see-through and brighter than drawn, text edges with halos. On that target
+// the alpha channel accumulates coverage instead (one, 1-src_a).
+xr_vector<std::pair<D3D11_BLEND_DESC, ID3D11BlendState*>> vr_ui_blends;
+ID3D11BlendState* VrUiBlendState(ID3D11BlendState* state)
+{
+	if (!state) return state;
+	D3D11_BLEND_DESC desc;
+	state->GetDesc(&desc);
+	bool change = false;
+	for (auto& target : desc.RenderTarget)
+		if (target.BlendEnable && target.SrcBlendAlpha == D3D11_BLEND_SRC_ALPHA &&
+			target.DestBlendAlpha == D3D11_BLEND_INV_SRC_ALPHA)
+		{
+			target.SrcBlendAlpha = D3D11_BLEND_ONE;
+			change = true;
+		}
+	if (!change) return state;
+	for (const auto& entry : vr_ui_blends)
+		if (!memcmp(&entry.first, &desc, sizeof(desc))) return entry.second;
+	ID3D11BlendState* patched = nullptr;
+	if (FAILED(HW.pDevice->CreateBlendState(&desc, &patched))) return state;
+	vr_ui_blends.push_back({desc, patched});
+	return patched;
+}
+}
+// With the renderer's other VR resources, before the device goes.
+void vr_ui_blend_release()
+{
+	for (auto& entry : vr_ui_blends) _RELEASE(entry.second);
+	vr_ui_blends.clear();
+}
+#endif
+
 //	DX10: TODO: Implement alpha referense control
 
 dx10StateManager::dx10StateManager()
@@ -200,6 +239,11 @@ void dx10StateManager::Apply()
 
 		static const FLOAT BlendFactor[4] = {0.000f, 0.000f, 0.000f, 0.000f};
 
+#ifdef USE_DX11
+		if (g_vr_ui_pass)
+			HW.pContext->OMSetBlendState(VrUiBlendState(m_pBlendState), BlendFactor, m_uiSampleMask);
+		else
+#endif
 		HW.pContext->OMSetBlendState(m_pBlendState, BlendFactor, m_uiSampleMask);
 		m_bBSNeedApply = false;
 	}

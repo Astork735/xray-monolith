@@ -1128,11 +1128,38 @@ void CRender::render_sun_cascade(u32 cascade_ind)
 {
 	light* fuckingsun = (light*)Lights.sun_adapted._get();
 
+	// VR (vr_shared_shadows): the first eye fits the cascade to one camera
+	// taking in both eyes and keeps its shadow map; the second eye puts that
+	// map back and only accumulates. Anything not kept this frame (the first
+	// eye skipped, translucent shadows) is rendered as usual.
+	const bool vr_shared = g_vr_rendering_eye && !o.Tshadows && cascade_ind < 3;
+	const bool vr_record = vr_shared && g_vr_shadow_share == 1;
+	if (vr_shared && g_vr_shadow_share == 2 && Target->vr_sun_frame[cascade_ind] == Device.dwFrame &&
+		Target->vr_sun_maps[cascade_ind])
+	{
+		HW.pContext->CopyResource(Target->rt_smap_depth->pSurface, Target->vr_sun_maps[cascade_ind]);
+		fuckingsun->X.D.combine = Target->vr_sun_combine[cascade_ind];
+		s32 limit = RImplementation.o.smapsize - 1;
+		fuckingsun->X.D.minX = 0;
+		fuckingsun->X.D.maxX = limit;
+		fuckingsun->X.D.minY = 0;
+		fuckingsun->X.D.maxY = limit;
+		fuckingsun->X.D.transluent = FALSE;
+		accumulate_sun_cascade(cascade_ind);
+		return;
+	}
+	// The camera the cascade is fitted to.
+	Fmatrix cam_view = vr_record ? g_vr_shadow_view : Device.mView;
+	Fmatrix cam_project = vr_record ? g_vr_shadow_project : Device.mProject;
+	Fmatrix cam_world; cam_world.invert(cam_view);
+	const Fvector cam_position = vr_record ? cam_world.c : Device.vCameraPosition;
+	const Fvector cam_direction = vr_record ? cam_world.k : Device.vCameraDirection;
+
 	// calculate view-frustum bounds in world space
 	Fmatrix ex_project, ex_full, ex_full_inverse;
 	{
-		ex_project = Device.mProject;
-		ex_full.mul(ex_project, Device.mView);
+		ex_project = cam_project;
+		ex_full.mul(ex_project, cam_view);
 		D3DXMatrixInverse((D3DXMATRIX*)&ex_full_inverse, 0, (D3DXMATRIX*)&ex_full);
 	}
 
@@ -1172,7 +1199,7 @@ void CRender::render_sun_cascade(u32 cascade_ind)
 		cull_sector = largest_sector;
 
 		// COP - 100 km away
-		cull_COP.mad(Device.vCameraPosition, fuckingsun->direction, -tweak_COP_initial_offs);
+		cull_COP.mad(cam_position, fuckingsun->direction, -tweak_COP_initial_offs);
 
 		// Create approximate ortho-xform
 		// view: auto find 'up' and 'right' vectors
@@ -1218,8 +1245,8 @@ void CRender::render_sun_cascade(u32 cascade_ind)
 			else
 				light_cuboid.view_frustum_rays = m_sun_cascades[cascade_ind].rays;
 
-			light_cuboid.view_ray.P = Device.vCameraPosition;
-			light_cuboid.view_ray.D = Device.vCameraDirection;
+			light_cuboid.view_ray.P = cam_position;
+			light_cuboid.view_ray.D = cam_direction;
 			light_cuboid.light_ray.P = L_pos;
 			light_cuboid.light_ray.D = L_dir;
 		}
@@ -1227,7 +1254,7 @@ void CRender::render_sun_cascade(u32 cascade_ind)
 		// THIS NEED TO BE A CONSTATNT
 		Fplane light_top_plane;
 		light_top_plane.build_unit_normal(L_pos, L_dir);
-		float dist = light_top_plane.classify(Device.vCameraPosition);
+		float dist = light_top_plane.classify(cam_position);
 
 		float map_size = m_sun_cascades[cascade_ind].size;
 		D3DXMatrixOrthoOffCenterLH((D3DXMATRIX*)&mdir_Project, -map_size * 0.5f, map_size * 0.5f, -map_size * 0.5f,
@@ -1274,7 +1301,7 @@ void CRender::render_sun_cascade(u32 cascade_ind)
 		Fvector lightXZshift;
 		light_cuboid.compute_caster_model_fixed(cull_planes, lightXZshift, m_sun_cascades[cascade_ind].size,
 		                                        m_sun_cascades[cascade_ind].reset_chain);
-		Fvector proj_view = Device.vCameraDirection;
+		Fvector proj_view = cam_direction;
 		proj_view.y = 0;
 		proj_view.normalize();
 		//			lightXZshift.mad(proj_view, 20);
@@ -1308,7 +1335,7 @@ void CRender::render_sun_cascade(u32 cascade_ind)
 			cull_frustum._add(cull_planes[p]);
 
 		{
-			Fvector cam_proj = Device.vCameraPosition;
+			Fvector cam_proj = cam_position;
 			const float align_aim_step_coef = 4.f;
 			cam_proj.set(floorf(cam_proj.x / align_aim_step_coef) + align_aim_step_coef / 2,
 			             floorf(cam_proj.y / align_aim_step_coef) + align_aim_step_coef / 2,
@@ -1406,6 +1433,29 @@ void CRender::render_sun_cascade(u32 cascade_ind)
 		r_pmask(true, false);
 	}
 
+	// VR: keep this cascade's map for the second eye.
+	if (vr_record)
+	{
+		ID3DTexture2D*& map = Target->vr_sun_maps[cascade_ind];
+		if (!map)
+		{
+			D3D_TEXTURE2D_DESC desc;
+			Target->rt_smap_depth->pSurface->GetDesc(&desc);
+			if (FAILED(HW.pDevice->CreateTexture2D(&desc, NULL, &map))) map = NULL;
+		}
+		if (map)
+		{
+			HW.pContext->CopyResource(map, Target->rt_smap_depth->pSurface);
+			Target->vr_sun_combine[cascade_ind] = fuckingsun->X.D.combine;
+			Target->vr_sun_frame[cascade_ind] = Device.dwFrame;
+		}
+	}
+
+	accumulate_sun_cascade(cascade_ind);
+}
+
+void CRender::accumulate_sun_cascade(u32 cascade_ind)
+{
 	// Accumulate
 	Target->phase_accumulator();
 

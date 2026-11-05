@@ -28,6 +28,7 @@ class CGamePersistent :
 	bool m_bPickableDOF;
 
 	CUISequencer* m_intro;
+    bool m_vr_loading_prompt=false;
 	EVENT eQuickLoad;
 	Fvector m_dof [4]; // 0-dest 1-current 2-from 3-original
 
@@ -78,6 +79,7 @@ public:
 
 	virtual void _BCL OnFrame();
 	virtual void ImGui_OnRender(LPCSTR name);
+    bool VrLoadingPrompt(bool confirm) override;
 	virtual void OnEvent(EVENT E, u64 P1, u64 P2);
 
 	virtual void UpdateGameType();

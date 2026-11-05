@@ -139,6 +139,26 @@ float ps_r__WallmarkTTL = 50.f;
 float ps_r__WallmarkSHIFT = 0.0001f;
 float ps_r__WallmarkSHIFT_V = 0.0001f;
 
+// Blood system (DX11 renderer). Zero sizes take the quality preset's value.
+int ps_r__blood = 1;
+int ps_r__blood_quality = 1;
+int ps_r__blood_particles = 0;
+int ps_r__blood_pages = 0;
+int ps_r__blood_page_size = 0;
+int ps_r__blood_fluid = 1;
+int ps_r__blood_stats = 0;
+int ps_r__blood_bench = 0;
+int ps_r__blood_body = 0;
+// Read by the game's spray planner (blood_spray.cpp) through the console.
+float ps_r__blood_amount = 1.f;		// how much blood: drops per wound and their volume
+float ps_r__blood_spray = 1.f;		// how wide and fast it sprays
+float ps_r__blood_density = 1.f;	// droplets drawn per drop
+float ps_r__blood_tile = 1.f;
+float ps_r__blood_range = 40.f;
+float ps_r__blood_particle_range = 30.f;
+float ps_r__blood_gpu_budget = 1.5f;
+float ps_r__blood_dry_time = 90.f;
+
 float ps_r__GLOD_ssa_start = 256.f;
 float ps_r__GLOD_ssa_end = 64.f;
 float ps_r__LOD = 0.75f;
@@ -716,6 +736,23 @@ public:
 	virtual void Execute(LPCSTR args)
 	{
 		RCache.RestoreQuadIBData();
+	}
+};
+
+// Sprays the given number of synthetic wounds in front of the view over the
+// next frames and logs blood CPU/GPU times (r__blood_stats shows them live).
+class CCC_BloodBench : public IConsole_Command
+{
+public:
+	CCC_BloodBench(LPCSTR N) : IConsole_Command(N) { bEmptyArgsHandled = TRUE; };
+
+	virtual void Execute(LPCSTR args)
+	{
+		int count = 100;
+		if (args && args[0]) count = atoi(args);
+		clamp(count, 0, 5000);
+		ps_r__blood_bench = count;
+		Msg("- [blood] bench: %d sprays", count);
 	}
 };
 
@@ -1307,6 +1344,24 @@ void xrRender_initconsole()
 	CMD1(CCC_ModelPoolStat,"stat_models"		);
 #endif // DEBUG
 	CMD4(CCC_Float, "r__wallmark_ttl", &ps_r__WallmarkTTL, 1.0f, 10.f*60.f);
+
+	CMD4(CCC_Integer, "r__blood", &ps_r__blood, 0, 1);
+	CMD4(CCC_Integer, "r__blood_quality", &ps_r__blood_quality, 0, 3);
+	CMD4(CCC_Integer, "r__blood_particles", &ps_r__blood_particles, 0, 1048576);
+	CMD4(CCC_Integer, "r__blood_pages", &ps_r__blood_pages, 0, 1024);
+	CMD4(CCC_Integer, "r__blood_page_size", &ps_r__blood_page_size, 0, 1024);
+	CMD4(CCC_Integer, "r__blood_fluid", &ps_r__blood_fluid, 0, 1);
+	CMD4(CCC_Integer, "r__blood_stats", &ps_r__blood_stats, 0, 1);
+	CMD4(CCC_Integer, "r__blood_body", &ps_r__blood_body, 0, 1);
+	CMD4(CCC_Float, "r__blood_amount", &ps_r__blood_amount, 0.1f, 4.f);
+	CMD4(CCC_Float, "r__blood_spray", &ps_r__blood_spray, 0.1f, 3.f);
+	CMD4(CCC_Float, "r__blood_density", &ps_r__blood_density, 0.25f, 4.f);
+	CMD4(CCC_Float, "r__blood_tile", &ps_r__blood_tile, 0.5f, 4.f);
+	CMD4(CCC_Float, "r__blood_range", &ps_r__blood_range, 5.f, 200.f);
+	CMD4(CCC_Float, "r__blood_particle_range", &ps_r__blood_particle_range, 5.f, 200.f);
+	CMD4(CCC_Float, "r__blood_gpu_budget_ms", &ps_r__blood_gpu_budget, 0.f, 10.f);
+	CMD4(CCC_Float, "r__blood_dry_time", &ps_r__blood_dry_time, 5.f, 1800.f);
+	CMD1(CCC_BloodBench, "r__blood_bench");
 
 	CMD4(CCC_Integer, "r__supersample", &ps_r__Supersample, 1, 8);
 

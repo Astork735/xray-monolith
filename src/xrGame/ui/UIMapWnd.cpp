@@ -462,7 +462,8 @@ bool CUIMapWnd::OnMouseAction(float x, float y, EUIMessages mouse_action)
 			ActivatePropertiesBox(NULL);
 			break;
 		case WINDOW_MOUSE_MOVE:
-			if (pInput->iGetAsyncBtnState(0))
+			// The VR pointer's held trigger drags as the mouse button does.
+			if (GetUICursor().PrimaryHeld())
 			{
 				MoveMap(GetUICursor().GetCursorPositionDelta());
 				return true;

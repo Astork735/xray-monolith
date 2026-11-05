@@ -1,4 +1,5 @@
 #include "stdafx.h"
+#include "VrKeyboard.h"
 #include "MainMenu.h"
 #include "UI/UIDialogWnd.h"
 #include "ui/UIMessageBoxEx.h"
@@ -12,6 +13,7 @@
 #include <dinput.h>
 #include "ui\UIBtnHint.h"
 #include "UICursor.h"
+#include "../xrEngine/Vr/vr_gameplay.h"
 #include "gamespy/CdkeyDecode/cdkeydecode.h"
 #include "string_table.h"
 #include "../xrCore/os_clipboard.h"
@@ -175,6 +177,7 @@ extern bool IsGameTypeSingle();
 
 void CMainMenu::Activate(bool bActivate)
 {
+    m_vr_pressed_receiver = nullptr;
 	if (!!m_Flags.test(flActive) == bActivate) return;
 	if (m_Flags.test(flGameSaveScreenshot)) return;
 	if ((m_screenshotFrame == Device.dwFrame) ||
@@ -251,7 +254,7 @@ void CMainMenu::Activate(bool bActivate)
 			Console->Show();
 		}
 
-		if (m_startDialog->IsShown())
+		if (m_startDialog && m_startDialog->IsShown())
 			m_startDialog->HideDialog();
 
 		CleanInternals();
@@ -289,6 +292,7 @@ void CMainMenu::Activate(bool bActivate)
 
 bool CMainMenu::ReloadUI()
 {
+    m_vr_pressed_receiver = nullptr;
 	if (m_startDialog)
 	{
 		if (m_startDialog->IsShown())
@@ -323,6 +327,62 @@ bool CMainMenu::CanSkipSceneRendering()
 
 //IInputReceiver
 extern int mouse_button_2_key[];
+
+bool CMainMenu::VrPointer(float u, float v, int button)
+{
+    CUIDialogWnd* target = TopInputReceiver();
+    if (!IsActive() || !target || !target->IsEnabled() || !target->NeedCursor() || Console->bVisible)
+    {
+        m_vr_pressed_receiver = nullptr;
+        GetUICursor().SetVrPressed(false);
+        return false;
+    }
+    if (m_vr_pressed_receiver != target) m_vr_pressed_receiver = nullptr;
+    const bool valid = u >= 0 && u <= 1 && v >= 0 && v <= 1;
+    Fvector2 position;
+    position.set(valid ? u*UI_BASE_WIDTH : -1.f, valid ? v*UI_BASE_HEIGHT : -1.f);
+    if (valid) GetUICursor().SetVrCursorPosition(position);
+    // A click on the keyboard never reaches the menu (it would take the
+    // focus from the text box, the save name); the hands type there
+    // themselves (VrHandPointer).
+    if (valid && !(button<0 && m_vr_pressed_receiver==target) && VrKeyboardPointer(*this,position,button))
+        return true;
+    // Held since a click on this window: a drag (a slider, a list's pad).
+    GetUICursor().SetVrPressed(valid && m_vr_pressed_receiver == target);
+    target->OnMouseAction(position.x, position.y, WINDOW_MOUSE_MOVE);
+    if (TopInputReceiver() != target) { m_vr_pressed_receiver = nullptr; return false; }
+    // Either stick's up/down scrolls the list under the cursor (the
+    // settings), as the mouse wheel.
+    const u32 now = Device.dwTimeContinual;
+    const int steps = m_vr_scroll.Step(valid ? vr::UiScrollAxis(true) : 0.f, float(now - m_vr_scroll_time)*0.001f);
+    m_vr_scroll_time = now;
+    for (int step = 0; step < _abs(steps) && TopInputReceiver() == target; ++step)
+        target->OnMouseAction(position.x, position.y, steps > 0 ? WINDOW_MOUSE_WHEEL_UP : WINDOW_MOUSE_WHEEL_DOWN);
+    if (button > 0 && valid)
+    {
+        m_vr_pressed_receiver = target;
+        // Now, not next frame: this frame's UI update must see it held.
+        GetUICursor().SetVrPressed(true);
+        IR_OnMousePress(0);
+    }
+    else if (button < 0 && m_vr_pressed_receiver == target)
+    {
+        m_vr_pressed_receiver = nullptr;
+        GetUICursor().SetVrPressed(false);
+        // Cancel off-panel clicks at off-panel coordinates, never the last hit.
+        if (valid) IR_OnMouseRelease(0);
+        else target->OnMouseAction(-1,-1,WINDOW_LBUTTON_UP);
+    }
+    return true;
+}
+
+bool CMainMenu::VrHandPointer(int hand, float u, float v, bool down)
+{
+    if (!IsActive() || Console->bVisible) return false;
+    Fvector2 position;
+    position.set(u >= 0.f ? u*UI_BASE_WIDTH : -1.f, v >= 0.f ? v*UI_BASE_HEIGHT : -1.f);
+    return VrKeyboardHand(*this, hand, position, down);
+}
 
 void CMainMenu::IR_OnMousePress(int btn)
 {
@@ -437,6 +497,7 @@ void CMainMenu::OnRender()
 	if (!OnRenderPPUI_query())
 	{
 		DoRenderDialogs();
+		VrKeyboardDraw(*this);
 		UI().RenderFont();
 		draw_wnds_rects();
 	}
@@ -457,6 +518,7 @@ void CMainMenu::OnRenderPPUI_main()
 	if (OnRenderPPUI_query())
 	{
 		DoRenderDialogs();
+		VrKeyboardDraw(*this);
 		UI().RenderFont();
 	}
 
@@ -601,6 +663,37 @@ void CMainMenu::SwitchToMultiplayerMenu()
 
 void CMainMenu::DestroyInternal(bool bForce)
 {
+	// A script can open the menu while a save is loading (GAMMA's game-over
+	// sequence runs "main_menu on" when it stops). The load restarts the
+	// scripts and takes the menu down: close it properly first, or the game
+	// stays paused with the level unhooked and the menu has no dialog.
+	// As Activate(false), but the level is not put back on the frame and
+	// render lists: this runs inside net_Start, and the level being loaded
+	// registers itself (IGame_Level::Load). Adding it here too would update
+	// and draw it twice a frame.
+	if (bForce && IsActive() && g_vr_owns_present)
+	{
+		Msg("* main menu closed: a saved game is loading");
+		m_Flags.set(flGameSaveScreenshot, FALSE);
+		m_screenshotFrame = u32(-1);
+		m_deactivated_frame = Device.dwFrame;
+		m_Flags.set(flActive, FALSE);
+		m_Flags.set(flNeedChangeCapture, TRUE);
+		Device.seqRender.Remove(this);
+		IR_Release();
+		if (m_startDialog && m_startDialog->IsShown())
+			m_startDialog->HideDialog();
+		CleanInternals();
+		if (IsGameTypeSingle())
+		{
+			if (!m_Flags.test(flRestorePause))
+				Device.Pause(FALSE, TRUE, FALSE, "mm_load1");
+			bShowPauseString = m_Flags.test(flRestorePauseStr);
+		}
+		if (m_Flags.test(flRestoreCursor))
+			GetUICursor().Show();
+		Device.Pause(FALSE, TRUE, TRUE, "mm_load2");
+	}
 	if (m_startDialog && ((m_deactivated_frame < Device.dwFrame + 4) || bForce))
 		xr_delete(m_startDialog);
 }

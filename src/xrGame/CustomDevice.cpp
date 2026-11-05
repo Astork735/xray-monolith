@@ -32,7 +32,9 @@ bool CCustomDevice::CheckCompatibilityInt(CHudItem* itm, u16* slot_to_activate)
 
 	CInventoryItem& iitm = itm->item();
 	u32 slot = iitm.BaseSlot();
-	bool bres = (slot == INV_SLOT_2 || slot == KNIFE_SLOT || slot == BOLT_SLOT); // || iitm.AllowDevice();
+	// In VR the device and the weapon are in different hands, so it goes
+	// beside any of them.
+	bool bres = g_vr_owns_present || (slot == INV_SLOT_2 || slot == KNIFE_SLOT || slot == BOLT_SLOT); // || iitm.AllowDevice();
 	if (!bres && slot_to_activate)
 	{
 		*slot_to_activate = NO_ACTIVE_SLOT;
@@ -373,7 +375,10 @@ void CCustomDevice::UpdateVisibility()
 				if (wpn)
 				{
 					u32 state = wpn->GetState();
-					if ((wpn->IsZoomed() && !m_bCanBeZoomed) || state == CWeapon::eReload || state == CWeapon::eSwitch)
+					// In VR the device is in the other hand from the weapon: its
+					// reload, switch or zoom leaves it where it is.
+					if (!g_vr_owns_present &&
+						((wpn->IsZoomed() && !m_bCanBeZoomed) || state == CWeapon::eReload || state == CWeapon::eSwitch))
 					{
 						if (GetState() != eHiding)
 							HideDevice(true);
@@ -862,6 +867,14 @@ void CCustomDevice::on_a_hud_attach()
 
 	if (nullptr == m_ui)
 		CreateUI();
+}
+
+void CCustomDevice::VrSkipAnimation()
+{
+	const u32 state = GetState();
+	if ((state != eShowing && state != eHiding) || GetNextState() != state) return;
+	StopCurrentAnimWithoutCallback();
+	OnAnimationEnd(state);
 }
 
 bool CCustomDevice::render_item_3d_ui_query()

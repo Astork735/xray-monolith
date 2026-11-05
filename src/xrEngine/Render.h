@@ -7,6 +7,7 @@
 
 #include "../Include/xrAPI/xrAPI.h"
 #include "../Include/xrRender/FactoryPtr.h"
+#include "Blood/blood_types.h"
 class IUIShader;
 typedef FactoryPtr<IUIShader> wm_shader;
 //#include "../Include/xrRender/WallMarkArray.h"
@@ -380,6 +381,13 @@ public:
 	virtual u32 memory_usage() = 0;
 	virtual u32 active_phase() = 0; //Swartz: actor shadow
 	virtual void RenderToTarget(RRT target) = 0;
+
+	// Blood system (DX11 renderer). Inactive elsewhere: the game then keeps
+	// the stock blood wallmarks and particles.
+	virtual bool blood_active() { return false; }
+	virtual void blood_emit(const BloodEmit&) {}
+	virtual void blood_splat(const BloodSplatRequest&) {}
+
 	// Constructor/destructor
 	virtual ~IRender_interface();
 protected:

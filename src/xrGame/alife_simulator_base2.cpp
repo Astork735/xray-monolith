@@ -24,6 +24,16 @@ void CALifeSimulatorBase::register_object(CSE_ALifeDynamicObject* object, bool a
 {
 	object->on_before_register();
 
+	// A save can hold an item whose owner is gone from it: it lies where it
+	// was last seen instead of crashing the load.
+	if (CSE_ALifeInventoryItem* orphan = smart_cast<CSE_ALifeInventoryItem*>(object);
+		orphan && orphan->attached() && !objects().object(orphan->base()->ID_Parent, true))
+	{
+		Msg("! [ALife] %s [%u]: owner [%u] is not in the save; the item is detached",
+			object->name_replace(), object->ID, orphan->base()->ID_Parent);
+		object->ID_Parent = 0xffff;
+	}
+
 	if (add_object)
 		objects().add(object);
 

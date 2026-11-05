@@ -2,6 +2,7 @@
 
 //#include "Actor.h"
 #include "actorcameracollision.h"
+#include "CameraProbeState.h"
 
 #include "../xrEngine/CameraBase.h"
 #include "../xrEngine/gamemtllib.h"
@@ -326,6 +327,25 @@ bool do_collide_not_move(const Fmatrix& xform, IPhysicsShellHolder* l_actor, CPh
 	l_actor->MovementCollisionEnable(true);
 	shell->Disable();
 	return cam_collided;
+}
+
+bool test_head_box(float radius, const Fmatrix& xform, IPhysicsShellHolder* actor)
+{
+    VERIFY(ph_world && !ph_world->Processing());
+    VERIFY(actor && radius > 0);
+    update_current_entity_camera_collision(actor);
+    CPhysicsShell* shell = actor_camera_shell;
+    CPhysicsElement* root = shell->get_ElementByStoreOrder(0);
+    CBoxGeom* box = smart_cast<CBoxGeom*>(root->geometry(0));
+    CCylinderGeom* cylinder = smart_cast<CCylinderGeom*>(root->geometry(1));
+    VERIFY(box && cylinder);
+    ScopedCameraProbeState restore(*box, *cylinder, *root, mh_clear);
+    box->set_size(Fvector().set(radius, radius, radius));
+    box->set_local_form_bt(Fidentity);
+    cylinder->set_radius(radius); cylinder->set_height(radius * 2);
+    cylinder->set_local_form_bt(Fidentity);
+    root->SetTransform(xform, mh_clear);
+    return do_collide_not_move(xform, actor, shell, root);
 }
 
 bool test_camera_box(const Fvector& box_size, const Fmatrix& xform, IPhysicsShellHolder* l_actor)

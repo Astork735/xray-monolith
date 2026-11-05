@@ -20,6 +20,7 @@
 #include "game_object_space.h"
 #include "material_manager.h"
 #include "game_base_space.h"
+#include "blood_spray.h"
 
 #define SMALL_ENTITY_RADIUS		0.6f
 #define BLOOD_MARKS_SECT		"bloody_marks"
@@ -219,6 +220,7 @@ void CEntityAlive::shedule_Update(u32 dt)
 	UpdateFireParticles();
 	//капли крови
 	UpdateBloodDrops();
+	UpdateBloodWounds();
 	//обновить раны
 	conditions().UpdateWounds();
 
@@ -294,7 +296,22 @@ void CEntityAlive::Hit(SHit* pHDS)
 	{
 		//äîáàâèòü êðîâü íà ñòåíû
 		if (!use_simplified_visual())
-			BloodyWallmarks(HDS.damage(), HDS.dir, HDS.bone(), HDS.p_in_bone_space);
+		{
+			// Blast hits carry the body's world centre, not a bone-space point
+			// (CExplosive::Explode), so they get a body-wide spray of their own.
+			if (HDS.hit_type == ALife::eHitTypeExplosion && ::Render->blood_active())
+			{
+				Fvector centre;
+				Center(centre);
+				const float strength = HDS.damage() / _max(m_fNominalHit, EPS);
+				blood_spray::Blast(*this, centre, HDS.dir, strength);
+				if (IKinematics* K = smart_cast<IKinematics*>(Visual()))
+					for (int i = 0; i < 3 && strength > 0.3f; ++i)
+						AddBloodWound(u16(::Random.randI(K->LL_BoneCount())), Fvector().set(0, 0, 0), HDS.dir, strength);
+			}
+			else
+				BloodyWallmarks(HDS.damage(), HDS.dir, HDS.bone(), HDS.p_in_bone_space);
+		}
 	}
 
 	//-------------------------------------------
@@ -399,6 +416,13 @@ void CEntityAlive::BloodyWallmarks(float P, const Fvector& dir, s16 element,
 	float small_entity = 1.f;
 	if (Radius() < SMALL_ENTITY_RADIUS) small_entity = 0.5;
 
+	if (::Render->blood_active())
+	{
+		const float strength = small_entity * P / _max(m_fNominalHit, EPS);
+		blood_spray::Wound(*this, start_pos, dir, strength, element);
+		AddBloodWound(u16(element), position_in_object_space, dir, strength);
+		return;
+	}
 
 	float wallmark_size = m_fBloodMarkSizeMax;
 	wallmark_size *= (P / m_fNominalHit);
@@ -538,6 +562,125 @@ bool CEntityAlive::is_relation_enemy(const CEntityAlive* tpEntityAlive) const
 		(tfGetRelationType(tpEntityAlive) == ALife::eRelationTypeWorstEnemy));
 }
 
+// Blood system wounds: kept in bone space so they follow the body (and the
+// ragdoll). They pump with the heartbeat while alive and ooze into a pool
+// under a corpse, weakening over time.
+void CEntityAlive::AddBloodWound(u16 bone, const Fvector& bone_pos, const Fvector& dir, float strength)
+{
+	IKinematics* V = smart_cast<IKinematics*>(Visual());
+	if (!V || strength < 0.15f || bone >= V->LL_BoneCount()) return;
+	Fmatrix M, inv;
+	M.mul_43(XFORM(), V->LL_GetBoneInstance(bone).mTransform);
+	inv.invert(M);
+	// Blood leaves the entry wound back along the shot.
+	Fvector out, local_dir, local_down;
+	out.invert(dir);
+	inv.transform_dir(local_dir, out);
+	inv.transform_dir(local_down, Fvector().set(0.f, -1.f, 0.f));
+	BloodWound w;
+	w.bone = bone;
+	w.local = bone_pos;
+	w.local_dir = local_dir;
+	w.local_down = local_down;
+	w.strength = _min(strength, 2.f);
+	w.start = Device.fTimeGlobal;
+	w.next = w.start + ::Random.randF(0.3f, 0.6f);
+	w.stop = 0.f;
+	w.trickle = 0.f;
+	w.bled = 0.f;
+	if (m_blood_wounds.size() < 8)
+		m_blood_wounds.push_back(w);
+	else
+	{
+		// Replace the oldest.
+		auto oldest = std::min_element(m_blood_wounds.begin(), m_blood_wounds.end(),
+		                               [](const BloodWound& a, const BloodWound& b) { return a.start < b.start; });
+		*oldest = w;
+	}
+}
+
+void CEntityAlive::UpdateBloodWounds()
+{
+	if (m_blood_wounds.empty()) return;
+	IKinematics* V = smart_cast<IKinematics*>(Visual());
+	if (!V || !::Render->blood_active())
+	{
+		m_blood_wounds.clear();
+		return;
+	}
+	const float now = Device.fTimeGlobal;
+	const bool alive = g_Alive();
+	for (u32 i = 0; i < m_blood_wounds.size();)
+	{
+		BloodWound& w = m_blood_wounds[i];
+		const float age = now - w.start;
+		const float duration = alive ? 15.f + 30.f * w.strength : 45.f + 20.f * w.strength;
+		// The bone can be gone: an outfit change swaps the visual.
+		if (age > 600.f || w.bone >= V->LL_BoneCount())
+		{
+			m_blood_wounds[i] = m_blood_wounds.back();
+			m_blood_wounds.pop_back();
+			continue;
+		}
+		++i;
+		if (w.stop > 0.f) continue;
+		if (age > duration)
+		{
+			w.stop = now;
+			continue;
+		}
+		if (now < w.next) continue;
+		w.next = now + (alive ? ::Random.randF(0.7f, 1.0f) : ::Random.randF(1.0f, 2.0f));
+		Fmatrix M;
+		M.mul_43(XFORM(), V->LL_GetBoneInstance(w.bone).mTransform);
+		Fvector pos, dir;
+		M.transform_tiny(pos, w.local);
+		M.transform_dir(dir, w.local_dir);
+		dir.normalize_safe();
+		if (pos.distance_to_sqr(Device.vCameraPosition) > _sqr(50.f)) continue;
+		blood_spray::Bleed(*this, pos, dir, w.strength * (1.f - age / duration), alive, w.trickle, w.bled);
+	}
+}
+
+// Each wound as the body shaders draw it: a run of blood from the wound
+// down the body (the world's down when it was hit, so it stays put as the
+// body moves), growing while it bleeds, drying after. Computed once a frame
+// for all eyes and surfaces.
+u32 CEntityAlive::GetBloodWounds(Fvector4* rows, u32 max_wounds)
+{
+	if (m_blood_wounds.empty()) return 0;
+	if (m_blood_rows_frame != Device.dwFrame)
+	{
+		m_blood_rows_frame = Device.dwFrame;
+		m_blood_rows_count = 0;
+		IKinematics* V = smart_cast<IKinematics*>(Visual());
+		if (!V) return 0;
+		const float now = Device.fTimeGlobal;
+		for (const BloodWound& w : m_blood_wounds)
+		{
+			if (m_blood_rows_count >= 8) break;
+			if (w.bone >= V->LL_BoneCount()) continue;
+			Fmatrix M;
+			M.mul_43(XFORM(), V->LL_GetBoneInstance(w.bone).mTransform);
+			Fvector centre, down;
+			M.transform_tiny(centre, w.local);
+			M.transform_dir(down, w.local_down);
+			down.normalize_safe();
+			const float bled_for = (w.stop > 0.f ? w.stop : now) - w.start;
+			const float max_run = _min(0.25f + 0.2f * w.strength, 0.6f);
+			down.mul(_min(max_run, 0.03f * (0.5f + w.strength) * bled_for));
+			// Wet while it bleeds; dry about a minute and a half after.
+			const float wet = w.stop > 0.f ? clampr(1.f - (now - w.stop) / 90.f, 0.f, 1.f) : 1.f;
+			m_blood_rows[m_blood_rows_count * 2].set(centre.x, centre.y, centre.z, 0.025f + 0.025f * w.strength);
+			m_blood_rows[m_blood_rows_count * 2 + 1].set(down.x, down.y, down.z, wet);
+			++m_blood_rows_count;
+		}
+	}
+	const u32 count = _min(m_blood_rows_count, max_wounds);
+	CopyMemory(rows, m_blood_rows, count * 2 * sizeof(Fvector4));
+	return count;
+}
+
 void CEntityAlive::UpdateBloodDrops()
 {
 	static float m_fBloodDropTimeMax = pSettings->r_float(BLOOD_MARKS_SECT, "blood_drop_time_max");
@@ -576,8 +719,11 @@ void CEntityAlive::UpdateBloodDrops()
 			pos_distort.mul(0.15f);
 			CParticlesPlayer::GetBonePos(this, pWound->GetBoneNum(), Fvector().set(0, 0, 0), pos);
 			pos.add(pos_distort);
-			PlaceBloodWallmark(Fvector().set(0.f, -1.f, 0.f), pos, m_fBloodMarkDistance, m_fBloodDropSize,
-			                   &**m_pBloodDropsVector);
+			if (::Render->blood_active())
+				blood_spray::Drip(*this, pos, m_fBloodDropSize);
+			else
+				PlaceBloodWallmark(Fvector().set(0.f, -1.f, 0.f), pos, m_fBloodMarkDistance, m_fBloodDropSize,
+				                   &**m_pBloodDropsVector);
 		}
 	}
 }

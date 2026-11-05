@@ -747,6 +747,10 @@
     <ClInclude Include="blender_gasmask_drops.h">
       <Filter>Shading templates</Filter>
     </ClInclude>
+    <ClInclude Include="blender_blood.h">
+      <Filter>Shading templates</Filter>
+    </ClInclude>
+    <ClInclude Include="r4_blood.h" />
     <ClInclude Include="blender_ss_sunshafts.h">
       <Filter>Shading templates</Filter>
     </ClInclude>
@@ -1415,6 +1419,10 @@
     <ClCompile Include="blender_gasmask_drops.cpp">
       <Filter>Shading templates</Filter>
     </ClCompile>
+    <ClCompile Include="blender_blood.cpp">
+      <Filter>Shading templates</Filter>
+    </ClCompile>
+    <ClCompile Include="r4_blood.cpp" />
     <ClCompile Include="blender_ss_sunshafts.cpp">
       <Filter>Shading templates</Filter>
     </ClCompile>

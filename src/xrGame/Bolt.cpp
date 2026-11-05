@@ -49,6 +49,13 @@ void CBolt::Throw()
 	m_thrown = true;
 }
 
+void CBolt::VrPrepareThrown(bool limited)
+{
+	if (!limited)
+		SetCanTake(FALSE);
+	set_destroy_time(u32(m_dwDestroyTimeMax / phTimefactor));
+}
+
 bool CBolt::Useful() const
 {
 	return CanTake();

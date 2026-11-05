@@ -1,4 +1,5 @@
 #include "stdafx.h"
+#include "../xrEngine/Vr/vr_gameplay.h"
 #include "torch.h"
 #include "entity.h"
 #include "actor.h"
@@ -347,7 +348,25 @@ void CTorch::UpdateCL()
 			M.c.y += H_Parent()->Radius() * 2.f / 3.f;
 		}
 
-		if (actor)
+		Fmatrix vr_head;
+		if (actor && g_vr_owns_present && actor == Level().CurrentControlEntity() &&
+			actor->active_cam() == eacFirstEye && vr::HeadTransform(vr_head))
+		{
+			// VR: the headlamp is on the tracked head, lighting where the
+			// player looks (the body camera neither pitches nor follows it).
+			const float eps = 0.001f;
+			Fvector offset = vr_head.c;
+			offset.mad(vr_head.i, m_torch_offset.x);
+			offset.mad(vr_head.j, m_torch_offset.y);
+			offset.mad(vr_head.k, m_torch_offset.z);
+			light_render->set_position(offset, eps);
+			light_omni->set_position(offset, eps);
+			glow_render->set_position(vr_head.c, eps);
+			light_render->set_rotation(vr_head.k, vr_head.i, eps);
+			light_omni->set_rotation(vr_head.k, vr_head.i, eps);
+			glow_render->set_direction(vr_head.k);
+		}
+		else if (actor)
 		{
             float eps = 0.001f;
 			if (actor->active_cam() == eacLookAt)

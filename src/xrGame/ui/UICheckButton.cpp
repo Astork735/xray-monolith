@@ -7,6 +7,7 @@
 #include "UIXmlInit.h"
 #include "UIHint.h"
 #include "../../xrEngine/xr_input.h"
+#include "../UICursor.h"
 
 CUICheckButton::CUICheckButton()
 {
@@ -79,7 +80,7 @@ void CUICheckButton::InitTexture2(LPCSTR texture_name)
 
 void CUICheckButton::OnFocusLost()
 {
-	if (m_eButtonState == BUTTON_PUSHED && pInput->iGetAsyncBtnState(0))
+	if (m_eButtonState == BUTTON_PUSHED && GetUICursor().PrimaryHeld())
 		return;
 
 	inherited::OnFocusLost();

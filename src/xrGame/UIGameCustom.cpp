@@ -19,6 +19,7 @@
 #include "xrEngine/x_ray.h"
 
 #include "ui\UICellItem.h" //Alundaio
+#include "../xrEngine/Vr/vr_gameplay.h"
 //#include "script_game_object.h" //Alundaio
 
 EGameIDs ParseStringToGameType(const char* str);
@@ -83,8 +84,19 @@ void CUIGameCustom::OnFrame()
 
 void CUIGameCustom::Render()
 {
+	// VR: on the in-game HUD panel magnified past its default size, each
+	// HUD element grows inward from where it is instead of off the view
+	// (not while a window with a cursor is up: that panel is fixed).
+	const float inset = g_vr_owns_present && g_vr_ui_pass && !Level().VrUiPointerActive() ?
+		vr::HudMagnification() : 1.f;
+	CUIWindow::s_vr_hud_inset = inset;
+	const auto root = [inset](CUIWindow* wnd, bool on) { if (wnd && inset > 1.f) wnd->m_vr_hud_root = on; };
 	for (StaticDrawableWrapper* item : CustomStatics)
-		item->Draw();
+	{
+		if (inset > 1.f && item->wnd()->IsShown()) CUIWindow::DrawHudElement(*item->wnd(), inset);
+		else item->Draw();
+	}
+	root(Window, true); root(UIMainIngameWnd, true); root(m_pMessagesWnd, true);
 	Window->Draw();
 	CEntity* pEntity = smart_cast<CEntity*>(Level().CurrentEntity());
 	if (pEntity)
@@ -102,11 +114,15 @@ void CUIGameCustom::Render()
 					item->render_item_ui();
 			}
 		}
-		if (GameIndicatorsShown() && psHUD_Flags.is(HUD_DRAW | HUD_DRAW_RT))
+		// VR can show status on the wrist instead (vr_hide_hud).
+		if (GameIndicatorsShown() && psHUD_Flags.is(HUD_DRAW | HUD_DRAW_RT) &&
+			!(g_vr_owns_present && vr::HideHud()))
 			UIMainIngameWnd->Draw();
 	}
 	m_pMessagesWnd->Draw();
 	DoRenderDialogs();
+	root(Window, false); root(UIMainIngameWnd, false); root(m_pMessagesWnd, false);
+	CUIWindow::s_vr_hud_inset = 1.f;
 }
 
 StaticDrawableWrapper* CUIGameCustom::AddCustomStatic(const char* id, bool singleInstance)
@@ -166,7 +182,7 @@ bool CUIGameCustom::ShowActorMenu()
 	}
 	else
 	{
-		if (!psActorFlags.test(AF_3D_PDA)) HidePdaMenu();
+		if (!Pda3D()) HidePdaMenu();
 		
 		//---- before inventory mode ---------------------------
 		::luabind::functor<bool> funct1;

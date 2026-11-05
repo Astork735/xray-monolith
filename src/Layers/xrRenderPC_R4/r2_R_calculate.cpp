@@ -13,6 +13,9 @@ extern float r_ssaGLOD_start, r_ssaGLOD_end;
 
 void CRender::Calculate()
 {
+    static u32 vr_last_update = u32(-1);
+    const bool update_frame = !g_vr_rendering_eye || vr_last_update != Device.dwFrame;
+    if (g_vr_rendering_eye) vr_last_update = Device.dwFrame;
 	// Transfer to global space to avoid deep pointer access
 	IRender_Target* T = getTarget();
 	float fov_factor = _sqr(90.f / Device.fFOV);
@@ -30,7 +33,7 @@ void CRender::Calculate()
 	if (!vLastCameraPos.similar(Device.vCameraPosition, EPS_S))
 	{
 		CSector* pSector = (CSector*)detectSector(Device.vCameraPosition);
-		if (pSector && (pSector != pLastSector))
+		if (update_frame && pSector && (pSector != pLastSector))
 			g_pGamePersistent->OnSectorChanged(translateSector(pSector));
 
 		if (0 == pSector) pSector = pLastSector;
@@ -54,7 +57,7 @@ void CRender::Calculate()
 	}
 
 	//
-	Lights.Update();
+	if (update_frame) Lights.Update();
 
 	// Check if we touch some light even trough portal
 	lstRenderables.clear();

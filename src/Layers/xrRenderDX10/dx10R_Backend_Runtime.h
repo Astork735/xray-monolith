@@ -327,6 +327,21 @@ IC void CBackend::Render(D3DPRIMITIVETYPE T, u32 baseV, u32 startV, u32 countV, 
 	PGO(Msg("PGO:DIP:%dv/%df",countV,PC));
 }
 
+#ifdef USE_DX11
+IC void CBackend::RenderInstancedIndirect(D3DPRIMITIVETYPE T, ID3D11Buffer* args, u32 offset)
+{
+	stat.calls++;
+	ApplyPrimitieTopology(TranslateTopology(T));
+	SRVSManager.Apply();
+	ApplyRTandZB();
+	ApplyVertexLayout();
+	StateManager.Apply();
+	//	State manager may alter constants
+	constants.flush();
+	HW.pContext->DrawInstancedIndirect(args, offset);
+}
+#endif
+
 IC void CBackend::Render(D3DPRIMITIVETYPE T, u32 startV, u32 PC)
 {
 	//	TODO: DX10: Remove triangle fan usage from the engine

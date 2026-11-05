@@ -15,6 +15,7 @@ class demo_info_loader;
 #include "ui/UIWndCallback.h"
 #include "ui_base.h"
 #include "DemoInfo.h"
+#include "../xrEngine/Vr/vr_ui_policy.h"
 
 namespace gamespy_gp
 {
@@ -52,6 +53,9 @@ class CMainMenu :
 
 {
 	CUIDialogWnd* m_startDialog;
+    CUIDialogWnd* m_vr_pressed_receiver = nullptr;
+    vr::UiScrollRepeat m_vr_scroll;
+    u32 m_vr_scroll_time = 0;
 
 
 	enum
@@ -138,6 +142,8 @@ public:
 
 	virtual void Activate(bool bActive);
 	virtual bool IsActive();
+    bool VrPointer(float u, float v, int button) override;
+    bool VrHandPointer(int hand, float u, float v, bool down) override;
 	virtual bool CanSkipSceneRendering();
 
 	virtual bool IgnorePause() { return true; }

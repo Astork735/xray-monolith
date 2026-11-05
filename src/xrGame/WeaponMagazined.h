@@ -13,6 +13,7 @@ class CAnonHudItem;
 
 class CWeaponMagazined : public CWeapon
 {
+    friend class CVrWeaponInteraction;
 private:
 	typedef CWeapon inherited;
 protected:
@@ -55,6 +56,7 @@ protected:
 	virtual void on_b_hud_detach();
 
 	virtual void OnShot();
+    virtual bool DeferShellDrop() const { return VrDeferShellDrop(); }
 	virtual void PlaySoundShot();
 
 	virtual void OnEmptyClick();

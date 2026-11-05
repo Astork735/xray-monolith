@@ -1,5 +1,7 @@
 #include "pch_script.h"
 #include "Level.h"
+#include "Actor.h"
+#include "VrWeaponInteraction.h"
 #include "Level_Bullet_Manager.h"
 #include "xrserver.h"
 #include "xrmessages.h"
@@ -272,6 +274,10 @@ u32 CLevel::Objects_net_Save(NET_Packet* _Packet, u32 start, u32 max_object_size
 
 void CLevel::ClientSave()
 {
+	// Resolve transient physical magazines before the first object packet is
+	// built. Weapon save() must remain free of spawn/ownership side effects.
+	if (auto* actor=smart_cast<CActor*>(CurrentControlEntity()))
+		PrepareVrWeaponSave(*actor);
 	NET_Packet P;
 	u32 start = 0;
 

@@ -1,6 +1,7 @@
 #include "stdafx.h"
 #include "UIWindow.h"
 #include "../UICursor.h"
+#include "../../xrEngine/Vr/vr_ui_policy.h"
 #include "../MainMenu.h"
 
 #include "../Include/xrRender/DebugRender.h"
@@ -220,9 +221,91 @@ CUIWindow::~CUIWindow()
 }
 
 
+float CUIWindow::s_vr_hud_inset = 1.f;
+
+namespace
+{
+bool FullScreen(const Frect& r) { return r.width() >= 0.9f*UI_BASE_WIDTH && r.height() >= 0.9f*UI_BASE_HEIGHT; }
+// Draws a window moved by (dx, dy), then puts it back.
+void DrawMoved(CUIWindow& wnd, float dx, float dy)
+{
+	const Fvector2 pos = wnd.GetWndPos();
+	wnd.MoveWndDelta(dx, dy);
+	wnd.Draw();
+	wnd.CUISimpleWindow::SetWndPos(pos);
+}
+// A full-screen container is not an element: its children are.
+void DrawAsRoot(CUIWindow& wnd)
+{
+	const bool root = wnd.m_vr_hud_root;
+	wnd.m_vr_hud_root = true;
+	wnd.Draw();
+	wnd.m_vr_hud_root = root;
+}
+}
+
+void CUIWindow::DrawHudElement(CUIWindow& element, float k)
+{
+	Frect r;
+	element.GetAbsoluteRect(r);
+	if (FullScreen(r)) { DrawAsRoot(element); return; }
+	float dx, dy;
+	vr::HudInsetOffset(r.x1, r.y1, r.width(), r.height(), UI_BASE_WIDTH, UI_BASE_HEIGHT, k, dx, dy);
+	DrawMoved(element, dx, dy);
+}
+
+void CUIWindow::DrawHudChildren(float k)
+{
+	struct Piece { CUIWindow* wnd; Frect r; int group; float dx, dy; };
+	xr_vector<Piece> pieces;
+	for (CUIWindow* child : m_ChildWndList)
+	{
+		if (!child || !child->IsShown() || child->GetCustomDraw()) continue;
+		Piece piece{child, {}, int(pieces.size()), 0.f, 0.f};
+		child->GetAbsoluteRect(piece.r);
+		pieces.push_back(piece);
+	}
+	// Group pieces within 12 units of each other (repeat until stable).
+	const auto group_of = [&](int i) { while (pieces[i].group != i) i = pieces[i].group; return i; };
+	constexpr float gap = 12.f;
+	for (size_t a = 0; a < pieces.size(); ++a)
+		for (size_t b = a + 1; b < pieces.size(); ++b)
+		{
+			const Frect& p = pieces[a].r;
+			const Frect& q = pieces[b].r;
+			if (FullScreen(p) || FullScreen(q)) continue;
+			if (p.x1 - gap > q.x2 || q.x1 - gap > p.x2 || p.y1 - gap > q.y2 || q.y1 - gap > p.y2) continue;
+			const int ga = group_of(int(a)), gb = group_of(int(b));
+			if (ga != gb) pieces[std::max(ga, gb)].group = std::min(ga, gb);
+		}
+	// Each group moves as one, anchored on the outline of its pieces.
+	for (size_t i = 0; i < pieces.size(); ++i)
+	{
+		const int g = group_of(int(i));
+		if (g != int(i)) continue;
+		Frect outline = pieces[i].r;
+		for (size_t j = i + 1; j < pieces.size(); ++j)
+			if (group_of(int(j)) == g)
+			{
+				const Frect& r = pieces[j].r;
+				outline.set(std::min(outline.x1, r.x1), std::min(outline.y1, r.y1),
+					std::max(outline.x2, r.x2), std::max(outline.y2, r.y2));
+			}
+		vr::HudInsetOffset(outline.x1, outline.y1, outline.width(), outline.height(),
+			UI_BASE_WIDTH, UI_BASE_HEIGHT, k, pieces[i].dx, pieces[i].dy);
+	}
+	for (Piece& piece : pieces)
+	{
+		if (FullScreen(piece.r)) { DrawAsRoot(*piece.wnd); continue; }
+		const Piece& lead = pieces[group_of(int(&piece - pieces.data()))];
+		DrawMoved(*piece.wnd, lead.dx, lead.dy);
+	}
+}
+
 void CUIWindow::Draw()
 {
-	for (WINDOW_LIST_it it = m_ChildWndList.begin(); m_ChildWndList.end() != it; ++it)
+	if (m_vr_hud_root && s_vr_hud_inset > 1.f) DrawHudChildren(s_vr_hud_inset);
+	else for (WINDOW_LIST_it it = m_ChildWndList.begin(); m_ChildWndList.end() != it; ++it)
 	{
 		if (!(*it)) continue;
 		if (!(*it)->IsShown()) continue;

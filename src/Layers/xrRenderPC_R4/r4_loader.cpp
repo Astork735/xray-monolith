@@ -14,6 +14,7 @@
 #include "../xrRenderDX10/3DFluid/dx103DFluidVolume.h"
 
 #include "../xrRender/FHierrarhyVisual.h"
+#include "r4_blood.h"
 
 #pragma warning(push)
 #pragma warning(disable:4995)
@@ -56,6 +57,8 @@ void CRender::level_Load(IReader* fs)
 	// Components
 	Wallmarks = xr_new<CWallmarksEngine>();
 	Details = xr_new<CDetailManager>();
+	// The blood passes read and write single-sample G-buffer targets.
+	if (!g_dedicated_server && !o.dx10_msaa) Blood = xr_new<CBlood>();
 
 	if (!g_dedicated_server)
 	{
@@ -175,6 +178,7 @@ void CRender::level_Unload()
 	//*** Components
 	xr_delete(Details);
 	xr_delete(Wallmarks);
+	xr_delete(Blood);
 
 	//*** Shaders
 	Shaders.clear_and_free();

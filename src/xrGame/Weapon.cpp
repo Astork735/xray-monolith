@@ -5,6 +5,8 @@
 
 #include "stdafx.h"
 #include "Weapon.h"
+#include "VrWeaponInteraction.h"
+#include "../xrEngine/Vr/vr_stereo.h"
 #include "ParticlesObject.h"
 #include "entity_alive.h"
 #include "inventory_item_impl.h"
@@ -29,6 +31,7 @@
 #include "weaponBinocularsVision.h"
 #include "ui/UIWindow.h"
 #include "ui/UIXmlInit.h"
+#include "ui/UITextureMaster.h"
 #include "Torch.h"
 #include "../xrCore/vector.h"
 #include "ActorNightVision.h"
@@ -167,8 +170,305 @@ CWeapon::CWeapon()
 extern int scope_2dtexactive; //crookr
 CWeapon::~CWeapon()
 {
+    xr_delete(m_vr_interaction);
 	xr_delete(m_UIScope);
 	delete_data(m_scopes);
+}
+
+CVrWeaponInteraction* CWeapon::VrInteraction() const
+{
+    if (!VrUsesGenericInteraction() || !g_vr_owns_present || !IsGameTypeSingle() ||
+        !H_Parent() || H_Parent()!=Level().CurrentControlEntity() ||
+        !smart_cast<CActor*>(H_Parent())) return m_vr_interaction;
+    if (!m_vr_interaction)
+        m_vr_interaction=xr_new<CVrWeaponInteraction>(const_cast<CWeapon*>(this));
+    return m_vr_interaction;
+}
+bool CWeapon::VrSupported() const
+{
+    auto* interaction=VrInteraction();
+    return interaction && interaction->Supported();
+}
+bool CWeapon::VrMode() const
+{
+    auto* interaction=VrInteraction();
+    return interaction && interaction->Mode();
+}
+bool CWeapon::VrTransform(Fmatrix& world) const
+{
+    auto* interaction=VrInteraction();
+    return interaction && interaction->Transform(world);
+}
+bool CWeapon::VrRender()
+{
+    auto* interaction=VrInteraction();
+    return interaction && interaction->Render();
+}
+void CWeapon::VrRenderHolster()
+{
+    auto* interaction=VrInteraction();
+    if (interaction) interaction->RenderHolster();
+}
+void CWeapon::VrRenderLooseMagazines()
+{
+    if (m_vr_interaction) m_vr_interaction->RenderLooseMagazines();
+}
+void CWeapon::VrRenderBasicMagazines()
+{
+    if (m_vr_interaction) m_vr_interaction->RenderBasicMagazines();
+}
+void CWeapon::VrUpdateProps()
+{
+    if (m_vr_interaction) m_vr_interaction->UpdateProps();
+}
+void CWeapon::VrInteract(CActor& actor)
+{
+    auto* interaction=VrInteraction();
+    if (interaction) interaction->Interact(actor);
+}
+bool CWeapon::VrHolsterGrabDistance(CActor& actor, const Fvector& hand, float& distance) const
+{
+    auto* interaction=VrInteraction();
+    return interaction && interaction->HolsterGrabDistance(actor,hand,distance);
+}
+void CWeapon::VrReleaseInactiveHeld()
+{
+    if (m_vr_interaction) m_vr_interaction->ReleaseInactiveHeld();
+}
+void CWeapon::VrDropActionShotLayers()
+{
+    unsigned dropped=0;
+    for (LPCSTR alias:{"sndShot","sndShotActor","sndShotActorFirst","sndSilencerShot","sndSilencerShotActor"})
+        dropped+=m_sounds.DropActionLayers(alias);
+    if (dropped) Msg("* [VR weapon] %s: %u bolt or pump layers dropped from the shot sound (worked by hand)",
+        cNameSect().c_str(),dropped);
+}
+bool CWeapon::VrHasShell()
+{
+    if (unlimited_ammo()) return true;
+    if (!m_pInventory) return false;
+    if (GetAmmoCount(m_ammoType)>0) return true;
+    for (u8 type=0;type<u8(m_ammoTypes.size());++type)
+        if (GetAmmoCount(type)>0) { m_ammoType=type; return true; }
+    return false;
+}
+bool CWeapon::VrLoadShell()
+{
+    if (iAmmoElapsed>=iMagazineSize || !VrHasShell()) return false;
+    if (m_set_next_ammoType_on_reload!=undefined_ammo_type)
+    {
+        m_ammoType=m_set_next_ammoType_on_reload;
+        m_set_next_ammoType_on_reload=undefined_ammo_type;
+    }
+    if (m_DefaultCartridge.m_LocalAmmoType!=m_ammoType)
+        m_DefaultCartridge.Load(m_ammoTypes[m_ammoType].c_str(),m_ammoType,m_APk);
+    CCartridge cartridge=m_DefaultCartridge;
+    if (!unlimited_ammo())
+    {
+        m_pCurrentAmmo=smart_cast<CWeaponAmmo*>(m_pInventory->GetAny(m_ammoTypes[m_ammoType].c_str()));
+        if (!m_pCurrentAmmo || !m_pCurrentAmmo->Get(cartridge)) return false;
+        if (!m_pCurrentAmmo->m_boxCurr && OnServer()) m_pCurrentAmmo->SetDropManual(TRUE);
+    }
+    cartridge.m_LocalAmmoType=m_ammoType;
+    // On top (back()): loaded with the action open, the last round pressed
+    // in is the first one the bolt chambers.
+    m_magazine.push_back(cartridge);
+    iAmmoElapsed=int(m_magazine.size());
+    return true;
+}
+bool CWeapon::VrLeftHandBusy() const
+{
+    return m_vr_interaction && m_vr_interaction->LeftHandBusy();
+}
+void CWeapon::VrPrepareSave()
+{
+    if (m_vr_interaction) m_vr_interaction->PrepareSave();
+}
+void CWeapon::VrPrepareSnapshot()
+{
+    if (m_vr_interaction) m_vr_interaction->PrepareSnapshot();
+}
+bool CWeapon::VrCanFire() const
+{
+    return !m_vr_interaction || m_vr_interaction->CanFire();
+}
+bool CWeapon::VrBlockReload() const
+{
+    return m_vr_interaction && m_vr_interaction->BlockReload();
+}
+bool CWeapon::VrAimTransform(Fmatrix& world) const
+{
+    return m_vr_interaction && m_vr_interaction->AimTransform(world);
+}
+shared_str CWeapon::VrScopeReticle(Frect* part) const
+{
+    // The scope window (scopes.xml) is a full-screen static with the reticle
+    // texture; its name changes with the scope, so the lookup is cached.
+    // The texture there is usually an id in the UI texture list, a part of
+    // a texture file, as CUIStatic resolves it; only otherwise a file. A
+    // file that does not exist is no reticle: loading it gives the opaque
+    // missing-texture image, which covered the whole lens.
+    static shared_str window, texture;
+    static Frect rect;
+    static bool whole = true;
+    if (!m_scope_tex_name.size() || !pWpnScopeXml) return nullptr;
+    if (window != m_scope_tex_name)
+    {
+        window = m_scope_tex_name;
+        texture = nullptr;
+        whole = true;
+        LPCSTR id = nullptr;
+        for (LPCSTR child : {"auto_static", "static"})
+        {
+            string256 path;
+            xr_sprintf(path, "%s:%s:texture", m_scope_tex_name.c_str(), child);
+            LPCSTR name = pWpnScopeXml->Read(path, 0, nullptr);
+            if (name && name[0]) { id = name; break; }
+        }
+        if (id)
+        {
+            const TEX_INFO info = CUITextureMaster::FindItem(id);
+            const shared_str file = info.file.size() ? info.file : shared_str(id);
+            whole = !info.file.size() || info.rect.width() <= 0.f || info.rect.height() <= 0.f;
+            rect = info.rect;
+            string_path dds;
+            xr_sprintf(dds, "%s.dds", file.c_str());
+            if (FS.exist("$game_textures$", dds)) texture = file;
+        }
+        if (texture.size() && !whole)
+            Msg("* [VR weapon] scope reticle for %s: %s (%s, %.0f %.0f to %.0f %.0f)", m_scope_tex_name.c_str(), id,
+                texture.c_str(), rect.x1, rect.y1, rect.x2, rect.y2);
+        else
+            Msg("* [VR weapon] scope reticle for %s: %s", m_scope_tex_name.c_str(),
+                texture.size() ? texture.c_str() : id ? "texture not found (plain crosshair)" : "none (plain crosshair)");
+    }
+    if (part)
+    {
+        if (texture.size() && !whole) *part = rect;
+        else part->set(0.f, 0.f, 0.f, 0.f);
+    }
+    return texture;
+}
+
+bool CWeapon::VrAiming() const
+{
+    return m_vr_interaction && m_vr_interaction->Aiming();
+}
+bool CWeapon::VrHandFrame(Fmatrix& frame) const
+{
+    return m_vr_interaction && m_vr_interaction->HandFrame(frame);
+}
+bool CWeapon::VrAuthoredHand(int side, VrHandPose& pose) const
+{
+    return m_vr_interaction && m_vr_interaction->AuthoredHand(side,pose);
+}
+bool CWeapon::VrTriggerPoint(Fvector& world) const
+{
+    return m_vr_interaction && m_vr_interaction->TriggerPoint(world);
+}
+float CWeapon::VrHandGripRadius() const
+{
+    return m_vr_interaction ? m_vr_interaction->HandGripRadius() : 0.015f;
+}
+bool CWeapon::VrSupporting() const
+{
+    return m_vr_interaction && m_vr_interaction->Supporting();
+}
+bool CWeapon::VrBreakAction() const
+{
+    return m_vr_interaction && m_vr_interaction->BreakAction();
+}
+bool CWeapon::VrPlayShellSound()
+{
+    // Tri-state shotguns have their own; others report none so the VR
+    // interaction plays its short generic one.
+    if (!m_sounds.FindSoundItem("sndAddCartridge", false) && pSettings->line_exist(cNameSect(), "snd_add_cartridge"))
+        m_sounds.LoadSound(cNameSect().c_str(), "snd_add_cartridge", "sndAddCartridge", false, ESoundTypes(SOUND_TYPE_WEAPON_SHOOTING));
+    if (!m_sounds.FindSoundItem("sndAddCartridge", false)) return false;
+    PlaySound("sndAddCartridge", get_LastFP());
+    return true;
+}
+bool CWeapon::VrShellLoading() const
+{
+    return m_vr_interaction && m_vr_interaction->ShellLoading();
+}
+bool CWeapon::VrGripField(int side, vr::ContactScene& scene, Fmatrix& world, float& ceiling,
+    const void*& object, vr::GripKind& kind)
+{
+    return m_vr_interaction && m_vr_interaction->GripField(side,scene,world,ceiling,object,kind);
+}
+bool CWeapon::VrHolsterPoint(CActor& actor, Fvector& point, float& range)
+{
+    auto* interaction=VrInteraction();
+    return interaction && interaction->HolsterPointFor(actor,point,range);
+}
+bool CWeapon::VrSupportHandOverride(Fmatrix& grip) const
+{
+    return m_vr_interaction && m_vr_interaction->SupportHandOverride(grip);
+}
+bool CWeapon::VrAuthoredBones(int side, VrHandBones& bones) const
+{
+    return m_vr_interaction && m_vr_interaction->AuthoredBones(side,bones);
+}
+bool CWeapon::VrPhysicalReload() const
+{
+    return m_vr_interaction && m_vr_interaction->PhysicalReload();
+}
+bool CWeapon::VrCollisionBoxes(Fmatrix& world, const xr_vector<Fobb>*& boxes)
+{
+    return m_vr_interaction && m_vr_interaction->CollisionBoxes(world,boxes);
+}
+bool CWeapon::VrPouchHasAmmo() const
+{
+    return m_vr_interaction && m_vr_interaction->PouchHasAmmo();
+}
+bool CWeapon::VrSwapPouchAmmo()
+{
+    return m_vr_interaction && m_vr_interaction->SwapPouchAmmo();
+}
+bool CWeapon::VrPouchAmmoShown(shared_str& section) const
+{
+    return m_vr_interaction && m_vr_interaction->PouchAmmoShown(section);
+}
+void CWeapon::VrRenderSight()
+{
+    if (m_vr_interaction) m_vr_interaction->RenderSight();
+}
+bool CWeapon::VrPrepare()
+{
+    return m_vr_interaction && m_vr_interaction->Prepare();
+}
+int CWeapon::VrWeaponHand() const
+{
+    return m_vr_interaction ? m_vr_interaction->WeaponHand() : 1;
+}
+void CWeapon::VrSetWeaponHand(int hand)
+{
+    if (auto* interaction=VrInteraction()) interaction->SetWeaponHand(hand);
+}
+void CWeapon::VrOnShot()
+{
+    if (m_vr_interaction) m_vr_interaction->OnShot();
+}
+void CWeapon::VrRenderPouch(CActor& actor)
+{
+    if (auto* interaction=VrInteraction()) interaction->RenderPouch(actor);
+}
+bool CWeapon::VrUsesMagazineButton() const
+{
+    return m_vr_interaction && m_vr_interaction->UsesMagazineButton();
+}
+bool CWeapon::VrFillingMagazine() const
+{
+    return m_vr_interaction && m_vr_interaction->FillingMagazine();
+}
+bool CWeapon::VrDeferShellDrop() const
+{
+    return m_vr_interaction && m_vr_interaction->DeferShellDrop();
+}
+void CWeapon::VrCartridgeFired()
+{
+    if (m_vr_interaction) m_vr_interaction->CartridgeFired();
 }
 
 void CWeapon::Hit(SHit* pHDS)
@@ -180,6 +480,20 @@ void CWeapon::UpdateXForm()
 {
 	if (Device.dwFrame == dwXF_Frame)
 		return;
+	Fmatrix vr_world;
+	if (m_vr_interaction && m_vr_interaction->Transform(vr_world))
+	{
+		UpdatePosition(vr_world);
+		dwXF_Frame=Device.dwFrame;
+		return;
+	}
+	// The tracked world-model pose already includes the hand offset.
+	if (m_vr_interaction && m_vr_interaction->GenericTransform(vr_world))
+	{
+		XFORM().set(vr_world);
+		dwXF_Frame=Device.dwFrame;
+		return;
+	}
 
 	dwXF_Frame = Device.dwFrame;
 
@@ -253,6 +567,7 @@ void CWeapon::UpdateFireDependencies_internal()
 	if (Device.dwFrame != dwFP_Frame)
 	{
 		dwFP_Frame = Device.dwFrame;
+		if (m_vr_interaction && m_vr_interaction->FireDependencies(m_current_firedeps)) return;
 
 		UpdateXForm();
 
@@ -1046,6 +1361,8 @@ BOOL CWeapon::net_Spawn(CSE_Abstract* DC)
 
 void CWeapon::net_Destroy()
 {
+	if (H_Parent()) VrPrepareSave();
+	if (m_vr_interaction) m_vr_interaction->Destroy();
 	inherited::net_Destroy();
 
 	//óäàëèòü îáúåêòû ïàðòèêëîâ
@@ -1219,6 +1536,7 @@ void CWeapon::shedule_Update(u32 dT)
 
 void CWeapon::OnH_B_Independent(bool just_before_destroy)
 {
+	VrPrepareSave();
 	RemoveShotEffector();
 
 	inherited::OnH_B_Independent(just_before_destroy);
@@ -1628,7 +1946,7 @@ bool CWeapon::SwitchAmmoType(u32 flags)
 	return true;
 }
 
-void CWeapon::SpawnAmmo(u32 boxCurr, LPCSTR ammoSect, u32 ParentID)
+void CWeapon::SpawnAmmo(u32 boxCurr, LPCSTR ammoSect, u32 ParentID, const Fvector* world_position)
 {
 	if (!m_ammoTypes.size()) return;
 	if (OnClient()) return;
@@ -1653,7 +1971,12 @@ void CWeapon::SpawnAmmo(u32 boxCurr, LPCSTR ammoSect, u32 ParentID)
 		//.		D->s_gameid					= u8(GameID());
 		D->s_RP = 0xff;
 		D->ID = 0xffff;
-		if (ParentID == 0xffffffff)
+		if (world_position)
+		{
+			D->ID_Parent = 0xffff;
+			D->o_Position = *world_position;
+		}
+		else if (ParentID == 0xffffffff)
 			D->ID_Parent = (u16)H_Parent()->ID();
 		else
 			D->ID_Parent = (u16)ParentID;
@@ -3119,6 +3442,7 @@ float CWeapon::Weight() const
 	}
 
 	res += GetMagazineWeight(m_magazine);
+	if (m_vr_interaction) res += m_vr_interaction->DetachedRoundWeight();
 	return res;
 }
 
@@ -3258,6 +3582,15 @@ bool CWeapon::MovingAnimAllowedNow()
 bool CWeapon::IsHudModeNow()
 {
 	return GetHUDmode();
+}
+
+bool CWeapon::ParticlesInHudMode()
+{
+	// A tracked VR weapon is a world object: its flash and smoke must be
+	// depth-tested against its own mesh, not drawn over everything as HUD.
+	Fmatrix vr_world;
+	if (VrAimTransform(vr_world)) return false;
+	return IsHudModeNow();
 }
 
 float CWeapon::GetMinScopeZoomFactor() const

@@ -112,6 +112,7 @@ protected:
 	static void LoadBloodyWallmarks(LPCSTR section);
 public:
 	static void UnloadBloodyWallmarks();
+	static IWallMarkArray* BloodMarks() { return m_pBloodMarksVector ? &**m_pBloodMarksVector : nullptr; }
 
 protected:
 	virtual void PlaceBloodWallmark(const Fvector& dir, const Fvector& start_pos,
@@ -137,6 +138,29 @@ protected:
 
 	//обновление ран, и рисование отметок от капающей крови
 	virtual void UpdateBloodDrops();
+
+	// Blood system: wounds that keep bleeding (blood_spray::Bleed).
+	// A wound stays after it stops bleeding, as the stain it left
+	// (GetBloodWounds), until it is replaced or ten minutes old.
+	struct BloodWound
+	{
+		u16 bone;
+		Fvector local, local_dir;	// bone space
+		Fvector local_down;		// world down when hit, bone space: where the blood runs
+		float strength, start, next;
+		float stop;		// when it stopped bleeding, 0 while it bleeds
+		float trickle;	// how far blood has run down the clothing (m)
+		float bled;		// volume poured at the corpse's pool so far
+	};
+	xr_vector<BloodWound> m_blood_wounds;
+	u32 m_blood_rows_frame = u32(-1);
+	u32 m_blood_rows_count = 0;
+	Fvector4 m_blood_rows[16];
+	void AddBloodWound(u16 bone, const Fvector& bone_pos, const Fvector& dir, float strength);
+	void UpdateBloodWounds();
+public:
+	virtual u32 GetBloodWounds(Fvector4* rows, u32 max_wounds);
+protected:
 
 
 	//отношения между существами и персонажами в зоне

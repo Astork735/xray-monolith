@@ -15,6 +15,16 @@ void R_hemi::unmap()
 	c_material = 0;
 	c_hotness = 0; //--DSR-- HeatVision
 	c_glowing = 0; //--DSR-- SilencerOverheat
+	c_blood_count = 0;
+	c_blood_wounds = 0;
+}
+
+// Blood on bodies: the drawn object's wounds, two rows each; none clears.
+void R_hemi::set_blood(const Fvector4* rows, u32 wounds)
+{
+	if (c_blood_count) RCache.set_c(c_blood_count, float(wounds), 0.f, 0.f, 0.f);
+	if (c_blood_wounds)
+		for (u32 i = 0; i < wounds * 2; ++i) RCache.set_ca(c_blood_wounds, i, rows[i]);
 }
 
 void R_hemi::set_pos_faces(float posx, float posy, float posz)

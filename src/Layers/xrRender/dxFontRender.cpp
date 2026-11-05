@@ -35,6 +35,12 @@ void dxFontRender::OnRender(CGameFont& owner)
 		owner.uFlags |= CGameFont::fsValid;
 	}
 
+	// The VR UI layer is eye-sized (nearly square) but shown at 4:3, so its
+	// pixels are wider than tall there: glyphs drawn into it are narrowed to
+	// keep their shape. Text drawn into the eyes (square pixels) is not.
+	const float scale_x = g_current_font_scale.x * (g_vr_ui_pass && Device.dwHeight ?
+		float(Device.dwWidth) / float(Device.dwHeight) * (768.f / 1024.f) : 1.f);
+
 	for (u32 i = 0; i < owner.strings.size();)
 	{
 		// calculate first-fit
@@ -88,10 +94,10 @@ void dxFontRender::OnRender(CGameFont& owner)
 				switch (PS.align)
 				{
 				case CGameFont::alCenter:
-					X -= (iFloor(fSize * 0.5f)) * g_current_font_scale.x;
+					X -= (iFloor(fSize * 0.5f)) * scale_x;
 					break;
 				case CGameFont::alRight:
-					X -= iFloor(fSize);
+					X -= iFloor(fSize * scale_x);
 					break;
 				}
 
@@ -119,7 +125,7 @@ void dxFontRender::OnRender(CGameFont& owner)
 
 					l = owner.IsMultibyte() ? owner.GetCharTC(wsStr[1 + j]) : owner.GetCharTC((u16)(u8)PS.string[j]);
 
-					float scw = l.z * hs * g_current_font_scale.x;
+					float scw = l.z * hs * scale_x;
 
 					float fTCWidth = l.z / owner.vTS.x;
 

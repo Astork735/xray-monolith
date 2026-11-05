@@ -1,4 +1,5 @@
 #include "stdafx.h"
+#include "Vr/vr_stereo.h"
 #include "igame_level.h"
 #include "igame_persistent.h"
 
@@ -170,8 +171,13 @@ void IGame_Level::OnRender()
 	// Level render, only when no client output required
 	if (!g_dedicated_server)
 	{
-		Render->Calculate();
-		Render->Render();
+#ifdef VR_ENABLED
+        if (!vr::RenderStereoScene())
+#endif
+        {
+            Render->Calculate();
+            Render->Render();
+        }
 	}
 	else
 	{

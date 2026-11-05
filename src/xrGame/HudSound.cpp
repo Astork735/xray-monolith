@@ -414,6 +414,33 @@ HUD_SOUND_ITEM* HUD_SOUND_COLLECTION_LAYERED::FindSoundItem(LPCSTR alias, bool b
 	return (0);
 }
 
+unsigned HUD_SOUND_COLLECTION_LAYERED::DropActionLayers(LPCSTR alias)
+{
+	const auto action = [](const shared_str& file)
+	{
+		if (!file.size()) return false;
+		string256 lower;
+		xr_strcpy(lower, file.c_str());
+		_strlwr(lower);
+		for (LPCSTR word : {"bolt", "reload", "cycle", "pump", "lever", "rechamber"})
+			if (strstr(lower, word)) return true;
+		return false;
+	};
+	unsigned layers = 0, dropped = 0;
+	for (const HUD_SOUND_COLLECTION& item : m_sound_items)
+		layers += item.m_alias == alias;
+	for (auto it = m_sound_items.begin(); it != m_sound_items.end() && layers - dropped > 1;)
+	{
+		if (it->m_alias == alias && action(it->m_layer_file))
+		{
+			it = m_sound_items.erase(it);
+			++dropped;
+		}
+		else ++it;
+	}
+	return dropped;
+}
+
 void HUD_SOUND_COLLECTION_LAYERED::LoadSound(LPCSTR section, LPCSTR line, LPCSTR alias, bool exclusive, int type)
 {
 	LoadSound(pSettings, section, line, alias, exclusive, type);
@@ -444,6 +471,7 @@ void HUD_SOUND_COLLECTION_LAYERED::LoadSound(CInifile const* ini, LPCSTR section
 			HUD_SOUND_COLLECTION& snd_item = m_sound_items.back();
 			snd_item.LoadSound(buf_str, sound_line, alias, exclusive, type);
 			snd_item.m_alias = alias;
+			snd_item.m_layer_file = ini->r_string(buf_str, sound_line);
 			xr_sprintf(sound_line, "snd_%d_layer", ++k);
 		}
 	}

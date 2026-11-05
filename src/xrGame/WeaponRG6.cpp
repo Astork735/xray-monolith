@@ -79,6 +79,9 @@ void CWeaponRG6::FireStart()
 			}
 			E->g_fireParams(this, p1, d);
 		}
+		// VR: along the tracked launcher, not the body camera's pick.
+		Fmatrix vr_world;
+		if (VrAimTransform(vr_world)) { p1.set(get_LastFP()); d.set(get_LastFD()); }
 
 		Fmatrix launch_matrix;
 		launch_matrix.identity();

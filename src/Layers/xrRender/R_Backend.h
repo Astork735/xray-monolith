@@ -445,11 +445,15 @@ public:
 
 #ifdef USE_DX11
 	ICF void Compute(UINT ThreadGroupCountX, UINT ThreadGroupCountY, UINT ThreadGroupCountZ);
+	// Instance count comes from a GPU-written argument buffer (blood particles).
+	ICF void RenderInstancedIndirect(D3DPRIMITIVETYPE T, ID3D11Buffer* args, u32 offset);
 #endif
 
 	// Device create / destroy / frame signaling
 	void RestoreQuadIBData(); // Igor: is used to test bug with rain, particles corruption
 	void CreateQuadIB();
+	// Invalidate cached bindings after an external D3D pass, without flushing streams.
+	void ResetExternalState() { Invalidate(); }
 	void OnFrameBegin();
 	void OnFrameEnd();
 	void OnDeviceCreate();

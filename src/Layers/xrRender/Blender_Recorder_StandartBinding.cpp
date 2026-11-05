@@ -455,6 +455,17 @@ static class cl_heatvision_hotness : public R_constant_setup
 	}
 } binder_heatvision_hotness;
 
+// Blood on bodies (r__blood_body): written per object by apply_object.
+static class cl_blood_count : public R_constant_setup
+{
+	virtual void setup(R_constant* C) { RCache.hemi.set_c_blood_count(C); }
+} binder_blood_count;
+
+static class cl_blood_wounds : public R_constant_setup
+{
+	virtual void setup(R_constant* C) { RCache.hemi.set_c_blood_wounds(C); }
+} binder_blood_wounds;
+
 static class cl_heatvision_steps : public R_constant_setup
 {
 	virtual void setup(R_constant* C)
@@ -1706,6 +1717,8 @@ void CBlender_Compile::SetMapping()
 	r_Constant("L_glowing", &binder_silencer_glowing);		//--DSR-- SilencerOverheat
 	//--DSR-- HeatVision_start
 	r_Constant("L_hotness", &binder_heatvision_hotness);
+	r_Constant("L_blood_count", &binder_blood_count);
+	r_Constant("L_blood_wounds", &binder_blood_wounds);
 	r_Constant("heatvision_params1", &binder_heatvision_params1);
 	r_Constant("heatvision_params2", &binder_heatvision_params2);
 	r_Constant("heatvision_params3", &binder_heatvision_args1);

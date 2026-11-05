@@ -1959,6 +1959,7 @@
     <ClInclude Include="visual_memory_manager_inline.h" />
     <ClInclude Include="visual_memory_params.h" />
     <ClInclude Include="wallmark_manager.h" />
+    <ClInclude Include="blood_spray.h" />
     <ClInclude Include="Weapon.h" />
     <ClInclude Include="WeaponAK74.h" />
     <ClInclude Include="WeaponAmmo.h" />
@@ -4190,6 +4191,7 @@
     </ClCompile>
     <ClCompile Include="visual_memory_params.cpp" />
     <ClCompile Include="wallmark_manager.cpp" />
+    <ClCompile Include="blood_spray.cpp" />
     <ClCompile Include="Weapon.cpp" />
     <ClCompile Include="WeaponAK74.cpp">
       <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
@@ -4256,6 +4258,10 @@
       <PrecompiledHeaderFile>pch_script.h</PrecompiledHeaderFile>
       <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>
     </ClCompile>
+    <ClCompile Include="VrWeaponInteraction.cpp" />
+    <ClCompile Include="VrBodySlots.cpp" />
+    <ClCompile Include="VrWristDisplay.cpp" />
+    <ClCompile Include="VrKeyboard.cpp" />
     <ClCompile Include="WeaponRevolver.cpp" />
     <ClCompile Include="WeaponRG6.cpp" />
     <ClCompile Include="WeaponRG6_script.cpp">
