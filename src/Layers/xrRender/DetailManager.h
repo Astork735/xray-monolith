@@ -69,6 +69,11 @@ public:
 	Fvector light_position;
 
 	void details_clear();
+	// VR: the visible lists were gathered for this eye pass (from its own
+	// camera, once); details_clear at the end of each pass resets it.
+	bool m_vr_visible_ready = false;
+	u32 m_vr_visible_frame = u32(-1);
+	void clear_visibles();
 
 	struct SlotItem
 	{

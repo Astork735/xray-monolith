@@ -4,62 +4,153 @@ struct p_stamp
 {
 	float4 hpos : SV_Position;
 	float2 local : TEXCOORD0;
-	float4 A : TEXCOORD1;
-	float4 B : TEXCOORD2;
+	float4 A : TEXCOORD1;	// amount, wet amount, seed, kind + 8 * flags
+	float4 B : TEXCOORD2;	// elongation, major scale, minor scale, radius (m)
+	float3 W : TEXCOORD3;	// world tangent coordinates (m), surface height in the slab (0..1)
 };
 
+// Kinds (blood::SplatKind, xrEngine/Blood/blood_logic.h).
+#define KIND_DROPLET 0
+#define KIND_SPLASH 1
+#define KIND_POOL 2
+#define KIND_MIST 3
+#define KIND_SMEAR 4
+#define KIND_RUN 5
+#define FLAG_BEAD 1
+#define MIST_AMOUNT 0.38	// blood::kMistAmount: a mist's amount carries its density
+
+// One layer of fine spatter: a jittered round speck in some cells of a grid
+// `cell` metres wide. `p` in metres, `density` the share of cells holding one.
+float speck_layer(float2 p, float cell, float density, float seed)
+{
+	float2 g = p / cell;
+	float2 id = floor(g);
+	float2 f = frac(g);
+	float h = blood_hash2(id + seed);
+	float2 centre = 0.25 + 0.5 * float2(blood_hash2(id + seed + 17.3), blood_hash2(id + seed + 41.9));
+	float rad = 0.16 + 0.22 * blood_hash2(id + seed + 7.1);
+	// Edge softened over a texel, so specks near the texel size still show.
+	float fw = max(fwidth(g.x), fwidth(g.y));
+	float speck = saturate((rad - length(f - centre)) / max(fw, 1e-4) + 0.5);
+	return speck * step(h, density);
+}
+
 // Procedural splat shape. Output (additive): R = fluid amount, G = wet
-// amount (R * wetness). Coordinates are in splat radii: x along the drop's
-// travel, y across it.
+// amount (R * wetness); A (max-blended) = height of the surface the stain
+// landed on, 1..255 over the page's slab (blood::EncodeHeight), 0 where
+// nothing landed or the surface leaves the slab. Coordinates are in splat
+// radii: x along the drop's travel, y across it.
 float4 main(p_stamp I) : SV_Target
 {
 	float e = max(I.B.x, 1.0);
 	float2 q = float2(I.local.x * I.B.y * e, I.local.y * I.B.z);
+	float radius_m = I.B.w;
 	float seed = I.A.z * 97.0;
-	int kind = int(I.A.w + 0.5);
+	int packed = int(I.A.w + 0.5);
+	int kind = packed & 7;
+	int flags = packed >> 3;
+	float amount = 0.0;
 
-	// Main body: an ellipse with a noisy rim, thicker in the middle.
-	float2 c = float2(q.x / e, q.y);
-	float r = length(c);
-	float ang = atan2(c.y, c.x);
-	float rim_noise = kind == 2 ? 0.55 : 0.3;
-	float rim = 1.0 + (blood_noise(float2(ang * 2.5 + seed, seed)) - 0.5) * rim_noise
-		+ (blood_noise(float2(ang * 9.0 - seed, seed * 1.3)) - 0.5) * rim_noise * 0.4;
-	float body = saturate((rim - r) * 6.0);
-	float amount = body * lerp(0.7, 1.0, saturate(1.0 - r));
-
-	// Splashes throw satellites and short streaks ahead of the body.
-	if (kind == 1)
+	if (kind == KIND_MIST)
 	{
-		[unroll] for (int k = 0; k < 7; ++k)
+		// High-velocity spatter: a cone of specks of one to a few
+		// millimetres, dense in the middle and thinning outward, stretched
+		// along the travel on an oblique surface.
+		float2 c = float2(q.x / e, q.y);
+		float rr = length(c);
+		float density = exp(-rr * rr * 2.4) * saturate((1.2 - rr) * 5.0) * saturate(I.A.x / MIST_AMOUNT);
+		float stretch = 1.0 + (e - 1.0) * 0.6;
+		float2 m = float2(q.x / stretch, q.y) * radius_m;
+		float fine = speck_layer(m, 0.0033, density * 0.55, seed);
+		float coarse = speck_layer(m + 0.37, 0.0075, density * 0.3, seed + 3.0);
+		float core = saturate((0.18 - rr) * 12.0) * step(0.45, blood_noise(m * 600.0 + seed));
+		amount = max(max(fine, coarse), core);
+	}
+	else if (kind == KIND_SMEAR)
+	{
+		// Blood wiped off a bleeding body: drag lines along the slide, heavy
+		// where the contact began, thinning and breaking up towards where it
+		// left. A body at rest leaves a blotted, fabric-patchy imprint.
+		float moving = saturate((e - 1.2) * 2.0);
+		float t = saturate((q.x + e) / (2.0 * e));
+		float2 m = q * radius_m;
+		float rim = (1.0 - 0.35 * t * moving) * (0.85 + 0.3 * blood_noise(float2(q.x * 1.7 + seed, seed)));
+		float inside = saturate((rim - abs(q.y)) * 6.0);
+		float ends = saturate((q.x + e + 0.3) * 4.0) * saturate((e + 0.6 - q.x) * 1.5);
+		float lines = blood_noise(float2(m.x * 8.0, m.y * 260.0) + seed);
+		float blot = blood_noise(m * 90.0 + seed * 3.1) * 0.7 + blood_noise(m * 300.0 + seed) * 0.3;
+		float pattern = lerp(smoothstep(0.35, 0.55, blot), smoothstep(0.3, 0.6, lines + (1.0 - t) * 0.3), moving);
+		amount = inside * ends * pattern * lerp(1.0, 0.35, t * moving);
+	}
+	else if (kind == KIND_RUN)
+	{
+		// Blood running down a wall: a thin line with a slight meander and
+		// width wobble anchored to the world (segments join seamlessly), ends
+		// cut square so consecutive segments abut, and the bead that stopped
+		// at the lower end of the last one.
+		float along = I.W.y;	// world height on wall pages
+		float offset = (blood_noise(float2(along * 12.0, seed)) - 0.5) * 0.6;
+		float w = 0.75 + 0.5 * blood_noise(float2(along * 60.0, seed + 5.0));
+		float body = step(-e, q.x) * step(q.x, e) * saturate((w - abs(q.y - offset)) * 4.0);
+		amount = body * (0.85 + 0.15 * blood_noise(float2(along * 150.0, seed)));
+		if (flags & FLAG_BEAD)
 		{
-			float h1 = blood_hash1(seed + k * 13.1);
-			float h2 = blood_hash1(seed + k * 7.7 + 3.0);
-			float h3 = blood_hash1(seed + k * 3.3 + 11.0);
-			float2 s = float2(e * (0.95 + 0.75 * h1), (h2 - 0.5) * 1.1);
-			float rad = 0.08 + 0.2 * h3;
-			amount = max(amount, saturate((rad - length(q - s)) * 14.0) * 0.8);
-			// streak from the body edge towards the satellite
-			float2 a = float2(e * 0.8, s.y * 0.6);
-			float2 ab = s - a;
-			float t = saturate(dot(q - a, ab) / max(dot(ab, ab), 1e-4));
-			float d = length(q - (a + ab * t));
-			amount = max(amount, saturate((rad * 0.35 - d) * 18.0) * 0.6);
+			float2 b = float2(q.x - (e + 0.2), q.y - offset);
+			amount = max(amount, saturate((1.6 - length(b * float2(0.8, 1.0))) * 3.0) * 1.6);
 		}
 	}
-	// A droplet keeps one or two tiny satellites.
-	else if (kind == 0)
+	else
 	{
-		[unroll] for (int k = 0; k < 2; ++k)
+		// Main body: an ellipse with a noisy rim, thicker in the middle.
+		float2 c = float2(q.x / e, q.y);
+		float r = length(c);
+		float ang = atan2(c.y, c.x);
+		float rim_noise = kind == KIND_POOL ? 0.55 : 0.3;
+		float rim = 1.0 + (blood_noise(float2(ang * 2.5 + seed, seed)) - 0.5) * rim_noise
+			+ (blood_noise(float2(ang * 9.0 - seed, seed * 1.3)) - 0.5) * rim_noise * 0.4;
+		// A pool's edge runs ahead into the hollows of the floor and holds
+		// back at its bumps (the relief the flow and the decal use, anchored
+		// to the world), so a growing pool creeps like a liquid instead of
+		// scaling up as one shape. Floors only: page axis +Y.
+		if (kind == KIND_POOL) rim += (0.5 - blood_surface_height(I.W.xy, 2.0)) * 0.35;
+		float body = saturate((rim - r) * 6.0);
+		amount = body * lerp(0.7, 1.0, saturate(1.0 - r));
+
+		// Splashes throw satellites and short streaks ahead of the body.
+		if (kind == KIND_SPLASH)
 		{
-			float h1 = blood_hash1(seed + k * 5.9);
-			float h2 = blood_hash1(seed + k * 2.3 + 1.0);
-			float2 s = float2(0.9 + 0.3 * h1, (h2 - 0.5) * 1.6);
-			amount = max(amount, saturate((0.12 - length(c - s)) * 20.0) * 0.6 * step(0.5, h2));
+			[unroll] for (int k = 0; k < 7; ++k)
+			{
+				float h1 = blood_hash1(seed + k * 13.1);
+				float h2 = blood_hash1(seed + k * 7.7 + 3.0);
+				float h3 = blood_hash1(seed + k * 3.3 + 11.0);
+				float2 s = float2(e * (0.95 + 0.75 * h1), (h2 - 0.5) * 1.1);
+				float rad = 0.08 + 0.2 * h3;
+				amount = max(amount, saturate((rad - length(q - s)) * 14.0) * 0.8);
+				// streak from the body edge towards the satellite
+				float2 a = float2(e * 0.8, s.y * 0.6);
+				float2 ab = s - a;
+				float t = saturate(dot(q - a, ab) / max(dot(ab, ab), 1e-4));
+				float d = length(q - (a + ab * t));
+				amount = max(amount, saturate((rad * 0.35 - d) * 18.0) * 0.6);
+			}
+		}
+		// A droplet keeps one or two tiny satellites.
+		else if (kind == KIND_DROPLET)
+		{
+			[unroll] for (int k = 0; k < 2; ++k)
+			{
+				float h1 = blood_hash1(seed + k * 5.9);
+				float h2 = blood_hash1(seed + k * 2.3 + 1.0);
+				float2 s = float2(0.9 + 0.3 * h1, (h2 - 0.5) * 1.6);
+				amount = max(amount, saturate((0.12 - length(c - s)) * 20.0) * 0.6 * step(0.5, h2));
+			}
 		}
 	}
 
-	amount *= I.A.x;
+	amount *= kind == KIND_MIST ? MIST_AMOUNT : I.A.x;
 	float wetness = I.A.y / max(I.A.x, 1e-3);
-	return float4(amount, amount * wetness, 0.0, 0.0);
+	float h = I.W.z;
+	float height = amount > 1.0 / 255.0 && h >= 0.0 && h <= 1.0 ? (1.0 + 254.0 * h) / 255.0 : 0.0;
+	return float4(amount, amount * wetness, 0.0, height);
 }

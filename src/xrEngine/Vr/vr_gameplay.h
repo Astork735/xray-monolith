@@ -58,6 +58,9 @@ ENGINE_API void RequestQuickSave();
 ENGINE_API bool HandsVisible();
 // Weapons held as their first-person animation holds them (vr_animated_grip).
 ENGINE_API bool AnimatedGrip();
+// Single shots and hand-worked actions fire as fast as the trigger and the
+// action are worked, not at the weapon's rpm (vr_mechanical_fire_rate).
+ENGINE_API bool MechanicalFireRate();
 // Physical hands: 0 off, 1 push loose objects, 2 also stop on the world
 // (vr_physical_hands); the held weapon pushes loose objects (vr_physical_weapon).
 ENGINE_API int PhysicalHands();
@@ -133,6 +136,4 @@ ENGINE_API float LabelRange();
 // A looked-at character's name and faction show within this distance
 // (vr_npc_label_range); 0 never.
 ENGINE_API float NpcLabelRange();
-// UI-layer coordinates (0..1) of a world point, for world-anchored labels.
-ENGINE_API bool WorldToUi(const Fvector& world, float& u, float& v);
 }

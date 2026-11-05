@@ -45,6 +45,22 @@ float4 main(p_blood_decal I) : SV_Target
 	float4 s = s_blood_pages.Sample(smp_rtlinear, float3(uv, I.page.y));
 	float amount = s.r;
 	if (amount < 0.004) discard;
+	// Not on surfaces behind the one the blood landed on: the page projects
+	// straight through, and a floor a few centimetres below a stained board
+	// lies in the same box. Surfaces in front of it (grass blades, litter on
+	// the floor) take the blood as before. The texel's own height,
+	// unfiltered (mips and bilinear would mix it with clean texels).
+	int2 texel = clamp(int2(uv * blood_params.x), 0, int(blood_params.x) - 1);
+	float stored = s_blood_pages.Load(int4(texel, I.page.y, 0)).a;
+	if (stored > 0.5 / 255.0)
+	{
+		float slab = tile * 0.25;							// blood::SlabSize
+		float slab_lo = (I.extent.x + 0.548) * slab;		// blood::SlabLow
+		float surface = slab_lo + (stored * 255.0 - 1.0) / 254.0 * slab;
+		// Behind: below a floor stain, above a ceiling one, into a wall.
+		float behind = (axis & 1) == 0 ? surface - along : along - surface;
+		if (behind > 0.03) discard;							// blood::kHeightTolerance
+	}
 	float weight = blood_axis_weight(Nw, axis);
 	if (weight <= 0.001) discard;
 	float wet = saturate(s.g / max(amount, 1e-3));

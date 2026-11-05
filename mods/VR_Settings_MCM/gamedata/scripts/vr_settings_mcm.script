@@ -76,6 +76,7 @@ function on_mcm_load()
 			check("vr_body"),
 			check("vr_hand_rays"),
 			check("vr_animated_grip"),
+			check("vr_mechanical_fire_rate"),
 			list("vr_hand_physics", { { 0, "Off" }, { 1, "Push loose objects" }, { 2, "Loose objects and the world" } }),
 			check("vr_weapon_physics"),
 			track("vr_throw_scale", 0.5, 4, 0.05, 2),

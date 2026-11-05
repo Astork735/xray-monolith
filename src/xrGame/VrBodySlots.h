@@ -83,7 +83,8 @@ Fvector VrOnBodySurface(CActor& actor, float x, float height, float z);
 Fvector VrOnBodyPlace(CActor& actor, const Fmatrix& pelvis, float angle, float height);
 // The hand is at the equipment (a body slot, holster or ammunition pouch),
 // where a squeeze takes from it rather than grabbing what the hand points at.
-bool VrHandAtEquipment(CActor& actor, const Fvector& position);
+// hand: only body slots that would act on that hand's squeeze count (-1: any).
+bool VrHandAtEquipment(CActor& actor, const Fvector& position, int hand=-1);
 // A hand at the side or top of the head (the helmet gestures).
 bool VrHandAtHead(const Fvector& position);
 bool VrDebugGesture();

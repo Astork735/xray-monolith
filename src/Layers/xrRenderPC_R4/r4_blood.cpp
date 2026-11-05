@@ -43,7 +43,7 @@ struct FlowConstants
 	float dt, dry_rate, flow, axis;				// flow: 0 drying only, 1 spreading
 	u32 size;
 	float seed;									// differs per step: dithers the drying
-	u32 pad1, pad2;
+	u32 origin_x, origin_y;						// first texel of the stepped rectangle
 };
 static_assert(sizeof(GpuParticle) == 48, "blood particle layout");
 static_assert(sizeof(GpuEmitter) == 64, "blood emitter layout");
@@ -53,11 +53,12 @@ static_assert(sizeof(FlowConstants) % 16 == 0, "blood constants layout");
 D3DVERTEXELEMENT9 stamp_decl[] =
 {
 	{0, 0, D3DDECLTYPE_FLOAT4, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_POSITION, 0},	// page uv, local xy
-	{0, 16, D3DDECLTYPE_FLOAT4, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_TEXCOORD, 0},	// amount, wet, seed, kind
+	{0, 16, D3DDECLTYPE_FLOAT4, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_TEXCOORD, 0},	// amount, wet, seed, kind + 8 * flags
 	{0, 32, D3DDECLTYPE_FLOAT4, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_TEXCOORD, 1},	// elongation, major, minor scale
+	{0, 48, D3DDECLTYPE_FLOAT4, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_TEXCOORD, 2},	// page tile u, v, tile size, surface height in the slab
 	D3DDECL_END()
 };
-struct StampVertex { Fvector4 p, a, b; };
+struct StampVertex { Fvector4 p, a, b, c; };
 
 D3DVERTEXELEMENT9 decal_decl[] =
 {
@@ -180,7 +181,7 @@ struct CBlood::GpuTimer
 // ------------------------------------------------------------------ lifetime
 CBlood::CBlood()
 {
-	m_emits.reserve(kMaxEmitters);
+	m_emits.reserve(kMaxEmitters * 4);
 	m_frame_emits.reserve(kMaxEmitters);
 	m_pending.reserve(1024);
 	m_stamps.reserve(kMaxStampsPerFrame * 2);
@@ -405,7 +406,11 @@ void CBlood::Emit(const BloodEmit& e)
 {
 	if (!m_ready || !e.count) return;
 	xrCriticalSectionGuard guard(m_lock);
-	if (m_emits.size() < kMaxEmitters) m_emits.push_back(e);
+	if (m_emits.size() >= kMaxEmitters * 4) return;
+	PendingEmit p;
+	p.emit = e;
+	p.due = Device.fTimeGlobal + _max(e.delay, 0.f);
+	m_emits.push_back(p);
 }
 
 void CBlood::Splat(const BloodSplatRequest& s)
@@ -530,17 +535,29 @@ void CBlood::UpdateResidency(float now)
 	// nearest-N cut stay resident, and only pages clearly nearer than that
 	// cut replace them, so walking about does not churn restores.
 	const u32 slots = u32(m_config.pages);
-	float keep_d2 = range * range, take_d2 = range * range;
+	float keep_d2 = range * range, take_d2 = range * range, cut_d2 = range * range;
 	if (candidates.size() > slots)
 	{
 		const float cut = _sqrt(candidates[slots - 1].first);
+		cut_d2 = _sqr(cut);
 		keep_d2 = _sqr(cut + kResidencyMargin);
 		take_d2 = _sqr(_max(cut - kResidencyMargin, 0.f));
 	}
+	// Resident pages within the cut are drawn. Those only kept by the margin
+	// beyond it are marked after the restores: a page clearly nearer can
+	// take their slots (marked first, nothing could be evicted, and a page
+	// next to the camera waited until the camera had moved on).
+	xr_vector<int>& margin = m_margin;
+	margin.clear();
 	for (const auto& c : candidates)
 	{
 		const blood::PageRecord& r = m_store.Record(c.second);
 		if (r.slot < 0 || c.first > keep_d2) continue;
+		if (c.first > cut_d2)
+		{
+			margin.push_back(c.second);
+			continue;
+		}
 		bool fresh = false;
 		m_store.Acquire(c.second, m_frame, cam, tile, fresh);
 		m_visible.push_back(c.second);
@@ -563,6 +580,13 @@ void CBlood::UpdateResidency(float now)
 			++m_stats_restores;
 		}
 		m_visible.push_back(c.second);
+	}
+	for (int id : margin)
+	{
+		if (m_store.Record(id).slot < 0) continue;	// gave its slot to a nearer page
+		bool fresh = false;
+		m_store.Acquire(id, m_frame, cam, tile, fresh);
+		m_visible.push_back(id);
 	}
 }
 
@@ -590,9 +614,15 @@ void CBlood::LandSplats(float now)
 	for (const PendingSplat& p : due)
 	{
 		const BloodSplatRequest& q = p.request;
-		const blood::Splat s = blood::ShapeFromImpact(ToVec(q.pos), ToVec(q.normal), ToVec(q.vel), q.volume, q.seed, now);
+		blood::ShapeHint hint;
+		hint.kind = q.kind;
+		hint.length = q.length;
+		hint.radius = q.radius;
+		hint.flags = q.flags;
+		hint.group = q.group;
+		const blood::Splat s = blood::ShapeFromImpact(ToVec(q.pos), ToVec(q.normal), ToVec(q.vel), q.volume, q.seed, now, hint);
 		blood::PageTouch touches[48];
-		const float footprint = s.radius * s.elongation * (s.kind == blood::SplatSplash ? 1.8f : 1.3f);
+		const float footprint = _max(blood::MajorExtent(s), blood::MinorExtent(s));
 		const int n = blood::PagesForSplat(s.pos, s.normal, footprint, tile, touches, 48);
 		for (int i = 0; i < n; ++i)
 		{
@@ -635,15 +665,22 @@ void CBlood::DrawStamps(float now)
 		{
 			blood::Splat s = logged;
 			const float age = _max(now - s.time, 0.f);
-			// Pools spread while their page was resident; without the
-			// simulated result, replay them at their settled size.
-			if (s.kind == blood::SplatPool && m_config.fluid && age > kFlowTime) s.radius *= 1.5f;
+			// Pools spread a little while their page was resident (about a
+			// centimetre in the flow time); without the simulated result,
+			// replay them at about their settled size.
+			if (s.kind == blood::SplatPool && m_config.fluid && age > kFlowTime) s.radius += 0.02f;
 			m_stamps.push_back({slot, s, r.key, expf(-age / dry)});
 		}
 	}
 	if (m_stamps.empty()) return;
 
-	std::sort(m_stamps.begin(), m_stamps.end(), [](const Stamp& a, const Stamp& b) { return a.slot < b.slot; });
+	// By page; in each, pools last: they are drawn with the maximum blend
+	// (element 1), the rest add up (element 0).
+	const auto is_pool = [](const Stamp& s) { return s.splat.kind == blood::SplatPool; };
+	std::sort(m_stamps.begin(), m_stamps.end(), [&is_pool](const Stamp& a, const Stamp& b)
+	{
+		return a.slot != b.slot ? a.slot < b.slot : is_pool(a) < is_pool(b);
+	});
 	m_stats_stamps += m_stamps.size();
 
 	D3D11_VIEWPORT vp = {0, 0, float(m_config.page_size), float(m_config.page_size), 0, 1};
@@ -660,8 +697,12 @@ void CBlood::DrawStamps(float now)
 	for (u32 begin = 0; begin < m_stamps.size();)
 	{
 		const int slot = m_stamps[begin].slot;
+		const bool pools = is_pool(m_stamps[begin]);
 		u32 end = begin;
-		while (end < m_stamps.size() && m_stamps[end].slot == slot && end - begin < kMaxQuadsPerDraw) ++end;
+		while (end < m_stamps.size() && m_stamps[end].slot == slot && is_pool(m_stamps[end]) == pools &&
+			end - begin < kMaxQuadsPerDraw)
+			++end;
+		RCache.set_Element(m_s_stamp->E[pools ? 1 : 0]);
 		RCache.set_RT(m_slice_rtv[slot], 0);
 
 		u32 offset = 0;
@@ -670,16 +711,26 @@ void CBlood::DrawStamps(float now)
 		for (u32 i = begin; i < end; ++i)
 		{
 			const Stamp& st = m_stamps[i];
-			const blood::StampQuad q = blood::QuadInPage(st.splat, st.key, tile);
-			const float major = st.splat.kind == blood::SplatSplash ? 1.8f : 1.3f;
-			const float seed = float(st.splat.seed & 0xffff) / 65535.f;
+			const blood::Splat& sp = st.splat;
+			const blood::StampQuad q = blood::QuadInPage(sp, st.key, tile);
+			// Quad half-axes in radii: the shader's coordinates (blood_stamp.ps).
+			const float r = _max(sp.radius, 1e-4f);
+			const float major = blood::MajorExtent(sp) / (r * _max(sp.elongation, 1.f));
+			const float minor = blood::MinorExtent(sp) / r;
+			const float seed = float(sp.seed & 0xffff) / 65535.f;
+			const int main_axis = blood::MainAxis(st.key.axis);
 			static const float corners[4][2] = {{-1, -1}, {-1, 1}, {1, -1}, {1, 1}};
 			for (int c = 0; c < 4; ++c, ++v)
 			{
 				const float x = corners[c][0], y = corners[c][1];
-				v->p.set(q.cu + q.au * x + q.bu * y, q.cv + q.av * x + q.bv * y, x, y);
-				v->a.set(st.splat.amount, st.splat.amount * st.wet, seed, float(st.splat.kind));
-				v->b.set(st.splat.elongation, major, 1.3f, 0);
+				const float pu = q.cu + q.au * x + q.bu * y, pv = q.cv + q.av * x + q.bv * y;
+				// The surface's height at this corner (linear across the quad).
+				const float along = blood::PlaneAlong(sp, main_axis, (float(st.key.u) + pu) * tile,
+				                                      (float(st.key.v) + pv) * tile);
+				v->p.set(pu, pv, x, y);
+				v->a.set(sp.amount, sp.amount * st.wet, seed, float(sp.kind) + 8.f * float(sp.flags));
+				v->b.set(_max(sp.elongation, 1.f), major, minor, r);
+				v->c.set(float(st.key.u), float(st.key.v), tile, blood::SlabHeight01(along, st.key, tile));
 			}
 		}
 		RCache.Vertex.Unlock(quads * 4, m_g_stamp->vb_stride);
@@ -723,9 +774,11 @@ void CBlood::RunFlow(float now)
 {
 	const float dry = _max(ps_r__blood_dry_time, 1.f);
 	const u32 size = u32(m_config.page_size);
-	int steps = 0;
+	// The budget is in whole pages of work: a page stepped only over the
+	// small rectangle that holds blood costs a fraction of one.
+	float work = 0.f;
 	const int pages = m_config.pages;
-	for (int n = 0; n < pages && steps < kMaxFlowPagesPerFrame; ++n)
+	for (int n = 0; n < pages && work < float(kMaxFlowPagesPerFrame); ++n)
 	{
 		const int slot = (m_flow_cursor + n) % pages;
 		const int owner = m_store.SlotOwner(slot);
@@ -737,6 +790,16 @@ void CBlood::RunFlow(float now)
 		const float interval = flowing ? kFlowStep : kDryStep;
 		const float step_dt = now - m_slot_flow_time[slot];
 		if (step_dt < interval) continue;
+		// Only where blood is (its stamps plus room to spread): elsewhere the
+		// page is clean and a step changes nothing.
+		float ru0, rv0, ru1, rv1;
+		if (!blood::PageStore::StainedRect(r, m_config.tile, blood::kStainMargin, ru0, rv0, ru1, rv1)) continue;
+		// Texel rectangle, starting on a group boundary; the groups cover it.
+		const u32 x0 = u32(ru0 * float(size)) & ~15u, y0 = u32(rv0 * float(size)) & ~15u;
+		const u32 x1 = _min(u32(ceilf(ru1 * float(size))), size), y1 = _min(u32(ceilf(rv1 * float(size))), size);
+		if (x1 <= x0 || y1 <= y0) continue;
+		const u32 groups_x = (x1 - x0 + 15) / 16, groups_y = (y1 - y0 + 15) / 16;
+		const u32 w = _min(groups_x * 16, size - x0), h = _min(groups_y * 16, size - y0);
 		m_slot_flow_time[slot] = now;
 
 		FlowConstants fc = {};
@@ -748,6 +811,8 @@ void CBlood::RunFlow(float now)
 		fc.axis = float(r.key.axis);
 		fc.size = size;
 		fc.seed = blood::Hash01(m_frame * 31u + u32(slot));
+		fc.origin_x = x0;
+		fc.origin_y = y0;
 		D3D11_MAPPED_SUBRESOURCE m;
 		if (FAILED(HW.pContext->Map(m_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) return;
 		CopyMemory(m.pData, &fc, sizeof(fc));
@@ -757,17 +822,20 @@ void CBlood::RunFlow(float now)
 		HW.pContext->CSSetConstantBuffers(0, 1, &m_cb);
 		HW.pContext->CSSetShaderResources(0, 1, &m_slice_srv[slot]);
 		HW.pContext->CSSetUnorderedAccessViews(0, 1, &m_scratch_uav, nullptr);
-		HW.pContext->Dispatch((size + 15) / 16, (size + 15) / 16, 1);
+		HW.pContext->Dispatch(groups_x, groups_y, 1);
 		ID3D11ShaderResourceView* no_srv = nullptr;
 		ID3D11UnorderedAccessView* no_uav = nullptr;
 		HW.pContext->CSSetShaderResources(0, 1, &no_srv);
 		HW.pContext->CSSetUnorderedAccessViews(0, 1, &no_uav, nullptr);
 
+		// Back only what the step wrote: the scratch page holds older pages'
+		// texels elsewhere.
 		D3D11_TEXTURE2D_DESC d;
 		m_pages->GetDesc(&d);
-		HW.pContext->CopySubresourceRegion(m_pages, D3D11CalcSubresource(0, slot, d.MipLevels), 0, 0, 0, m_scratch, 0, nullptr);
+		const D3D11_BOX box = {x0, y0, 0, x0 + w, y0 + h, 1};
+		HW.pContext->CopySubresourceRegion(m_pages, D3D11CalcSubresource(0, slot, d.MipLevels), x0, y0, 0, m_scratch, 0, &box);
 		m_mips_due[slot] = 1;
-		++steps;
+		work += _max(float(w * h) / float(size * size), 0.05f);
 	}
 	m_flow_cursor = (m_flow_cursor + 1) % _max(pages, 1);
 	HW.pContext->CSSetShader(nullptr, nullptr, 0);
@@ -776,9 +844,21 @@ void CBlood::RunFlow(float now)
 void CBlood::RunParticles(float dt)
 {
 	{
+		// Emitters whose delay is over (a drip leaving a ledge waits for the
+		// run that feeds it).
 		xrCriticalSectionGuard guard(m_lock);
-		m_frame_emits.swap(m_emits);
-		m_emits.clear();
+		m_frame_emits.clear();
+		const float now = Device.fTimeGlobal;
+		for (u32 i = 0; i < m_emits.size();)
+		{
+			if (m_emits[i].due <= now && m_frame_emits.size() < kMaxEmitters)
+			{
+				m_frame_emits.push_back(m_emits[i].emit);
+				m_emits[i] = m_emits.back();
+				m_emits.pop_back();
+			}
+			else ++i;
+		}
 	}
 	const u32 N = u32(m_config.particles);
 
@@ -920,9 +1000,13 @@ void CBlood::RenderDecals()
 			const int main = blood::MainAxis(r.key.axis);
 			int t1, t2;
 			blood::TangentAxes(main, t1, t2);
+			// The box covers the stained part of the page, not the whole tile:
+			// every pixel inside it runs the decal shader.
+			float su0, sv0, su1, sv1;
+			if (!blood::PageStore::StainedRect(r, tile, blood::kStainMargin, su0, sv0, su1, sv1)) continue;
 			float lo[3], hi[3];
-			lo[t1] = float(r.key.u) * tile; hi[t1] = lo[t1] + tile;
-			lo[t2] = float(r.key.v) * tile; hi[t2] = lo[t2] + tile;
+			lo[t1] = (float(r.key.u) + su0) * tile; hi[t1] = (float(r.key.u) + su1) * tile;
+			lo[t2] = (float(r.key.v) + sv0) * tile; hi[t2] = (float(r.key.v) + sv1) * tile;
 			const float slab = blood::SlabSize(tile);
 			const float slab_lo = float(r.key.w) * slab + blood::SlabOrigin(tile);
 			lo[main] = _max(r.lo - kBoxMargin, slab_lo);

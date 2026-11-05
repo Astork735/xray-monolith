@@ -6,6 +6,7 @@
 #include "vr_ui_policy.h"
 #include "vr_stereo.h"
 #include "vr_system.h"
+#include "vr_performance.h"
 #include "vr_config.h"
 #include "vr_input.h"
 #include "vr_overlay_draw.h"
@@ -16,6 +17,7 @@
 #include "../../Include/xrRender/UIRender.h"
 #include <commctrl.h>
 #include <tlhelp32.h>
+#include <imgui.h>
 
 
 namespace
@@ -67,7 +69,7 @@ namespace
     // device, or close the game; they must not run inside a begun XR frame.
     struct UiPointerSample
     {
-        bool valid=false, menu_active=false, level_ui_active=false, inventory_open=false;
+        bool valid=false, menu_active=false, level_ui_active=false, inventory_open=false, imgui_active=false;
         bool active=false, hit=false, down=false, right_down=false, transfer_down=false;
         int hand=-1;
         float u=-1.f, v=-1.f;
@@ -85,14 +87,31 @@ namespace
     vr::UiClickState menu_right_click;
     bool transfer_down=false;
     bool inventory_toggle_pending=false;
+    // The debug overlay (F11) as the pointer's mouse: trigger left, B right,
+    // the turning stick the wheel.
+    vr::UiClickState imgui_click, imgui_right_click;
+    vr::UiScrollRepeat imgui_scroll;
+    u32 imgui_scroll_time=0;
+    bool ImGuiPointerActive() { return Device.imgui_shown() && Device.imgui().is_input(); }
+    // No pointer on any surface: the old ray is never delivered to a new one.
+    void ClearSample(UiPointerSample& sample)
+    {
+        sample.active=sample.hit=sample.down=sample.right_down=sample.transfer_down=false;
+        sample.hand=-1;
+        sample.hands[0]=sample.hands[1]=UiPointerSample::Hand{};
+    }
+    bool MainMenuActive()
+    {
+        return g_pGamePersistent && g_pGamePersistent->m_pMainMenu && g_pGamePersistent->m_pMainMenu->IsActive();
+    }
     bool LevelUiBlocked()
     {
-        return recovering || !g_pGameLevel ||
-            (g_pGamePersistent && g_pGamePersistent->m_pMainMenu &&
-             g_pGamePersistent->m_pMainMenu->IsActive()) ||
+        return recovering || !g_pGameLevel || MainMenuActive() ||
             (g_pGamePersistent && g_pGamePersistent->VrLoadingPrompt(false));
     }
     unsigned LoadingButtons(int hand);
+    // Both hands' loading controls: the left's in bits 0-2, the right's in 3-5.
+    unsigned BothLoadingButtons() { return LoadingButtons(0) | (LoadingButtons(1)<<3); }
     void SampleUiInput()
     {
         auto& system = CVrSystem::Get();
@@ -106,16 +125,18 @@ namespace
             if (inventory_toggle.Step(true,x_down) && !LevelUiBlocked())
                 inventory_toggle_pending=true;
         }
-        IMainMenu* menu = g_pGamePersistent ? g_pGamePersistent->m_pMainMenu : nullptr;
         UiPointerSample sample;
         sample.valid=true;
-        sample.menu_active=menu && menu->IsActive();
+        sample.menu_active=MainMenuActive();
         sample.level_ui_active=!sample.menu_active && g_pGameLevel && g_pGameLevel->VrUiPointerActive();
         sample.inventory_open=sample.level_ui_active && g_pGameLevel->VrInventoryOpen();
+        // The debug overlay with its input on takes the pointer from the
+        // menus and dialogs under it, as it takes the mouse on desktop.
+        sample.imgui_active=ImGuiPointerActive();
         // Re-anchor immediately after opening/closing, and preserve that
         // world-space pose until the next toggle or recenter request.
-        system.SetMenuActive(sample.menu_active,sample.level_ui_active);
-        sample.active = (sample.menu_active || sample.level_ui_active) &&
+        system.SetMenuActive(sample.menu_active || sample.imgui_active,sample.level_ui_active);
+        sample.active = (sample.menu_active || sample.level_ui_active || sample.imgui_active) &&
             system.HasInputFocus() && input.HasRecentState() && !Console->bVisible;
         if (sample.active)
         {
@@ -123,7 +144,7 @@ namespace
             // for inventory so the right can keep holding a gun, but choose
             // the first actual panel hit rather than locking to a right pose
             // whose ray is pointing elsewhere.
-            const int dominant=vr_left_handed ? 0 : 1;
+            const int dominant=vr::DominantHand();
             const int preferred=sample.inventory_open ? 1-dominant : dominant;
             for (int pass=0;pass<2;++pass)
             {
@@ -174,13 +195,30 @@ namespace
         // pointer's until it is let go: a weapon in that hand must not take
         // it for a fresh pull the next frame (trigger and button bits).
         if (ui_pointer_owns_buttons && !sample.active)
-            loading_consumed.Consume((LoadingButtons(0) | (LoadingButtons(1)<<3)) & 0x2Du);
+            loading_consumed.Consume(BothLoadingButtons() & 0x2Du);
         ui_pointer_owns_buttons=sample.active;
         if (vr_debug && sample.active && Device.dwFrame%120==0)
             Msg("* [VR] UI pointer: level=%d inventory=%d hand=%d hit=%d uv=(%.3f %.3f) anchored=%d",
                 sample.level_ui_active,sample.inventory_open,sample.hand,sample.hit,
                 sample.u,sample.v,system.UiPanelAnchored());
         pointer_sample=sample;
+    }
+    void DispatchImGuiPointer(const UiPointerSample& sample, bool active)
+    {
+        ImGuiIO& io=ImGui::GetIO();
+        const bool on=active && sample.active && sample.hand>=0;
+        // Presses only on the panel; a drag may end off it.
+        const int left=imgui_click.Step(on,sample.down && (sample.hit || imgui_click.held));
+        const int right=imgui_right_click.Step(on,sample.right_down && (sample.hit || imgui_right_click.held));
+        if (on) io.AddMousePosEvent(sample.u*io.DisplaySize.x,sample.v*io.DisplaySize.y);
+        if (left) io.AddMouseButtonEvent(ImGuiMouseButton_Left,left>0);
+        if (right) io.AddMouseButtonEvent(ImGuiMouseButton_Right,right>0);
+        float x=0.f, y=0.f;
+        if (on) VrInput::Get().Thumbstick(TurnStick(),x,y);
+        // Timed with the continual clock: menus pause the game's.
+        const int steps=imgui_scroll.Step(on ? y : 0.f,float(Device.dwTimeContinual-imgui_scroll_time)*0.001f);
+        imgui_scroll_time=Device.dwTimeContinual;
+        if (steps) io.AddMouseWheelEvent(0.f,float(steps));
     }
     void DispatchUiInput()
     {
@@ -201,11 +239,14 @@ namespace
         const bool level_ui_active=!menu_active && g_pGameLevel && g_pGameLevel->VrUiPointerActive();
         // The surface can change between sampling and dispatch (for example
         // the X toggle above). Never deliver an old ray to a new surface.
-        if (menu_active!=sample.menu_active || level_ui_active!=sample.level_ui_active)
-        {
-            sample.active=sample.hit=sample.down=sample.right_down=sample.transfer_down=false;
-            sample.hand=-1;
-        }
+        const bool imgui_active=ImGuiPointerActive();
+        if (menu_active!=sample.menu_active || level_ui_active!=sample.level_ui_active ||
+            imgui_active!=sample.imgui_active)
+            ClearSample(sample);
+        DispatchImGuiPointer(sample,imgui_active);
+        // The surface under the overlay sees the pointer leave: a click
+        // held there is cancelled below.
+        if (imgui_active) ClearSample(sample);
         if (level_ui_active!=pointer_level_ui || sample.hand!=menu_hand)
         {
             const bool cancel_pointer=vr::CancelUiClickOnPointerChange(
@@ -318,10 +359,32 @@ namespace
     // every other frame while the game asks for it, only as large as the
     // lens shows it (vr_scope_quality): the renderer's screen-sized targets
     // are swapped for smaller ones meanwhile.
+    // The device's camera for one view (an eye, the scope): its matrices and
+    // their inverses, the camera vectors, the near plane (shaders and
+    // visibility read the one of the projection in use), FOV and aspect,
+    // and the renderer's cached transforms.
+    void SetDeviceCamera(const Fmatrix& view, const Fmatrix& project, float near_plane, float fov, float aspect)
+    {
+        Device.mView = view; Device.mProject = project;
+        Device.ViewportNear = near_plane;
+        Device.mFullTransform.mul(project, view);
+        Device.mProjectHud = project; Device.mInvProjectHud.invert(project);
+        Device.mFullTransformHud.mul(project, view);
+        Device.mInvView.invert(view); Device.mInvProject.invert(project);
+        Device.mInvFullTransform.invert(Device.mFullTransform);
+        Device.vCameraPosition = Device.mInvView.c; Device.vCameraDirection = Device.mInvView.k;
+        Device.vCameraTop = Device.mInvView.j; Device.vCameraRight = Device.mInvView.i;
+        Device.fFOV = fov; Device.fASPECT = aspect;
+        Device.mView_prev = view; Device.mProject_prev = project;
+        Device.m_pRender->SetCacheXform(Device.mView, Device.mProject);
+        Device.m_pRender->SetCacheXform_prev(Device.mView_prev, Device.mProject_prev);
+    }
     void RenderScopeView()
     {
         if (scope_fov <= 0.f || Device.dwFrame - scope_request_frame > 1 || (Device.dwFrame & 1)) return;
         CameraState restore;
+        vr::PerfViewScope perf_view(2);
+        vr::PerfScope timing(vr::PerfStage::Scope, true);
         scope_size = vr::ScopeResolution(scope_lens, eye_fov, Device.dwHeight, vr_scope_quality, scope_size);
         const bool reduced = scope_size < _min(Device.dwWidth, Device.dwHeight) &&
             vr_scope_resize_begin(scope_size);
@@ -333,19 +396,7 @@ namespace
             g_pGamePersistent->Environment().CurrentEnv->far_plane : 1000.f;
         Fmatrix view; view.build_camera_dir(scope_camera.c, scope_camera.k, scope_camera.j);
         Fmatrix project; project.build_projection(deg2rad(scope_fov), float(height) / float(width), near_plane, far_plane);
-        Device.mView = view; Device.mProject = project;
-        Device.ViewportNear = near_plane;
-        Device.mFullTransform.mul(project, view);
-        Device.mProjectHud = project; Device.mInvProjectHud.invert(project);
-        Device.mFullTransformHud.mul(project, view);
-        Device.mInvView.invert(view); Device.mInvProject.invert(project);
-        Device.mInvFullTransform.invert(Device.mFullTransform);
-        Device.vCameraPosition = Device.mInvView.c; Device.vCameraDirection = Device.mInvView.k;
-        Device.vCameraTop = Device.mInvView.j; Device.vCameraRight = Device.mInvView.i;
-        Device.fFOV = scope_fov; Device.fASPECT = float(height) / float(width);
-        Device.mView_prev = view; Device.mProject_prev = project;
-        Device.m_pRender->SetCacheXform(Device.mView, Device.mProject);
-        Device.m_pRender->SetCacheXform_prev(Device.mView_prev, Device.mProject_prev);
+        SetDeviceCamera(view, project, near_plane, scope_fov, float(height) / float(width));
         g_vr_ui_pass = false;
         g_vr_eye_index = -1;
         g_vr_rendering_eye = true;
@@ -382,32 +433,19 @@ namespace
     }
     bool RenderEye(const VrEyeRenderContext& eye, void*)
     {
+        vr::PerfViewScope perf_view(unsigned(eye.eye));
+        vr::PerfScope timing(eye.eye == 0 ? vr::PerfStage::LeftEye : vr::PerfStage::RightEye, true);
         CameraState restore;
         g_vr_ui_pass = false;
         if (!vr_render_target(eye.target, eye.width, eye.height)) return false;
         g_vr_eye_index = eye.eye;
-        Device.mView = eye.view; Device.mProject = eye.projection;
-        // Shaders and visibility read the near plane of the projection in use.
-        Device.ViewportNear = eye.near_plane;
-        Device.mFullTransform.mul(eye.projection, eye.view);
-        Device.mProjectHud = eye.projection;
-        Device.mInvProjectHud.invert(Device.mProjectHud);
-        Device.mFullTransformHud.mul(Device.mProjectHud, eye.view);
-        Device.mInvView.invert(eye.view); Device.mInvProject.invert(eye.projection);
-        Device.mInvFullTransform.invert(Device.mFullTransform);
-        Device.vCameraPosition = Device.mInvView.c; Device.vCameraDirection = Device.mInvView.k;
-        Device.vCameraTop = Device.mInvView.j; Device.vCameraRight = Device.mInvView.i;
         // Auxiliary shadow/LOD calculations still accept a symmetric FOV.
         // Give them a conservative envelope; scene rasterization uses the
-        // unmodified asymmetric projection above.
+        // unmodified asymmetric projection.
         const float vertical = (1 + _abs(eye.projection._32)) / eye.projection._22;
         const float horizontal = (1 + _abs(eye.projection._31)) / eye.projection._11;
-        Device.fFOV = rad2deg(2 * atanf(vertical));
-        Device.fASPECT = vertical / horizontal;
+        SetDeviceCamera(eye.view, eye.projection, eye.near_plane, rad2deg(2 * atanf(vertical)), vertical / horizontal);
         eye_fov = Device.fFOV;
-        Device.mView_prev = eye.view; Device.mProject_prev = eye.projection;
-        Device.m_pRender->SetCacheXform(Device.mView, Device.mProject);
-        Device.m_pRender->SetCacheXform_prev(Device.mView_prev, Device.mProject_prev);
         g_vr_rendering_eye = true;
         g_vr_eye_rendered = false;
         // The sun's cascades are fitted to one camera taking in both eyes and
@@ -464,11 +502,19 @@ namespace
             vr_comfort_vignette(params);
         }
         // The eye's depth for the compositor's reprojection, overlays included.
-        if (eye.depth && g_vr_eye_rendered) vr_copy_eye_depth(eye.depth);
+        if (eye.depth && g_vr_eye_rendered)
+        {
+            vr::PerfScope timing(vr::PerfStage::DepthCopy, true);
+            vr_copy_eye_depth(eye.depth);
+        }
         g_vr_rendering_eye = false;
         g_vr_eye_index = -1;
         // The mirror uses the eye texture while it is still acquired.
-        if (eye.eye == 0) vr_mirror(eye.target, false);
+        if (eye.eye == 0)
+        {
+            vr::PerfScope timing(vr::PerfStage::EyeMirror, true);
+            vr_mirror(eye.target, false);
+        }
         const bool ok = g_vr_eye_rendered && SUCCEEDED(CVrSystem::Get().D3DDevice()->GetDeviceRemovedReason());
         BindUi();
         return ok;
@@ -560,6 +606,12 @@ namespace vr
         torso_valid = false; g_vr_ui_pass = false; g_vr_eye_index = -1;
         height_recalibration.Reset();
         pointer_sample={}; inventory_toggle_pending=false;
+        // Let go of the overlay's buttons and give it the window again.
+        if (ImGui::GetCurrentContext())
+        {
+            DispatchImGuiPointer({},false);
+            Device.imgui().OnScreenResolutionChanged();
+        }
         vr_render_target(nullptr, 0, 0); // unbind runtime-owned images before destroying them
         CVrSystem::Get().Shutdown();
         vr_renderer_release();
@@ -591,13 +643,13 @@ namespace vr
 		menu_button_down=menu_down;
 		// A free hand at the head holding X or A: quick save, as the quick
 		// save key (outside the XR frame).
-		const bool in_menu=g_pGamePersistent && g_pGamePersistent->m_pMainMenu && g_pGamePersistent->m_pMainMenu->IsActive();
+		const bool in_menu=MainMenuActive();
 		if (quick_save_pending)
 		{
 			quick_save_pending=false;
 			if (menu_allowed && !in_menu && g_pGameLevel) g_pGameLevel->VrQuickSave();
 		}
-        loading_consumed.Filter(LoadingButtons(0) | (LoadingButtons(1)<<3));
+        loading_consumed.Filter(BothLoadingButtons());
         const bool input_active=vr::GameplayActive();
         if (gameplay_input_active && !input_active) ++gameplay_input_epoch;
         gameplay_input_active=input_active;
@@ -664,8 +716,17 @@ namespace vr
         }
         // Inventory is a level UI dialog. Use this frame's synchronized X
         // state so an open dialog can receive a second press to close.
-        loading_consumed.Filter(LoadingButtons(0) | (LoadingButtons(1)<<3));
+        loading_consumed.Filter(BothLoadingButtons());
         if (prepared) SampleUiInput();
+        // The debug overlay draws on the UI panel, not the window: its next
+        // frame lays out on the game's 1024x768 UI grid, which reads at the
+        // panel's distance (dxImGuiRender scales it to the panel texture).
+        // A frame not prepared (the headset idle) draws it on the window.
+        if (ImGui::GetCurrentContext())
+        {
+            if (prepared) ImGui::GetIO().DisplaySize={1024.f,1024.f*vr::kUiPanelAspect};
+            else Device.imgui().OnScreenResolutionChanged();
+        }
     }
     void BeginStereoFrame()
     {
@@ -702,8 +763,7 @@ namespace vr
         auto& system = CVrSystem::Get();
         Fmatrix body;
         body.invert(Device.mView);
-        const bool in_menu = g_pGamePersistent && g_pGamePersistent->m_pMainMenu &&
-            g_pGamePersistent->m_pMainMenu->IsActive();
+        const bool in_menu = MainMenuActive();
         const void* owner = g_pGameLevel && !in_menu ? g_pGameLevel->VrBodyCamera(body) : nullptr;
         if (!owner) FlattenBody(body);
         system.SetGameplayBody(body, owner);
@@ -757,7 +817,11 @@ namespace vr
     void FinishStereoFrame()
     {
         auto& system = CVrSystem::Get();
-        if (system.UiTarget()) vr_mirror(system.UiTarget(), true);
+        if (system.UiTarget())
+        {
+            vr::PerfScope timing(vr::PerfStage::UiMirror, true);
+            vr_mirror(system.UiTarget(), true);
+        }
         vr_render_target(nullptr, 0, 0);
         g_vr_ui_pass = false;
         system.SubmitFrame();
@@ -834,7 +898,7 @@ namespace vr
     {
         return CVrSystem::Get().GameplayReady() && VrInput::Get().HasRecentState() &&
             !Device.Paused() && !Console->bVisible && g_pGameLevel &&
-            !(g_pGamePersistent && g_pGamePersistent->m_pMainMenu && g_pGamePersistent->m_pMainMenu->IsActive());
+            !MainMenuActive();
     }
     unsigned GameplayInputEpoch() { return gameplay_input_epoch; }
     unsigned BodyEpoch() { return body_epoch; }
@@ -998,6 +1062,7 @@ namespace vr
     void HandHaptic(int hand, float amplitude) { if (GameplayActive()) VrInput::Get().ApplyHaptic(hand, amplitude, 25000000); }
     bool HandsVisible() { return vr_hands != 0; }
     bool AnimatedGrip() { return vr_animated_grip != 0; }
+    bool MechanicalFireRate() { return vr_mechanical_fire_rate != 0; }
     int PhysicalHands() { return vr_physical_hands; }
     int ContactDebug() { return vr_contact_debug; }
     bool BodyVisible() { return vr_body != 0; }
@@ -1077,10 +1142,6 @@ namespace vr
     float Recoil() { return vr_recoil; }
     float LabelRange() { return vr_label_range; }
     float NpcLabelRange() { return vr_npc_label_range; }
-    bool WorldToUi(const Fvector& world, float& u, float& v)
-    {
-        return GameplayActive() && CVrSystem::Get().WorldToUi(world,u,v);
-    }
     void Recenter() { ++gameplay_input_epoch; torso_valid = false; CVrSystem::Get().Recenter(); }
     void RequestQuickSave() { if (GameplayActive()) quick_save_pending = true; }
     void ForgetGameplayBody(const void* owner) { CVrSystem::Get().ForgetBody(owner); torso_valid = false; }
@@ -1114,10 +1175,10 @@ namespace vr
     bool HandButton(int) { return false; }
     bool SprintButton() { return false; }
     bool JumpButton() { return false; }
-    bool WorldToUi(const Fvector&, float& u, float& v) { u=v=-1.f; return false; }
     void HandHaptic(int, float) {}
     bool HandsVisible() { return false; }
     bool AnimatedGrip() { return false; }
+    bool MechanicalFireRate() { return false; }
     int PhysicalHands() { return 0; }
     int ContactDebug() { return 0; }
     bool BodyVisible() { return false; }

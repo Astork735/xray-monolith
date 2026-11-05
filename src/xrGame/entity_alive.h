@@ -1,6 +1,7 @@
 #pragma once
 
 #include "entity.h"
+#include "blood_spray.h"
 
 
 // Igor DEFINE_VECTOR(ref_shader, SHADER_VECTOR, SHADER_VECTOR_IT);
@@ -150,7 +151,10 @@ protected:
 		float strength, start, next;
 		float stop;		// when it stopped bleeding, 0 while it bleeds
 		float trickle;	// how far blood has run down the clothing (m)
-		float bled;		// volume poured at the corpse's pool so far
+		Fvector last_pos;	// world position at the last check, for its velocity
+		float last_time;	// 0: not checked yet
+		float contact_next;	// next check for a surface it touches
+		blood_spray::ContactState contact;
 	};
 	xr_vector<BloodWound> m_blood_wounds;
 	u32 m_blood_rows_frame = u32(-1);
@@ -158,6 +162,14 @@ protected:
 	Fvector4 m_blood_rows[16];
 	void AddBloodWound(u16 bone, const Fvector& bone_pos, const Fvector& dir, float strength);
 	void UpdateBloodWounds();
+	// All the blood the body can lose, and its corpse's one pool.
+	blood_spray::BodyBlood m_blood;
+	float m_blood_mass = 0.f;
+	u16 m_pool_bone = u16(-1);		// the wound its corpse oozes from (BI_NONE: none)
+	Fvector m_pool_local = {0.f, 0.f, 0.f};
+	float m_pool_next = 0.f;
+	blood_spray::BodyBlood& Blood();
+	void UpdateCorpsePool(IKinematics* V);
 public:
 	virtual u32 GetBloodWounds(Fvector4* rows, u32 max_wounds);
 protected:

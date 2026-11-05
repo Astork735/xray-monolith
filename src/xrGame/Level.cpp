@@ -1717,8 +1717,11 @@ void CLevel::OnRenderVrExtras()
             float range=0.f;
             if (!weapon || !weapon->VrHolsterPoint(*actor,centre,range)) continue;
             bool in_reach=false;
+            // In the hand: only once letting go there puts it back
+            // (ReleaseWanted), so a lit ring always means it will go.
             if (active==weapon)
-                in_reach=vr::HandTransform(weapon->VrWeaponHand(),false,hand) && hand.c.distance_to(centre)<=range;
+                in_reach=weapon->VrHolsterArmed() && vr::HandTransform(weapon->VrWeaponHand(),false,hand) &&
+                    hand.c.distance_to(centre)<=range;
             else if (!active)
                 for (int side=0;side<2 && !in_reach;++side)
                     in_reach=vr::HandTransform(side,false,hand) && hand.c.distance_to(centre)<=range;

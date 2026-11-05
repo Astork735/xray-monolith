@@ -304,7 +304,7 @@ void CEntityAlive::Hit(SHit* pHDS)
 				Fvector centre;
 				Center(centre);
 				const float strength = HDS.damage() / _max(m_fNominalHit, EPS);
-				blood_spray::Blast(*this, centre, HDS.dir, strength);
+				blood_spray::Blast(*this, centre, HDS.dir, strength, Blood());
 				if (IKinematics* K = smart_cast<IKinematics*>(Visual()))
 					for (int i = 0; i < 3 && strength > 0.3f; ++i)
 						AddBloodWound(u16(::Random.randI(K->LL_BoneCount())), Fvector().set(0, 0, 0), HDS.dir, strength);
@@ -405,7 +405,33 @@ void CEntityAlive::BloodyWallmarks(float P, const Fvector& dir, s16 element,
 	//вычислить координаты попадания
 	IKinematics* V = smart_cast<IKinematics*>(Visual());
 
-	Fvector start_pos = position_in_object_space;
+	Fvector bone_pos = position_in_object_space;
+	if (V && ::Render->blood_active() && u16(element) == V->LL_GetBoneRoot() &&
+		position_in_object_space.square_magnitude() < EPS)
+	{
+		// Mutant melee names the root bone with no offset (CBaseMonster::
+		// HitEntity); on most models the root is at the feet. The wound goes
+		// on the body, on the side facing the attacker, at the nearest bone.
+		Fvector centre, surface;
+		Center(centre);
+		surface.mad(centre, dir, -0.5f * Radius());
+		u16 nearest = V->LL_GetBoneRoot();
+		float best = flt_max;
+		for (u16 b = 0; b < V->LL_BoneCount(); ++b)
+		{
+			Fmatrix M;
+			M.mul_43(XFORM(), V->LL_GetBoneInstance(b).mTransform);
+			const float d = M.c.distance_to_sqr(surface);
+			if (d < best) { best = d; nearest = b; }
+		}
+		Fmatrix M, inv;
+		M.mul_43(XFORM(), V->LL_GetBoneInstance(nearest).mTransform);
+		inv.invert(M);
+		inv.transform_tiny(bone_pos, surface);
+		element = s16(nearest);
+	}
+
+	Fvector start_pos = bone_pos;
 	if (V)
 	{
 		Fmatrix& m_bone = (V->LL_GetBoneInstance(u16(element))).mTransform;
@@ -419,8 +445,8 @@ void CEntityAlive::BloodyWallmarks(float P, const Fvector& dir, s16 element,
 	if (::Render->blood_active())
 	{
 		const float strength = small_entity * P / _max(m_fNominalHit, EPS);
-		blood_spray::Wound(*this, start_pos, dir, strength, element);
-		AddBloodWound(u16(element), position_in_object_space, dir, strength);
+		blood_spray::Wound(*this, start_pos, dir, strength, element, Blood());
+		AddBloodWound(u16(element), bone_pos, dir, strength);
 		return;
 	}
 
@@ -584,10 +610,14 @@ void CEntityAlive::AddBloodWound(u16 bone, const Fvector& bone_pos, const Fvecto
 	w.local_down = local_down;
 	w.strength = _min(strength, 2.f);
 	w.start = Device.fTimeGlobal;
-	w.next = w.start + ::Random.randF(0.3f, 0.6f);
+	// Clothing soaks up the first blood: drips start a moment after the hit.
+	// An artery spurts at once.
+	w.next = w.start + (w.strength > 1.2f ? ::Random.randF(0.3f, 0.6f) : ::Random.randF(1.5f, 3.f));
 	w.stop = 0.f;
 	w.trickle = 0.f;
-	w.bled = 0.f;
+	w.last_pos.set(0.f, 0.f, 0.f);
+	w.last_time = 0.f;
+	w.contact_next = w.start;
 	if (m_blood_wounds.size() < 8)
 		m_blood_wounds.push_back(w);
 	else
@@ -596,6 +626,18 @@ void CEntityAlive::AddBloodWound(u16 bone, const Fvector& bone_pos, const Fvecto
 		auto oldest = std::min_element(m_blood_wounds.begin(), m_blood_wounds.end(),
 		                               [](const BloodWound& a, const BloodWound& b) { return a.start < b.start; });
 		*oldest = w;
+	}
+	// A corpse shot again gives its pool a little more, within the same cap
+	// (and only from the blood it still has).
+	if (!g_Alive() && m_blood.target > 0.f)
+	{
+		const float size = blood_spray::SizeFactor(m_blood_mass);
+		m_blood.target = _min(m_blood.target + size * 20.f * w.strength, size * 65.f);
+		if (m_pool_bone == BI_NONE)
+		{
+			m_pool_bone = bone;
+			m_pool_local = bone_pos;
+		}
 	}
 }
 
@@ -623,23 +665,92 @@ void CEntityAlive::UpdateBloodWounds()
 			continue;
 		}
 		++i;
-		if (w.stop > 0.f) continue;
-		if (age > duration)
-		{
-			w.stop = now;
-			continue;
-		}
-		if (now < w.next) continue;
-		w.next = now + (alive ? ::Random.randF(0.7f, 1.0f) : ::Random.randF(1.0f, 2.0f));
+		if (w.stop <= 0.f && age > duration) w.stop = now;
+		const bool bleeding = w.stop <= 0.f;
+		// Blood on the clothing stays wet for a minute after it stops.
+		const float wet = bleeding ? 1.f : clampr(1.f - (now - w.stop) / 60.f, 0.f, 1.f);
+		const bool bleed_due = bleeding && now >= w.next;
+		const bool contact_due = wet > 0.f && now >= w.contact_next;
+		if (!bleed_due && !contact_due) continue;
 		Fmatrix M;
 		M.mul_43(XFORM(), V->LL_GetBoneInstance(w.bone).mTransform);
 		Fvector pos, dir;
 		M.transform_tiny(pos, w.local);
 		M.transform_dir(dir, w.local_dir);
 		dir.normalize_safe();
+		// Velocity since the last check (they are a fraction of a second apart).
+		Fvector velocity = {0.f, 0.f, 0.f};
+		if (w.last_time > 0.f && now - w.last_time > 1e-3f && now - w.last_time < 2.f)
+			velocity.sub(pos, w.last_pos).mul(1.f / (now - w.last_time));
+		w.last_pos = pos;
+		w.last_time = now;
+		const float intensity = w.strength * (1.f - _min(age / duration, 1.f));
+		if (contact_due)
+		{
+			w.contact_next = now + 0.25f;
+			blood_spray::Contact(*this, pos, dir, wet, w.strength, w.contact, Blood());
+		}
+		if (!bleed_due) continue;
+		// Drops fall faster the worse the wound: from one every second and a
+		// half to about three a second.
+		w.next = now + (alive ? (1.6f - 1.25f * clampr(intensity / 1.5f, 0.f, 1.f)) * ::Random.randF(0.8f, 1.2f)
+		                      : ::Random.randF(1.0f, 2.0f));
 		if (pos.distance_to_sqr(Device.vCameraPosition) > _sqr(50.f)) continue;
-		blood_spray::Bleed(*this, pos, dir, w.strength * (1.f - age / duration), alive, w.trickle, w.bled);
+		blood_spray::Bleed(*this, pos, dir, velocity, intensity, alive, w.trickle, Blood());
 	}
+	if (!alive && !m_blood_wounds.empty()) UpdateCorpsePool(V);
+}
+
+// The body's blood, sized by its mass the first time it bleeds.
+blood_spray::BodyBlood& CEntityAlive::Blood()
+{
+	if (m_blood.left < 0.f)
+	{
+		m_blood_mass = 0.f;
+		if (CCharacterPhysicsSupport* support = character_physics_support())
+			if (support->movement()) m_blood_mass = support->movement()->GetMass();
+		if (m_blood_mass < 1.f) m_blood_mass = GetMass();
+		if (m_blood_mass < 1.f) m_blood_mass = 80.f;
+		m_blood.left = blood_spray::Supply(m_blood_mass);
+	}
+	return m_blood;
+}
+
+// A corpse oozes into one pool, below its lowest wound when it died, sized
+// by its wounds and by the blood it still has; it stops by itself.
+void CEntityAlive::UpdateCorpsePool(IKinematics* V)
+{
+	blood_spray::BodyBlood& blood = Blood();
+	const float now = Device.fTimeGlobal;
+	if (blood.target <= 0.f)
+	{
+		float severity = 0.f, lowest = flt_max;
+		for (const BloodWound& w : m_blood_wounds)
+		{
+			severity += w.strength;
+			Fmatrix M;
+			M.mul_43(XFORM(), V->LL_GetBoneInstance(w.bone).mTransform);
+			Fvector pos;
+			M.transform_tiny(pos, w.local);
+			if (pos.y < lowest)
+			{
+				lowest = pos.y;
+				m_pool_bone = w.bone;
+				m_pool_local = w.local;
+			}
+		}
+		// A typical fatal shot: a pool of 35-50 cm; the worst case, about 70.
+		blood.target = blood_spray::SizeFactor(m_blood_mass) * (15.f + 20.f * _min(severity, 2.5f));
+		m_pool_next = now;
+	}
+	if (m_pool_bone == BI_NONE || m_pool_bone >= V->LL_BoneCount() || now < m_pool_next) return;
+	// Five times a second: the pool grows a millimetre or two at a time.
+	m_pool_next = now + 0.2f;
+	Fmatrix M;
+	M.mul_43(XFORM(), V->LL_GetBoneInstance(m_pool_bone).mTransform);
+	Fvector pos;
+	M.transform_tiny(pos, m_pool_local);
+	if (!blood_spray::Ooze(*this, pos, blood)) m_pool_bone = BI_NONE;
 }
 
 // Each wound as the body shaders draw it: a run of blood from the wound
@@ -720,7 +831,7 @@ void CEntityAlive::UpdateBloodDrops()
 			CParticlesPlayer::GetBonePos(this, pWound->GetBoneNum(), Fvector().set(0, 0, 0), pos);
 			pos.add(pos_distort);
 			if (::Render->blood_active())
-				blood_spray::Drip(*this, pos, m_fBloodDropSize);
+				blood_spray::Drip(*this, pos, m_fBloodDropSize, Blood());
 			else
 				PlaceBloodWallmark(Fvector().set(0.f, -1.f, 0.f), pos, m_fBloodMarkDistance, m_fBloodDropSize,
 				                   &**m_pBloodDropsVector);

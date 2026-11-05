@@ -1,9 +1,59 @@
 #pragma once
 #include <initializer_list>
 #include <vector>
+#include <algorithm>
+#include <cmath>
+#include <cctype>
 
 namespace vr
 {
+inline bool MagazineBoneName(const char* name)
+{
+    if (!name) return false;
+    const auto starts=[](const char* at, const char* term)
+    {
+        for (; *term; ++term, ++at)
+            if (!*at || std::tolower(static_cast<unsigned char>(*at)) != *term) return false;
+        return true;
+    };
+    if (starts(name,"mag") && (name[3] == 0 || name[3] == '_')) return true;
+    for (const char* at=name; *at; ++at)
+        if (starts(at,"magaz") || starts(at,"wpn_mag")) return true;
+    return false;
+}
+
+// Compare two sampled local poses, projected onto a weapon axis. Callers
+// use the animation's first pose: a fixed bind-to-animation rotation is not
+// evidence that a magazine or cosmetic part is a manually operated action.
+template<class Matrix>
+float TurnAbout(const Matrix& first, const Matrix& now, const Matrix& parent, int axis)
+{
+    float turn=0.f;
+    for (int own=0; own<3; ++own)
+    {
+        auto a=own==0 ? first.i : own==1 ? first.j : first.k;
+        auto b=own==0 ? now.i : own==1 ? now.j : now.k;
+        const auto transform=[&](auto& v)
+        {
+            const auto p=v;
+            v.x=p.x*parent.i.x+p.y*parent.j.x+p.z*parent.k.x;
+            v.y=p.x*parent.i.y+p.y*parent.j.y+p.z*parent.k.y;
+            v.z=p.x*parent.i.z+p.y*parent.j.z+p.z*parent.k.z;
+        };
+        transform(a); transform(b);
+        if (axis==2) a.z=b.z=0.f; else a.x=b.x=0.f;
+        const float la=std::sqrt(a.x*a.x+a.y*a.y+a.z*a.z);
+        const float lb=std::sqrt(b.x*b.x+b.y*b.y+b.z*b.z);
+        if (la<0.5f || lb<0.5f) continue;
+        const float dot=(a.x*b.x+a.y*b.y+a.z*b.z)/(la*lb);
+        turn=std::max(turn,std::acos(std::max(-1.f,std::min(dot,1.f))));
+    }
+    return turn;
+}
+
+inline const char* PoseBoneName(const char* name) { return name; }
+template<class Name> const char* PoseBoneName(const Name& name) { return name.c_str(); }
+
 // The overwrite pose callbacks restore full hierarchy poses, so the renderer
 // would still skin a hidden bone that shares a mesh chunk with visible ones
 // (the stock PM magazine shares the pistol's chunk). Collapse only the
@@ -23,14 +73,16 @@ void CollapseHiddenSkinning(Model& model)
 }
 
 // Shared private-model pose path. The pose buffer must outlive the model.
-template<class Model, class Poses, class Callback>
+// `calculate` false: the caller recalculates the bones itself afterwards.
+template<class Model, class Poses, class Callback, class HiddenNames=std::initializer_list<const char*>>
 void ApplyWeaponPose(Model& model, Poses& poses, Callback callback, unsigned callback_type,
     const char* moving_bone, float travel, const char* rounds_bone,
     std::initializer_list<const char*> detachable_bones, bool magazine_only,
     bool magazine_inserted, bool rounds_visible, const char* hidden_bone=nullptr,
     std::initializer_list<const char*> hidden_bones={},
     std::initializer_list<const char*> extra_detachable_bones={},
-    const char* handle_bone=nullptr, float handle_travel=0.f)
+    const char* handle_bone=nullptr, float handle_travel=0.f,
+    const HiddenNames& reload_magazines={}, bool calculate=true)
 {
     Poses bind;
     model.LL_GetBindTransform(bind);
@@ -62,8 +114,24 @@ void ApplyWeaponPose(Model& model, Poses& poses, Callback callback, unsigned cal
     if (forced_hidden<count) state[forced_hidden]=0;
     if (bullets<count && !rounds_visible) state[bullets]=0;
     mark(hidden_bones,0);
+    // Names are resolved on this visual, not reused as IDs from the weapon
+    // skeleton: dedicated loose-magazine assets may have a different layout.
+    for (const auto& name:reload_magazines)
+    {
+        const char* text=PoseBoneName(name);
+        const auto id=text && *text ? model.LL_BoneID(text) : missing;
+        if (id<count) state[id]=-2;
+    }
     const auto visible=[&](unsigned short i)
     {
+        // A reload-only copy and all its children stay hidden even if a
+        // child also appears in an explicit rounds/attachment list.
+        if (reload_magazines.size())
+            for (unsigned short a=i, depth=0; depth<count && a<count; ++depth)
+            {
+                if (state[a]==-2) return false;
+                a=model.LL_GetData(a).GetParentID();
+            }
         for (unsigned short depth=0;depth<count && i<count;++depth)
         {
             if (state[i]>=0) return state[i]>0;
@@ -91,6 +159,7 @@ void ApplyWeaponPose(Model& model, Poses& poses, Callback callback, unsigned cal
         bone.mTransformHidden=bind[i];
         bone.set_callback(callback_type,callback,&poses[i],true);
     }
+    if (!calculate) return;
     model.CalculateBones_Invalidate();
     model.CalculateBones(true);
     CollapseHiddenSkinning(model);

@@ -23,15 +23,22 @@ void CWeaponPM::AddShotEffector()
 void CWeaponPM::state_Fire(float dt)
 {
     if (!VrMode()) { inherited::state_Fire(dt); return; }
-    // PM keeps its established one-shot and camera-to-muzzle obstruction rule.
-    // The shared component owns chamber, slide, magazine, pose, and cleanup.
+    // The fire mode as on the desktop (single, burst or automatic, as the APS
+    // has), with the camera-to-muzzle obstruction rule. The shared component
+    // owns chamber, slide, magazine, pose, and cleanup.
     Fmatrix world;
-    if ((!IsWorking() && !m_bFireSingleShot) || !vr::GameplayActive() ||
-        !VrCanFire() || !VrTransform(world) || m_magazine.empty())
+    if ((!IsWorking() && !m_bFireSingleShot) || !vr::GameplayActive() || !VrTransform(world) ||
+        m_magazine.empty() || bMisfire)
     {
         StopShooting(); SwitchState(eIdle); return;
     }
     fShotTimeCounter-=dt;
+    // Between shots of a burst the slide is still cycling: wait for it.
+    if (!VrCanFire())
+    {
+        if (m_iShotNum>0 && VrCycling()) return;
+        StopShooting(); SwitchState(eIdle); return;
+    }
     if (fShotTimeCounter>0) return;
     const Fvector muzzle=get_LastFP();
     const Fvector anchor=smart_cast<CActor*>(H_Parent())->cam_FirstEye()->vPosition;
@@ -48,10 +55,13 @@ void CWeaponPM::state_Fire(float dt)
     if (!bMisfire)
     {
         OnShot(); FireTrace(muzzle,world.k);
-        vr::HandHaptic(1,0.35f);
+        vr::HandHaptic(VrWeaponHand(),0.35f);
     }
     else OnEmptyClick();
     m_bFireSingleShot=false;
-    fShotTimeCounter=fOneShotTime;
+    fShotTimeCounter=GetCurrentFireMode()>=2 || cycleDownCheck() ? fModeShotTime : VrShotTime(fOneShotTime);
+    // Automatic fires while the trigger is held (released: FireEnd stops
+    // it), a burst up to its length; single fire is one shot per pull.
+    if (!bMisfire && IsWorking() && (m_iQueueSize<0 || m_iShotNum<m_iQueueSize)) return;
     StopShooting(); SwitchState(eIdle);
 }

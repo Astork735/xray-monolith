@@ -19,9 +19,29 @@
 #ifdef VR_ENABLED
 #include "Vr/vr_config.h"
 #include "Vr/vr_stereo.h"
+#include "Vr/vr_performance.h"
 #endif
 
 #ifdef VR_ENABLED
+class CCC_VrPerfCapture : public IConsole_Command
+{
+public:
+    explicit CCC_VrPerfCapture(LPCSTR name) : IConsole_Command(name) { bEmptyArgsHandled = TRUE; }
+    void Execute(LPCSTR args) override
+    {
+        if (EQ(args, "start"))
+        {
+            if (!vr::StereoActive()) { Msg("! [VR perf] start requires an active VR session"); return; }
+            vr::PerfRequestStart();
+        }
+        else if (EQ(args, "stop")) vr::PerfRequestStop();
+        else if (!args[0] || EQ(args, "status")) vr::PerfPrintStatus();
+        else InvalidSyntax();
+    }
+    void Info(TInfo& info) override { xr_strcpy(info, "start / stop / status (temporary, not saved)"); }
+    void Save(IWriter*) override {} // captures never resume from user.ltx or a native save
+};
+
 class CCC_VrRecenter : public IConsole_Command
 {
 public:
@@ -1061,11 +1081,13 @@ void CCC_Register()
 	// Native OpenXR VR (see docs/VR.md). Persisted to user.ltx; the "-vr"/"-novr"
 	// command line flags override these for a single run.
 	CMD1(CCC_VrRecenter, "vr_recenter");
+    CMD1(CCC_VrPerfCapture, "vr_perf_capture");
 	CMD4(CCC_Integer, "vr_enabled", &vr_enabled, 0, 2);            // 0 off, 1 prefer, 2 force
 	CMD4(CCC_Integer, "vr_tracking_origin", &vr_tracking_origin, 0, 1); // 0 seated, 1 standing
 	CMD4(CCC_Float, "vr_world_scale", &vr_world_scale, 0.1f, 10.0f);
 	CMD4(CCC_Float, "vr_near_plane", &vr_near_plane, 0.01f, 0.2f);
 	CMD4(CCC_Integer, "vr_animated_grip", &vr_animated_grip, 0, 1);
+	CMD4(CCC_Integer, "vr_mechanical_fire_rate", &vr_mechanical_fire_rate, 0, 1);
 	CMD4(CCC_Integer, "vr_hand_physics", &vr_physical_hands, 0, 2);
 	CMD4(CCC_Integer, "vr_weapon_physics", &vr_physical_weapon, 0, 1);
 	CMD4(CCC_Float, "vr_scope_zoom", &vr_scope_zoom, 0.2f, 4.0f);

@@ -24,11 +24,6 @@ namespace vr
 	void ToEngineBasis(const XrQuaternionf& q,
 	                   Fvector& out_right, Fvector& out_up, Fvector& out_forward);
 
-	// Build an engine view (world->view) matrix exactly like CCameraFirstEye /
-	// CCameraManager do, from a head pose. Also reports position/dir/up.
-	Fmatrix ToEngineView(const XrPosef& pose,
-	                     Fvector& out_position, Fvector& out_direction, Fvector& out_up);
-
 	// Asymmetric perspective projection from an OpenXR FOV, matching the layout
 	// of Fmatrix::build_projection_HAT (row vectors, _ij == m[i-1][j-1]).
 	Fmatrix MakeAsymmetricProjection(const XrFovf& fov, float near_plane, float far_plane);

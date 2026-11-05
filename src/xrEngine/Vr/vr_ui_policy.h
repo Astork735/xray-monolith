@@ -10,18 +10,10 @@ namespace vr
 // and the font renderer narrows glyphs drawn on the panel to match
 // (dxFontRender, while g_vr_ui_pass).
 constexpr float kUiPanelAspect = 0.75f;
-inline bool QuadRayUv(const Fvector& origin, const Fvector& direction,
-    float distance, float width, float height, float& u, float& v)
-{
-    if (!(direction.z > 0.000001f && width > 0 && height > 0)) return false;
-    const float t = (distance-origin.z)/direction.z;
-    if (!(t > 0) || !std::isfinite(t)) return false;
-    u = 0.5f + (origin.x+t*direction.x)/width;
-    v = 0.5f - (origin.y+t*direction.y)/height;
-    return std::isfinite(u) && std::isfinite(v) && u >= 0 && u <= 1 && v >= 0 && v <= 1;
-}
-// Keep a tracked cursor moving at the panel edge even when a controller ray
-// lands just outside the quad. The inside flag still gates actual clicks.
+// Where a ray from the eye (origin, direction in the head's frame) meets the
+// UI panel `distance` ahead: u, v across it, clamped to its edges so a
+// tracked cursor keeps moving there when the ray lands just outside. The
+// inside flag still gates actual clicks.
 inline bool QuadRayCursor(const Fvector& origin, const Fvector& direction,
     float distance, float width, float height, float& u, float& v, bool& inside)
 {

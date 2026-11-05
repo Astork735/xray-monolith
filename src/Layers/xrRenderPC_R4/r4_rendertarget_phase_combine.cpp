@@ -1,4 +1,5 @@
 #include "stdafx.h"
+#include "../../xrEngine/Vr/vr_performance.h"
 #include "../../xrEngine/igame_persistent.h"
 #include "../../xrEngine/environment.h"
 
@@ -70,6 +71,9 @@ void CRenderTarget::phase_combine()
 		t_LUM_dest->surface_set(rt_LUM_pool[gpu_id * 2 + 1]->pSurface);
 	}
 
+	// VR capture only (vr_perf_capture): the parts of this pass in order.
+	vr::PerfSection perf;
+	perf.Next(vr::PerfStage::PostAo);
 	if (RImplementation.o.ssao_hdao && RImplementation.o.ssao_ultra)
 	{
 		if (ps_r_ssao > 0)
@@ -151,6 +155,7 @@ void CRenderTarget::phase_combine()
 	if (ps_r2_ls_flags.test(R2FLAG_EXP_SPLIT_SCENE)) split_the_scene_to_minimize_wait = TRUE;
 
 	// draw skybox
+	perf.Next(vr::PerfStage::PostSky);
 	if (1)
 	{
 		//	Moved to shader!
@@ -192,6 +197,7 @@ void CRenderTarget::phase_combine()
 	}*/
 
 	// Draw full-screen quad textured with our scene image
+	perf.Next(vr::PerfStage::PostCombine);
 	if (!_menu_pp)
 	{
 		PIX_EVENT(combine_1);
@@ -332,6 +338,7 @@ void CRenderTarget::phase_combine()
 	}
 
 	//Copy previous rt
+	perf.Next(vr::PerfStage::PostWater);
 	if (!RImplementation.o.dx10_msaa)
 		HW.pContext->CopyResource(rt_Generic_temp->pTexture->surface_get(), rt_Generic_0->pTexture->surface_get());
 	else
@@ -414,6 +421,7 @@ void CRenderTarget::phase_combine()
 	}
 
 	// Forward rendering
+	perf.Next(vr::PerfStage::PostForward);
 	{
 		PIX_EVENT(Forward_rendering);
 
@@ -447,6 +455,7 @@ void CRenderTarget::phase_combine()
 	}
 
 	// Perform blooming filter and distortion if needed
+	perf.Next(vr::PerfStage::PostBloom);
 	RCache.set_Stencil(FALSE);
 
 	if (RImplementation.o.dx10_msaa)
@@ -509,6 +518,7 @@ void CRenderTarget::phase_combine()
 
 
 
+	perf.Next(vr::PerfStage::PostScatter);
 	if (!_menu_pp)
 	{
 		if (ps_sunshafts_mode == R2SS_SCREEN_SPACE || ps_sunshafts_mode == R2SS_COMBINE_SUNSHAFTS)
@@ -532,6 +542,7 @@ void CRenderTarget::phase_combine()
 	}
 
 	//Compute blur textures
+	perf.Next(vr::PerfStage::PostBlur);
 	if (!Device.m_SecondViewport.IsSVPFrame()) // Temp fix for blur buffer and SVP
 		phase_blur();
 
@@ -553,7 +564,8 @@ void CRenderTarget::phase_combine()
 		phase_dof();
 	}
 
-	phase_lut();	
+	perf.Next(vr::PerfStage::PostGrade);
+	phase_lut();
 
 	if(ps_r2_mask_control.x > 0)
 	{
@@ -578,6 +590,7 @@ void CRenderTarget::phase_combine()
 	}
 
     //SMAA
+	perf.Next(vr::PerfStage::PostAa);
 	if (ps_smaa_quality)
 	{
         //PIX_EVENT(SMAA);
@@ -594,6 +607,7 @@ void CRenderTarget::phase_combine()
 		HW.pContext->CopyResource(rt_ssfx_prevPos->pTexture->surface_get(), rt_Position->pTexture->surface_get());
 
 	// PP enabled ?
+	perf.Next(vr::PerfStage::PostFinal);
 	//	Render to RT texture to be able to copy RT even in windowed mode.
 	BOOL PP_Complex = u_need_PP() | (BOOL)RImplementation.m_bMakeAsyncSS;
 	if (_menu_pp) PP_Complex = FALSE;

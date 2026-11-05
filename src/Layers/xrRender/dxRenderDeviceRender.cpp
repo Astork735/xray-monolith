@@ -2,6 +2,7 @@
 #include "dxRenderDeviceRender.h"
 
 #include "ResourceManager.h"
+#include "../../xrEngine/Vr/vr_performance.h"
 #include "../../xrEngine/shader_bus.h"
 
 // a shader bus texture lane's $user$bus_ alias and the texture it shows
@@ -515,6 +516,7 @@ void dxRenderDeviceRender::End()
 	// The runtime presents the headset. The desktop mirror may skip a busy
 	// present rather than pacing the headset against the desktop monitor.
 	if (g_vr_owns_present || (!Device.m_SecondViewport.IsSVPFrame() && !Device.m_SecondViewport.isCamReady)) {
+		vr::PerfScope timing(vr::PerfStage::Present);
 		HW.m_pSwapChain->Present(present_interval, present_flags);
 	}
 #else //!USE_DX10 || USE_DX11

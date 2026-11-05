@@ -7,6 +7,7 @@
 #include "Weapon.h"
 #include "VrWeaponInteraction.h"
 #include "../xrEngine/Vr/vr_stereo.h"
+#include "../xrEngine/Vr/vr_gameplay.h"
 #include "ParticlesObject.h"
 #include "entity_alive.h"
 #include "inventory_item_impl.h"
@@ -284,6 +285,10 @@ void CWeapon::VrPrepareSave()
 {
     if (m_vr_interaction) m_vr_interaction->PrepareSave();
 }
+void CWeapon::VrPrepareDrop()
+{
+    if (m_vr_interaction) m_vr_interaction->PrepareSave(true);
+}
 void CWeapon::VrPrepareSnapshot()
 {
     if (m_vr_interaction) m_vr_interaction->PrepareSnapshot();
@@ -292,9 +297,25 @@ bool CWeapon::VrCanFire() const
 {
     return !m_vr_interaction || m_vr_interaction->CanFire();
 }
+float CWeapon::VrShotTime(float native)
+{
+    if (!m_vr_interaction || !m_vr_interaction->Mode() || !vr::MechanicalFireRate() || GetCurrentFireMode()!=1)
+        return native;
+    // The trigger is released and pulled again between single shots, and
+    // the action cycles (VR cycle 30-90 ms) or is worked by hand first.
+    return std::min(native,0.06f);
+}
+bool CWeapon::VrCycling() const
+{
+    return m_vr_interaction && m_vr_interaction->Cycling();
+}
 bool CWeapon::VrBlockReload() const
 {
     return m_vr_interaction && m_vr_interaction->BlockReload();
+}
+bool CWeapon::VrHolsterArmed() const
+{
+    return m_vr_interaction && m_vr_interaction->HolsterArmed();
 }
 bool CWeapon::VrAimTransform(Fmatrix& world) const
 {
@@ -1361,7 +1382,10 @@ BOOL CWeapon::net_Spawn(CSE_Abstract* DC)
 
 void CWeapon::net_Destroy()
 {
-	if (H_Parent()) VrPrepareSave();
+	// Not while the level is torn down (CLevel::net_Stop clears bReady
+	// first): the owner's inventory may already be gone, and the rounds are
+	// discarded with the level anyway.
+	if (H_Parent() && g_pGameLevel && g_pGameLevel->bReady) VrPrepareSave();
 	if (m_vr_interaction) m_vr_interaction->Destroy();
 	inherited::net_Destroy();
 
@@ -1536,7 +1560,13 @@ void CWeapon::shedule_Update(u32 dT)
 
 void CWeapon::OnH_B_Independent(bool just_before_destroy)
 {
-	VrPrepareSave();
+	// Leaving its owner: rounds normalized as for a save. Unless it is about to
+	// be destroyed, it keeps its measured model for the next pickup.
+	if (g_pGameLevel && g_pGameLevel->bReady)
+	{
+		if (just_before_destroy) VrPrepareSave();
+		else VrPrepareDrop();
+	}
 	RemoveShotEffector();
 
 	inherited::OnH_B_Independent(just_before_destroy);

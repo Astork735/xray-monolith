@@ -103,7 +103,7 @@ inline bool GatesPass(const GateList& list, const ReloadFacts& facts, int* block
 // anywhere else it falls back to the box. Taking the box out unseats it.
 struct BeltDef
 {
-    PartVec box_end{}, tray{};   // model space, at rest
+    V3 box_end{}, tray{};   // model space, at rest
     float grab_radius=0.06f, tolerance=0.035f;
     bool used=false;
 };
@@ -111,7 +111,7 @@ struct BeltState
 {
     bool seated=true;
     int hand=-1;
-    PartVec carried{}; // where the held end is (model space)
+    V3 carried{}; // where the held end is (model space)
 };
 enum BeltEvent : unsigned { BeltTaken=1u, BeltDropped=2u, BeltSeated=4u };
 
@@ -124,13 +124,13 @@ inline unsigned StepBelt(const BeltDef& def, BeltState& state, int hand, const P
     {
         if (!in.tracked || !in.grip) { state.hand=-1; events|=BeltDropped; return events; }
         state.carried=in.hand;
-        if (may_seat && PartLength(PartSub(in.hand,def.tray))<=def.tolerance)
+        if (may_seat && Length(in.hand-def.tray)<=def.tolerance)
         {
             state.hand=-1; state.seated=true; events|=BeltSeated;
         }
     }
     else if (state.hand<0 && !state.seated && may_take && in.tracked && in.grip_edge &&
-        PartLength(PartSub(in.hand,def.box_end))<=def.grab_radius)
+        Length(in.hand-def.box_end)<=def.grab_radius)
     {
         state.hand=hand; state.carried=in.hand; events|=BeltTaken;
     }

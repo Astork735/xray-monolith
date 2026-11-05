@@ -952,9 +952,9 @@
     <ClInclude Include="Vr\vr_tracking.h" />
     <ClInclude Include="Vr\vr_graphics_d3d11.h" />
     <ClInclude Include="Vr\vr_swapchain.h" />
-    <ClInclude Include="Vr\vr_camera.h" />
     <ClInclude Include="Vr\vr_input.h" />
     <ClInclude Include="Vr\vr_system.h" />
+    <ClInclude Include="Vr\vr_performance.h" />
     <ClInclude Include="Vr\vr_stereo.h" />
     <ClInclude Include="Blood\blood_logic.h" />
     <ClInclude Include="Blood\blood_types.h" />
@@ -965,9 +965,9 @@
     <ClCompile Include="Vr\vr_tracking.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="Vr\vr_graphics_d3d11.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="Vr\vr_swapchain.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
-    <ClCompile Include="Vr\vr_camera.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="Vr\vr_input.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="Vr\vr_system.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="Vr\vr_performance.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="Vr\vr_stereo.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="..\3rd party\discord\achievement_manager.cpp" />
     <ClCompile Include="..\3rd party\discord\activity_manager.cpp" />

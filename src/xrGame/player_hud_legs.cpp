@@ -388,6 +388,8 @@ void player_legs_controller::prepare_vr_arms()
         const u16 index=m_model->LL_BoneID(name);
         name[14]='2';
         const u16 others=m_model->LL_BoneID(name);
+        // Arms without these fingers keep no ids from a previous model.
+        m_vr_finger2[side]=m_vr_index[side]=BI_NONE;
         m_vr_hand_basis_valid[side]=index!=BI_NONE && others!=BI_NONE;
         if (m_vr_hand_basis_valid[side])
         {
@@ -764,14 +766,16 @@ void player_legs_controller::pose_vr_arms(CActor* actor)
         float distance=direction.magnitude();
         if (distance<0.01f) continue;
         direction.div(distance);
-        // A hand just beyond the arm's reach (a fore-end at full extension)
-        // draws the shoulder forward, as a real shoulder does, instead of
-        // leaving the hand short of the weapon.
+        // A hand beyond the arm's reach (a fore-end held at full extension,
+        // a player's arm longer than the outfit's, a shoulder estimated from
+        // the headset) draws the shoulder forward by all of it: the hand stays
+        // where it holds. Capped at 8 cm, the hand was left short, pulled back
+        // off the fore-end along the arm, floating.
         const float excess=distance-(a+b-0.002f);
         if (excess>0.f)
         {
-            shoulder.mad(direction,std::min(excess,0.08f));
-            distance=std::max(0.01f,distance-std::min(excess,0.08f));
+            shoulder.mad(direction,excess);
+            distance=std::max(0.01f,distance-excess);
         }
         const float reach=clampr(distance,std::abs(a-b)+0.002f,a+b-0.002f);
         Fvector pole; pole.set(side ? 1.f : -1.f,-0.2f,-0.45f);
@@ -953,8 +957,9 @@ void player_legs_controller::pose_vr_arms(CActor* actor)
                 for (int k=0;k<count;++k) curl[k]=index_shape[std::min(k,2)]*chosen;
             }
             // Thumb: the lowest pose that stays clear of the surface, so it
-            // lies along the frame instead of standing over the sights.
-            else if (fitted && finger==0)
+            // lies along the frame instead of standing over the sights. A
+            // held magazine has no sights and any tilt: it closes onto it.
+            else if (fitted && finger==0 && grip_kind!=vr::GripKind::Magazine)
             {
                 float best_height=flt_max, best_clearance=-flt_max, chosen=0.f, clearest=0.f;
                 for (int step=0;step<=16;++step)
@@ -975,16 +980,34 @@ void player_legs_controller::pose_vr_arms(CActor* actor)
                 for (int k=0;k<count;++k) curl[k]=amount;
             }
             else if (fitted)
+            {
+                // The tip continues the last joint's bind direction from its
+                // parent, in that joint's frame (fixed per bone).
+                Fvector tip_local{};
+                if (count>1)
+                {
+                    const Fmatrix& bind_local=m_vr_bind_local[bones[count-1]];
+                    Fmatrix rotation=bind_local; rotation.c.set(0,0,0);
+                    Fmatrix().invert(rotation).transform_dir(tip_local,bind_local.c);
+                }
                 vr::FitChain(curl,count,joint_limit,cache.curl[digit],warm,[&](int j, const float* angles)
                 {
                     for (int k=j;k<count;++k) build(bones[k],angles[k]);
                     // The segment this joint moves: to the next joint or tip.
+                    // The tip continues the last joint's bind direction from
+                    // its parent turned with that joint (the parent's segment
+                    // alone left its clearance the same at every curl).
                     const Fvector& from=poses[bones[j]].c;
                     Fvector to=from;
                     if (j+1<count) to=poses[bones[j+1]].c;
-                    else if (j) to.mad(Fvector().sub(from,poses[bones[j-1]].c),0.9f);
+                    else if (j)
+                    {
+                        Fvector tip; poses[bones[j]].transform_dir(tip,tip_local);
+                        to.mad(tip,0.9f);
+                    }
                     return vr::CapsuleClearance(contact,object_point(from),object_point(to),radius);
                 });
+            }
             if (fitted)
                 for (int j=0;j<count;++j) cache.curl[digit][j]=curl[j];
             // Squeezing the trigger presses the index pad a little further.
@@ -1330,6 +1353,16 @@ void player_legs_controller::solve_vr_body(CActor* actor)
     {
         const u16 parent=m_vr_body_parent[id];
         if (parent>=count) { poses[id]=anim->LL_GetTransform(id); continue; }
+        if (id==spine_root && parent<m_vr_body_bind.size())
+        {
+            // On the pelvis's place but not its turn: a sprint rolls and
+            // yaws the hips, which swung the upright chest and the slots
+            // anchored below the neck from side to side.
+            Fmatrix upright=m_vr_body_bind[parent];
+            upright.c=poses[parent].c;
+            poses[id].mul_43(upright,m_vr_body_bind_local[id]);
+            continue;
+        }
         Fmatrix local;
         if (vr_body_descends(id,spine_root)) local=m_vr_body_bind_local[id];
         else local.mul_43(Fmatrix().invert(anim->LL_GetTransform(parent)),anim->LL_GetTransform(id));
@@ -1448,12 +1481,14 @@ struct BodyPointCollector : public SEnumVerticesCallback
 
 void player_legs_controller::measure_vr_body_profile()
 {
-    // The torso as posed (it is the bind pose above the pelvis, so it keeps
-    // this shape): every visible vertex of the pelvis and spine, outside the
-    // legs below the thighs, about the pelvis, in the body's frame.
+    // The torso in its bind shape (upright above the pelvis, as it is drawn,
+    // whatever the hips were doing on the first solved frame): every visible
+    // vertex of the pelvis and spine, outside the legs below the thighs,
+    // about the pelvis, in the body's frame.
     const u16 count=m_vr_body->LL_BoneCount();
     m_vr_body_profile.assign(size_t(kBodyBands)*kBodySectors,0.f);
-    const Fvector pelvis=m_vr_body_poses[m_vr_pelvis].c;
+    if (m_vr_pelvis>=m_vr_body_bind.size()) return;
+    const Fvector pelvis=m_vr_body_bind[m_vr_pelvis].c;
     xr_vector<Fvector> points;
     for (u16 id=0;id<count && id<m_vr_body_bind.size();++id)
     {
@@ -1462,11 +1497,9 @@ void player_legs_controller::measure_vr_body_profile()
         points.clear();
         BodyPointCollector collector(points);
         m_vr_body->EnumBoneVertices(collector,id);
-        Fmatrix skin; skin.mul_43(m_vr_body_poses[id],Fmatrix().invert(m_vr_body_bind[id]));
         for (const Fvector& bind_point:points)
         {
-            Fvector p; skin.transform_tiny(p,bind_point);
-            p.sub(pelvis);
+            Fvector p; p.sub(bind_point,pelvis);
             const int band=int(floorf((p.y+0.30f)/0.05f));
             if (band<0 || band>=kBodyBands) continue;
             float angle=atan2f(p.x,p.z);

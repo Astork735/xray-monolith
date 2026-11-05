@@ -12,6 +12,24 @@
 namespace
 {
 	const char* kHandPath[2] = { "/user/hand/left", "/user/hand/right" };
+
+	// A boolean action's state into value, when the action is bound and active.
+	void ReadBool(XrSession session, XrAction action, bool& value)
+	{
+		XrActionStateGetInfo info{ XR_TYPE_ACTION_STATE_GET_INFO };
+		info.action = action;
+		XrActionStateBoolean state{ XR_TYPE_ACTION_STATE_BOOLEAN };
+		if (XR_SUCCEEDED(xrGetActionStateBoolean(session, &info, &state)) && state.isActive)
+			value = state.currentState == XR_TRUE;
+	}
+	// A boolean action bound, active and pressed.
+	bool Pressed(XrSession session, XrAction action)
+	{
+		XrActionStateGetInfo info{ XR_TYPE_ACTION_STATE_GET_INFO };
+		info.action = action;
+		XrActionStateBoolean state{ XR_TYPE_ACTION_STATE_BOOLEAN };
+		return XR_SUCCEEDED(xrGetActionStateBoolean(session, &info, &state)) && state.isActive && state.currentState;
+	}
 }
 
 VrInput& VrInput::Get()
@@ -67,38 +85,36 @@ bool VrInput::CreateActions(XrInstance instance)
 		m_select_action[i] = MakeAction(m_action_set, XR_ACTION_TYPE_BOOLEAN_INPUT, i == 0 ? "select_left" : "select_right", &hand[i], 1);
 		m_button_action[i] = MakeAction(m_action_set, XR_ACTION_TYPE_BOOLEAN_INPUT, i == 0 ? "button_left" : "button_right", &hand[i], 1);
 		m_haptic[i] = MakeAction(m_action_set, XR_ACTION_TYPE_VIBRATION_OUTPUT, i == 0 ? "haptic_left" : "haptic_right", &hand[i], 1);
+		m_secondary_action[i] = MakeAction(m_action_set, XR_ACTION_TYPE_BOOLEAN_INPUT, i == 0 ? "secondary_left" : "secondary_right", &hand[i], 1);
+		m_pad_vector[i] = MakeAction(m_action_set, XR_ACTION_TYPE_VECTOR2F_INPUT, i == 0 ? "pad_left" : "pad_right", &hand[i], 1);
+		m_pad_move_click[i] = MakeAction(m_action_set, XR_ACTION_TYPE_BOOLEAN_INPUT, i == 0 ? "pad_move_left" : "pad_move_right", &hand[i], 1);
+		m_pad_button_click[i] = MakeAction(m_action_set, XR_ACTION_TYPE_BOOLEAN_INPUT, i == 0 ? "pad_button_left" : "pad_button_right", &hand[i], 1);
+		if (!m_grip_pose[i] || !m_aim_pose[i] || !m_trigger_action[i] || !m_grip_action[i] || !m_thumbstick_action[i] ||
+			!m_select_action[i] || !m_button_action[i] || !m_haptic[i] || !m_secondary_action[i] || !m_pad_vector[i] ||
+			!m_pad_move_click[i] || !m_pad_button_click[i])
+			return false;
 	}
 	m_menu_action = MakeAction(m_action_set, XR_ACTION_TYPE_BOOLEAN_INPUT, "menu_left", &hand[0], 1);
 	m_sprint_action = MakeAction(m_action_set, XR_ACTION_TYPE_BOOLEAN_INPUT, "sprint_left", &hand[0], 1);
 	m_jump_action = MakeAction(m_action_set, XR_ACTION_TYPE_BOOLEAN_INPUT, "jump_right", &hand[1], 1);
 	if (!m_menu_action || !m_sprint_action || !m_jump_action) return false;
 
-    for (int i = 0; i < 2; ++i)
-    {
-        m_secondary_action[i] = MakeAction(m_action_set, XR_ACTION_TYPE_BOOLEAN_INPUT, i == 0 ? "secondary_left" : "secondary_right", &hand[i], 1);
-        m_pad_vector[i] = MakeAction(m_action_set, XR_ACTION_TYPE_VECTOR2F_INPUT, i == 0 ? "pad_left" : "pad_right", &hand[i], 1);
-        m_pad_move_click[i] = MakeAction(m_action_set, XR_ACTION_TYPE_BOOLEAN_INPUT, i == 0 ? "pad_move_left" : "pad_move_right", &hand[i], 1);
-        m_pad_button_click[i] = MakeAction(m_action_set, XR_ACTION_TYPE_BOOLEAN_INPUT, i == 0 ? "pad_button_left" : "pad_button_right", &hand[i], 1);
-        if (!m_pad_vector[i] || !m_pad_move_click[i] || !m_pad_button_click[i]) return false;
-        if (!m_secondary_action[i] || !m_grip_pose[i] || !m_aim_pose[i] || !m_trigger_action[i] || !m_grip_action[i] || !m_thumbstick_action[i] || !m_haptic[i] || !m_select_action[i] || !m_button_action[i])
-            return false;
-    }
-    // Bind pose actions to their own spaces.
+	// Bind pose actions to their own spaces.
 	for (int i = 0; i < 2; ++i)
 	{
-		XrActionSpaceCreateInfo gp{ XR_TYPE_ACTION_SPACE_CREATE_INFO };
-		gp.action = m_grip_pose[i];
-		gp.subactionPath = hand[i];
-		gp.poseInActionSpace.orientation.w = 1.f;
-		VR_XR_CHECK(xrCreateActionSpace(m_session, &gp, &m_grip_space[i]), "create grip space");
-
-		XrActionSpaceCreateInfo ap{ XR_TYPE_ACTION_SPACE_CREATE_INFO };
-		ap.action = m_aim_pose[i];
-		ap.subactionPath = hand[i];
-		ap.poseInActionSpace.orientation.w = 1.f;
-		VR_XR_CHECK(xrCreateActionSpace(m_session, &ap, &m_aim_space[i]), "create aim space");
+		const struct { XrAction action; XrSpace* space; const char* what; } poses[2] = {
+			{ m_grip_pose[i], &m_grip_space[i], "create grip space" },
+			{ m_aim_pose[i], &m_aim_space[i], "create aim space" } };
+		for (const auto& pose : poses)
+		{
+			XrActionSpaceCreateInfo ci{ XR_TYPE_ACTION_SPACE_CREATE_INFO };
+			ci.action = pose.action;
+			ci.subactionPath = hand[i];
+			ci.poseInActionSpace.orientation.w = 1.f;
+			VR_XR_CHECK(xrCreateActionSpace(m_session, &ci, pose.space), pose.what);
+		}
 	}
-    return true;
+	return true;
 }
 
 namespace
@@ -263,35 +279,15 @@ void VrInput::Sync(XrSession session, XrTime time, XrSpace space)
 		return;
 
     m_last_sync = GetTickCount64();
-	XrActionStateGetInfo left_info{XR_TYPE_ACTION_STATE_GET_INFO};
-	XrActionStateBoolean left_state{XR_TYPE_ACTION_STATE_BOOLEAN};
-	left_info.action=m_menu_action;
-	if (XR_SUCCEEDED(xrGetActionStateBoolean(session,&left_info,&left_state)) && left_state.isActive)
-		m_menu_button=left_state.currentState==XR_TRUE;
-	left_state={XR_TYPE_ACTION_STATE_BOOLEAN};
-	left_info.action=m_sprint_action;
-	if (XR_SUCCEEDED(xrGetActionStateBoolean(session,&left_info,&left_state)) && left_state.isActive)
-		m_sprint_button=left_state.currentState==XR_TRUE;
-	left_state={XR_TYPE_ACTION_STATE_BOOLEAN};
-	left_info.action=m_jump_action;
-	if (XR_SUCCEEDED(xrGetActionStateBoolean(session,&left_info,&left_state)) && left_state.isActive)
-		m_jump_button=left_state.currentState==XR_TRUE;
+	ReadBool(session, m_menu_action, m_menu_button);
+	ReadBool(session, m_sprint_action, m_sprint_button);
+	ReadBool(session, m_jump_action, m_jump_button);
 	for (int i = 0; i < 2; ++i)
 	{
 		XrActionStateGetInfo gi{ XR_TYPE_ACTION_STATE_GET_INFO };
-
-        gi.action = m_secondary_action[i];
-        XrActionStateBoolean secondary{XR_TYPE_ACTION_STATE_BOOLEAN};
-        if (XR_SUCCEEDED(xrGetActionStateBoolean(session,&gi,&secondary)) && secondary.isActive)
-            m_secondary_button[i]=secondary.currentState==XR_TRUE;
-        gi.action = m_button_action[i];
-        XrActionStateBoolean button{XR_TYPE_ACTION_STATE_BOOLEAN};
-        if (XR_SUCCEEDED(xrGetActionStateBoolean(session, &gi, &button)) && button.isActive)
-            m_button[i] = button.currentState == XR_TRUE;
-        gi.action = m_select_action[i];
-        XrActionStateBoolean select{XR_TYPE_ACTION_STATE_BOOLEAN};
-        if (XR_SUCCEEDED(xrGetActionStateBoolean(session, &gi, &select)) && select.isActive)
-            m_select[i] = select.currentState == XR_TRUE;
+		ReadBool(session, m_secondary_action[i], m_secondary_button[i]);
+		ReadBool(session, m_button_action[i], m_button[i]);
+		ReadBool(session, m_select_action[i], m_select[i]);
 		float f = 0.f;
 		gi.action = m_trigger_action[i];
 		XrActionStateFloat trigger{ XR_TYPE_ACTION_STATE_FLOAT };
@@ -310,7 +306,10 @@ void VrInput::Sync(XrSession session, XrTime time, XrSpace space)
 		gi.action = m_thumbstick_action[i];
 		XrActionStateVector2f stick{ XR_TYPE_ACTION_STATE_VECTOR2F };
 		if (XR_SUCCEEDED(xrGetActionStateVector2f(session, &gi, &stick)) && stick.isActive)
+		{
 			m_thumbstick[i] = stick.currentState;
+			m_active[i] = true;
+		}
 
 		// Poses.
 		auto locate = [&](XrAction action, XrSpace action_space, bool& have, XrPosef& out)
@@ -348,16 +347,12 @@ void VrInput::Sync(XrSession session, XrTime time, XrSpace space)
 		if (XR_SUCCEEDED(xrGetActionStateVector2f(session, &gi, &pad)) && pad.isActive)
 		{
 			const bool upper = pad.currentState.y >= 0.f;
-			XrActionStateBoolean click{XR_TYPE_ACTION_STATE_BOOLEAN};
-			gi.action = m_pad_move_click[i];
-			if (XR_SUCCEEDED(xrGetActionStateBoolean(session, &gi, &click)) && click.isActive && click.currentState)
+			if (Pressed(session, m_pad_move_click[i]))
 			{
 				if (upper) m_secondary_button[i] = true;
 				else (i == 0 ? m_sprint_button : m_jump_button) = true;
 			}
-			click = {XR_TYPE_ACTION_STATE_BOOLEAN};
-			gi.action = m_pad_button_click[i];
-			if (XR_SUCCEEDED(xrGetActionStateBoolean(session, &gi, &click)) && click.isActive && click.currentState)
+			if (Pressed(session, m_pad_button_click[i]))
 			{
 				if (upper) m_secondary_button[i] = true;
 				else m_button[i] = true;
@@ -366,7 +361,9 @@ void VrInput::Sync(XrSession session, XrTime time, XrSpace space)
 
 		locate(m_grip_pose[i], m_grip_space[i], m_have_grip_pose[i], m_grip_pose_v[i]);
 		locate(m_aim_pose[i], m_aim_space[i], m_have_aim_pose[i], m_aim_pose_v[i]);
-        m_active[i] = m_have_grip_pose[i] || m_have_aim_pose[i];
+        // A controller out of tracking still walks and turns: its trigger or
+        // stick being bound and active counts, not only a valid pose.
+        m_active[i] = m_active[i] || m_have_grip_pose[i] || m_have_aim_pose[i];
         if (vr_debug && Device.dwFrame % 120 == 0)
             Msg("[VR] hand=%d active=%d grip_valid=%d aim_valid=%d trigger=%.2f squeeze=%.2f button=%d secondary=%d grip=(%.3f %.3f %.3f) aim=(%.3f %.3f %.3f)",
                 i, m_active[i], m_have_grip_pose[i], m_have_aim_pose[i], m_trigger[i], m_grip[i], m_button[i], m_secondary_button[i],

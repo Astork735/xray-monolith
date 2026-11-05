@@ -5,6 +5,7 @@
 #endif
 #ifdef VR_ENABLED
 #include "vr_system.h"
+#include "vr_performance.h"
 #include "vr_ui_policy.h"
 #include "vr_gameplay_policy.h"
 #include "vr_config.h"
@@ -123,6 +124,7 @@ bool CVrSystem::Initialize(ID3D11Device* device, unsigned width, unsigned height
         description.AdapterLuid.LowPart == required.adapterLuid.LowPart && device->GetFeatureLevel() >= required.minFeatureLevel;
     if (!compatible) { Msg("! [VR] engine D3D11 device does not meet runtime requirements"); Shutdown(); return false; }
     m_device = device; device->GetImmediateContext(&m_context);
+    vr::PerfAttach(m_device, m_context);
     auto binding = vr::MakeD3D11Binding(device);
     XrSessionCreateInfo info{XR_TYPE_SESSION_CREATE_INFO};
     info.next = &binding; info.systemId = m_system;
@@ -166,6 +168,7 @@ bool CVrSystem::Initialize(ID3D11Device* device, unsigned width, unsigned height
 void CVrSystem::Shutdown()
 {
     if (m_frame_begun) SubmitFrame();
+    vr::PerfDetach();
     VrInput::Get().Shutdown();
     for (auto& eye : m_eyes) vr::DestroyEyeSwapchain(eye);
     for (auto& depth : m_depth) vr::DestroyEyeSwapchain(depth);
@@ -314,6 +317,8 @@ void CVrSystem::BeginTiming()
 {
     if (!vr_debug || !m_context) return;
     QueryPerformanceCounter(&m_cpu_begin);
+    // One DISJOINT packet at a time: the bounded capture owns GPU timing.
+    if (vr::PerfFrameActive()) return;
     auto& sample = m_timing[m_timing_cursor++ % 4];
     if (sample.pending)
     {
@@ -371,8 +376,14 @@ void CVrSystem::EndTiming()
 bool CVrSystem::PrepareFrame()
 {
     if (!IsActive() || m_frame_begun) return false;
+    vr::PerfBeginFrame(Device.dwFrame);
     XrFrameWaitInfo wait{XR_TYPE_FRAME_WAIT_INFO};
-    const XrResult wait_result=xrWaitFrame(m_session, &wait, &m_frame_state);
+    XrResult wait_result;
+    {
+        vr::PerfScope timing(vr::PerfStage::WaitFrame);
+        wait_result=xrWaitFrame(m_session, &wait, &m_frame_state);
+    }
+    vr::PerfXrResult(vr::PerfStage::WaitFrame, int(wait_result));
     if (wait_result==XR_TIMEOUT_EXPIRED)
     {
         Msg("* [VR] xrWaitFrame timed out; skipping this simulation sample");
@@ -386,18 +397,33 @@ bool CVrSystem::PrepareFrame()
         VrInput::Get().Invalidate();
         return false;
     }
+    vr::PerfFrameInfo(Width(), Height(), m_frame_state.predictedDisplayTime,
+        double(m_frame_state.predictedDisplayPeriod)/1e6, m_frame_state.shouldRender != 0, Device.b_is_Active != 0);
     XrFrameBeginInfo begin{XR_TYPE_FRAME_BEGIN_INFO};
-    const XrResult begin_result = xrBeginFrame(m_session, &begin);
+    XrResult begin_result;
+    {
+        vr::PerfScope timing(vr::PerfStage::BeginFrame);
+        begin_result = xrBeginFrame(m_session, &begin);
+    }
+    vr::PerfXrResult(vr::PerfStage::BeginFrame, int(begin_result));
     if (XR_FAILED(begin_result)) { Check(begin_result, "xrBeginFrame"); return false; }
     // Qualified success (including LOSS_PENDING) still begins a frame and
     // must be paired with xrEndFrame before session recovery.
     m_frame_begun = true; m_scene_rendered = m_scene_attempted = m_ui_ready = false;
     if (!Check(begin_result, "xrBeginFrame")) { SubmitFrame(); return false; }
+    vr::PerfBeginGpuFrame();
     BeginTiming();
-    UpdateTracking();
-    VrInput::Get().Sync(m_session, m_frame_state.predictedDisplayTime, m_view_space);
+    {
+        vr::PerfScope timing(vr::PerfStage::Tracking);
+        UpdateTracking();
+    }
+    {
+        vr::PerfScope timing(vr::PerfStage::Input);
+        VrInput::Get().Sync(m_session, m_frame_state.predictedDisplayTime, m_view_space);
+    }
     if (m_frame_state.shouldRender && !m_lost)
         {
+            vr::PerfScope timing(vr::PerfStage::UiWait);
             m_ui_ready = vr::AcquireEyeImage(m_ui, "acquire UI") && vr::WaitEyeImage(m_ui, "wait UI");
             if (!m_ui_ready) m_lost = true;
             else { const float clear[] = {0,0,0,0}; m_context->ClearRenderTargetView(UiTarget(), clear); }
@@ -438,19 +464,11 @@ bool CVrSystem::RenderScene(VrEyeRenderFn render, void* user)
     const float near_plane = vr::AdaptiveNearPlane(closest, vr_near_plane, m_world_scale);
     const float far_plane = g_pGamePersistent && g_pGamePersistent->Environment().CurrentEnv ?
         g_pGamePersistent->Environment().CurrentEnv->far_plane : 1000.f;
-    const auto to_world = [&](const XrPosef& pose)
-    {
-        Fmatrix local, world;
-        local.mul_43(m_tracking_to_body, PoseMatrix(pose));
-        world.mul_43(m_body_world, local);
-        world.c.x += m_world_offset.x; world.c.y += m_world_offset.y; world.c.z += m_world_offset.z;
-        return world;
-    };
-    const Fmatrix eye_world[2] = {to_world(m_views[0].pose), to_world(m_views[1].pose)};
+    const Fmatrix eye_world[2] = {TrackingToWorld(m_views[0].pose), TrackingToWorld(m_views[1].pose)};
     // The shadow camera: the head's orientation, between the eyes, its
     // frustum the union of theirs (each eye's corners taken into the head's
     // frame, so canted displays are covered too).
-    Fmatrix shadow_world = to_world(m_head_pose);
+    Fmatrix shadow_world = TrackingToWorld(m_head_pose);
     shadow_world.c.add(eye_world[0].c, eye_world[1].c).mul(0.5f);
     vr::FovAngles shadow_fov;
     for (int eye = 0; eye < 2; ++eye)
@@ -475,12 +493,23 @@ bool CVrSystem::RenderScene(VrEyeRenderFn render, void* user)
     for (int eye = 0; eye < 2; ++eye)
     {
         auto& swapchain = m_eyes[eye];
-        if (!vr::AcquireEyeImage(swapchain, "acquire eye") || !vr::WaitEyeImage(swapchain, "wait eye"))
-        { m_lost = true; break; }
+        bool eye_ready;
+        {
+            vr::PerfScope timing(vr::PerfStage::EyeWait);
+            eye_ready = vr::AcquireEyeImage(swapchain, "acquire eye") && vr::WaitEyeImage(swapchain, "wait eye");
+        }
+        if (!eye_ready) { m_lost = true; break; }
         auto& depth = m_depth[eye];
         const bool with_depth = m_depth_extension && depth.handle && vr_depth_layer;
-        if (with_depth && (!vr::AcquireEyeImage(depth, "acquire depth") || !vr::WaitEyeImage(depth, "wait depth")))
-        { m_lost = true; vr::ReleaseEyeImage(swapchain); break; }
+        if (with_depth)
+        {
+            bool depth_ready;
+            {
+                vr::PerfScope timing(vr::PerfStage::EyeWait);
+                depth_ready = vr::AcquireEyeImage(depth, "acquire depth") && vr::WaitEyeImage(depth, "wait depth");
+            }
+            if (!depth_ready) { m_lost = true; vr::ReleaseEyeImage(swapchain); break; }
+        }
         VrEyeRenderContext context;
         context.eye = eye; context.target = swapchain.views[swapchain.acquired_index];
         context.width = swapchain.width; context.height = swapchain.height;
@@ -498,6 +527,7 @@ bool CVrSystem::RenderScene(VrEyeRenderFn render, void* user)
         ++rendered;
     }
     m_scene_rendered = rendered == 2;
+    vr::PerfSceneRendered(m_scene_rendered);
     return true;
 }
 void CVrSystem::SubmitFrame()
@@ -558,8 +588,15 @@ void CVrSystem::SubmitFrame()
     end.displayTime = m_frame_state.predictedDisplayTime;
     end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
     end.layerCount = count; end.layers = count ? layers : nullptr;
+    vr::PerfEndGpuFrame();
     EndTiming();
-    Check(xrEndFrame(m_session, &end), "xrEndFrame");
+    XrResult end_result;
+    {
+        vr::PerfScope timing(vr::PerfStage::EndFrame);
+        end_result = xrEndFrame(m_session, &end);
+    }
+    vr::PerfXrResult(vr::PerfStage::EndFrame, int(end_result));
+    Check(end_result, "xrEndFrame");
     m_frame_begun = false; m_ui_ready = false;
     if (vr_debug && (++m_frames % 120 == 0))
         Msg("* [VR] state=%s views=%d stereo=%d head=(%.3f %.3f %.3f)", StateName(), m_views_valid,
@@ -617,22 +654,6 @@ void CVrSystem::SetGameplayBody(const Fmatrix& world, const void* owner)
     m_body_world = world;
 }
 Fvector CVrSystem::WorldHeadPosition() const { return TrackingToWorld(m_head_pose).c; }
-bool CVrSystem::WorldToUi(const Fvector& world, float& u, float& v) const
-{
-    u=v=-1.f;
-    if (m_menu_active || !m_views_valid || !m_ui.width) return false;
-    // SubmitFrame places the gameplay quad UiPanel ahead of the head.
-    // Intersect the eye-to-point ray with that plane.
-    Fmatrix inverse; inverse.invert(TrackingToWorld(m_head_pose));
-    Fvector local=world; inverse.transform_tiny(local);
-    if (local.z<0.05f) return false;
-    float width, distance;
-    UiPanel(width, distance);
-    const float height=width*vr::kUiPanelAspect;
-    u=0.5f+distance*local.x/local.z/width;
-    v=0.5f-distance*local.y/local.z/height;
-    return u>=0.f && u<=1.f && v>=0.f && v<=1.f;
-}
 void CVrSystem::ConstrainHead(const Fvector& position)
 {
     const Fvector desired = WorldHeadPosition();

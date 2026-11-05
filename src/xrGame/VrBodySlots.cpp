@@ -72,19 +72,33 @@ bool HandFree(CActor& actor, int hand)
     if (!weapon || !weapon->VrMode()) return true;
     return hand!=weapon->VrWeaponHand() && !weapon->VrLeftHandBusy();
 }
+// The hand holds something other than a device: an item it grabbed, a
+// magazine from the floor, a pocket item, the bolt, a knife or binoculars,
+// a grenade (VrHandHoldsItem adds a device in that hand).
+bool HandHoldsOther(CActor& actor, int hand)
+{
+    const auto& pickup=actor.m_vr_pickup;
+    return pickup.grabbed_id[hand]!=u16(-1) || VrFloorMagazineHand(hand) ||
+        pickup.pocket_held[hand]>=0 || pickup.bolt_hand==hand ||
+        pickup.slot_hold_hand==hand || hand==VrMissileHand(actor);
+}
 bool Available(CActor& actor, int kind, int hand)
 {
     const auto& pickup=actor.m_vr_pickup;
-    if (!HandFree(actor,hand) || pickup.pocket_held[hand]>=0 || pickup.bolt_hand==hand ||
-        pickup.grabbed_id[hand]!=u16(-1) || pickup.slot_hold_hand==hand ||
+    // A hand holding anything takes nothing more; the hand that took the
+    // detector may still reach for its slot (to put it back).
+    if (!HandFree(actor,hand) || HandHoldsOther(actor,hand) ||
         (pickup.device_hand==hand && kind!=vr::BodyDetector)) return false;
     // A bolt goes into a free hand whatever the other holds; one at a time.
     if (kind==vr::BodyBolt)
-        // Not the bolt that is the active item (drawn by a key): throwing it
-        // from the pouch would reject the weapon in use.
-        return pickup.bolt_hand<0 && !actor.inventory_disabled() && hand!=VrMissileHand(actor) &&
-            actor.inventory().ItemFromSlot(BOLT_SLOT)!=nullptr &&
-            actor.inventory().ItemFromSlot(BOLT_SLOT)!=actor.inventory().ActiveItem();
+    {
+        PIItem bolt=actor.inventory().ItemFromSlot(BOLT_SLOT);
+        if (!bolt || pickup.bolt_hand>=0 || actor.inventory_disabled() || hand==VrMissileHand(actor)) return false;
+        // The active bolt (drawn by a key) is taken only while it waits on
+        // the belt (VrBodySlotTake): throwing it from the pouch would reject
+        // the weapon in use.
+        return bolt!=actor.inventory().ActiveItem() || pickup.missile_stowed;
+    }
     if (vr::IsPocket(kind))
         return !actor.inventory_disabled() && hand!=VrMissileHand(actor) &&
             PocketItemThisFrame(actor,kind-vr::BodyPocket1)!=nullptr;
@@ -105,6 +119,36 @@ bool Available(CActor& actor, int kind, int hand)
     // hand (CCustomDevice::CheckCompatibilityInt).
     if (kind==vr::BodyDetector) return actor.inventory().ItemFromSlot(DETECTOR_SLOT)!=nullptr;
     return !actor.inventory_disabled();
+}
+// A hand let go of a thrown item at its peak velocity: faster than 1.5 m/s
+// it flies with that velocity times vr_throw_scale, no faster than 1.25
+// times the item's own throw (when it has one); slower it is not thrown.
+bool ThrowVelocity(const Fvector& peak, CMissile* missile, Fvector& velocity, float& speed)
+{
+    velocity=peak;
+    speed=velocity.magnitude();
+    if (speed<=1.5f) return false;
+    velocity.mul(vr::ThrowScale());
+    const float limit=missile ? 1.25f*missile->GetMaxForce() : 0.f;
+    if (limit>0.f && velocity.magnitude()>limit) velocity.normalize_safe().mul(limit);
+    return true;
+}
+// A model drawn this frame at pose, its bones posed first.
+void DrawModel(IRenderVisual* visual, Fmatrix pose)
+{
+    if (IKinematics* skeleton=visual->dcast_PKinematics()) skeleton->CalculateBones(TRUE);
+    ::Render->set_Transform(&pose);
+    ::Render->add_Visual(visual);
+}
+// The same, oriented as pose with its bounding sphere's centre (as posed)
+// at point.
+void DrawModelAt(IRenderVisual* visual, Fmatrix pose, const Fvector& point)
+{
+    if (IKinematics* skeleton=visual->dcast_PKinematics()) skeleton->CalculateBones(TRUE);
+    Fvector centre; pose.transform_dir(centre,visual->getVisData().sphere.P);
+    pose.c.sub(point,centre);
+    ::Render->set_Transform(&pose);
+    ::Render->add_Visual(visual);
 }
 void PressAction(CActor& actor, EGameActions action)
 {
@@ -159,7 +203,7 @@ bool VrBodySlotPoint(CActor& actor, int kind, Fvector& point)
             point=VrOnBodyPlace(actor,pelvis,place.angle,place.height);
             return true;
         }
-        const vr::BodyVec local=vr::BodySlotLocal(kind,vr::HipHeight(),vr::HipWidth(),vr::LeftHanded());
+        const vr::V3 local=vr::BodySlotLocal(kind,vr::HipHeight(),vr::HipWidth(),vr::LeftHanded());
         Fvector at=VrOnBodySurface(actor,local.x,local.y+vr::HipHeight(),local.z);
         point=pelvis.c;
         point.mad(pelvis.i,at.x).mad(pelvis.j,at.y).mad(pelvis.k,at.z);
@@ -168,7 +212,7 @@ bool VrBodySlotPoint(CActor& actor, int kind, Fvector& point)
     Fvector head;
     if (!vr::HeadPosition(head)) { head=actor.Position(); head.y+=1.67f; }
     const Fvector forward=VrTorsoFrame(actor).k;
-    const vr::BodyVec world=vr::BodyToWorld({head.x,head.y,head.z},forward.x,forward.z,
+    const vr::V3 world=vr::BodyToWorld({head.x,head.y,head.z},forward.x,forward.z,
         vr::BodySlotLocal(kind,vr::HipHeight(),vr::HipWidth(),vr::LeftHanded()));
     point.set(world.x,world.y,world.z);
     return true;
@@ -178,13 +222,13 @@ int VrBodySlotCandidate(CActor& actor, int hand, const Fvector& position, float&
 {
     distance=FLT_MAX;
     if (!vr::BodySlots()) return -1;
-    vr::BodyVec points[vr::BodySlotCount];
+    vr::V3 points[vr::BodySlotCount];
     bool available[vr::BodySlotCount];
     for (int kind=0; kind<vr::BodySlotCount; ++kind)
     {
         Fvector point;
         available[kind]=Available(actor,kind,hand) && VrBodySlotPoint(actor,kind,point);
-        points[kind]=available[kind] ? vr::BodyVec{point.x,point.y,point.z} : vr::BodyVec{0,0,0};
+        points[kind]=available[kind] ? vr::V3{point.x,point.y,point.z} : vr::V3{0,0,0};
     }
     return vr::NearestBodySlot(points,available,vr::BodySlotCount,{position.x,position.y,position.z},
         vr::BodySlotRadius(),distance);
@@ -198,14 +242,25 @@ bool VrBodySlotTake(CActor& actor, int kind, int hand)
         auto& pickup=actor.m_vr_pickup;
         pickup.pocket_held[hand]=kind-vr::BodyPocket1;
         pickup.pocket_mouth_since[hand]=0;
-        pickup.pocket_trigger_down[hand]=vr::HandTrigger(hand)>0.65f;
+        pickup.pocket_trigger_down[hand]=vr::TriggerPulled(vr::HandTrigger(hand));
         return false;
     }
     if (kind==vr::BodyBolt)
     {
+        auto& pickup=actor.m_vr_pickup;
+        // The active bolt, drawn by a key and waiting on the belt: into
+        // this hand as the active missile (VrMissileUpdate), as a grenade
+        // already out is.
+        PIItem bolt=actor.inventory().ItemFromSlot(BOLT_SLOT);
+        if (bolt && bolt==actor.inventory().ActiveItem() && pickup.missile_stowed)
+        {
+            pickup.missile_hand=hand;
+            pickup.missile_stowed=false;
+            return false;
+        }
         // Held in this hand; the active item (a weapon in the other hand)
         // stays as it is.
-        actor.m_vr_pickup.bolt_hand=hand;
+        pickup.bolt_hand=hand;
         return false;
     }
     if (Draws(kind))
@@ -244,7 +299,7 @@ bool VrBodySlotTake(CActor& actor, int kind, int hand)
         const bool out=device && !device->IsHidden();
         actor.m_vr_pickup.device_hand=out ? -1 : hand;
         actor.m_vr_pickup.device_taken_time=Device.dwTimeGlobal;
-        actor.m_vr_pickup.device_trigger_down=vr::HandTrigger(hand)>0.65f;
+        actor.m_vr_pickup.device_trigger_down=vr::TriggerPulled(vr::HandTrigger(hand));
         actor.m_vr_pickup.device_button_down=vr::HandSecondaryButton(hand);
         PressAction(actor,kDETECTOR);
         break;
@@ -267,7 +322,7 @@ void VrPocketUpdate(CActor& actor, const bool* tracked, const Fmatrix* hands, co
     const bool head_valid=vr::HeadPosition(head);
     Fmatrix head_world;
     looking=vr::HeadTransform(head_world) ? head_world.k : actor.XFORM().k;
-    const vr::BodyVec mouth=vr::MouthPoint({head.x,head.y,head.z},looking.x,looking.z);
+    const vr::V3 mouth=vr::MouthPoint({head.x,head.y,head.z},looking.x,looking.z);
     for (int h=0; h<2; ++h)
     {
         int& held=pickup.pocket_held[h];
@@ -279,7 +334,7 @@ void VrPocketUpdate(CActor& actor, const bool* tracked, const Fmatrix* hands, co
             held=-1;
             continue;
         }
-        const bool trigger=vr::HandTrigger(h)>0.65f;
+        const bool trigger=vr::TriggerPulled(vr::HandTrigger(h));
         const bool pulled=trigger && !pickup.pocket_trigger_down[h];
         pickup.pocket_trigger_down[h]=trigger;
         bool at_mouth=false;
@@ -331,14 +386,10 @@ void VrMissileUpdate(CActor& actor, const bool* tracked, const Fmatrix* hands, c
         else if (!grip[b])
         {
             pickup.bolt_hand=-1;
-            Fvector velocity=pickup.throw_peak[b];
-            const float speed=velocity.magnitude();
-            if (speed>1.5f)
+            Fvector velocity;
+            float speed=0.f;
+            if (ThrowVelocity(pickup.throw_peak[b],smart_cast<CMissile*>(bolt),velocity,speed))
             {
-                velocity.mul(vr::ThrowScale());
-                auto* missile=smart_cast<CMissile*>(bolt);
-                const float limit=missile ? 1.25f*missile->GetMaxForce() : 0.f;
-                if (limit>0.f && velocity.magnitude()>limit) velocity.normalize_safe().mul(limit);
                 velocity.add(body);
                 VrThrowHandBolt(actor,*bolt,hands[b],velocity,b);
                 Msg("* [VR body] bolt thrown from the hand at %.1f m/s (hand %.1f m/s)",velocity.magnitude(),speed);
@@ -390,13 +441,10 @@ void VrMissileUpdate(CActor& actor, const bool* tracked, const Fmatrix* hands, c
     }
     if (released)
     {
-        Fvector velocity=pickup.throw_peak[h];
-        const float speed=velocity.magnitude();
-        if (speed>1.5f)
+        Fvector velocity;
+        float speed=0.f;
+        if (ThrowVelocity(pickup.throw_peak[h],missile,velocity,speed))
         {
-            velocity.mul(vr::ThrowScale());
-            const float limit=1.25f*missile->GetMaxForce();
-            if (limit>0.f && velocity.magnitude()>limit) velocity.normalize_safe().mul(limit);
             pickup.missile_pending=true;
             pickup.missile_pending_until=Device.dwTimeGlobal+1000;
             pickup.missile_matrix=hands[h];
@@ -434,12 +482,12 @@ void VrMissileUpdate(CActor& actor, const bool* tracked, const Fmatrix* hands, c
 
 bool VrHandHolding(CActor& actor, int hand)
 {
-    const auto& pickup=actor.m_vr_pickup;
-    // The active weapon's hand too: the knife, binoculars or a gun. Guns hid
-    // it from their own render; the knife no longer goes through that path.
+    // What VrHandHoldsItem counts, plus the hand that took a device (shown
+    // or not) and the active weapon's hand: the knife, binoculars or a gun.
+    // Guns hid it from their own render; the knife no longer goes through
+    // that path.
     auto* weapon=smart_cast<CWeapon*>(actor.inventory().ActiveItem());
-    return hand==pickup.device_hand || hand==pickup.slot_hold_hand || hand==pickup.bolt_hand ||
-        hand==VrMissileHand(actor) || pickup.pocket_held[hand]>=0 || pickup.grabbed_id[hand]!=u16(-1) ||
+    return VrHandHoldsItem(actor,hand) || hand==actor.m_vr_pickup.device_hand ||
         (weapon && weapon->VrWeaponHand()==hand);
 }
 
@@ -466,26 +514,23 @@ bool VrHeadGesture(int hand)
     return hand>=0 && hand<2 && head_at[hand];
 }
 
-// Both hands at the head: both stick clicks step the debug level there, and
+// Both hands at the head: both stick clicks press the debug menu key there
+// (custom17, F7 by default; scripts open the menu only with -dbg), and
 // neither sprints nor jumps.
 bool head_debug_hands=false;
 bool VrDebugGesture() { return head_debug_hands; }
 
-void VrDebugGestureUpdate(const bool* tracked, const Fmatrix* hands)
+void VrDebugGestureUpdate(CActor& actor, const bool* tracked, const Fmatrix* hands)
 {
     static bool down=true;
     static u32 flushed=0;
     head_debug_hands=tracked[0] && tracked[1] && VrHandAtHead(hands[0].c) && VrHandAtHead(hands[1].c);
     const bool both=head_debug_hands && vr::SprintButton() && vr::JumpButton();
-    if (both && !down)
+    if (both && !down && strstr(Core.Params,"-dbg"))
     {
-        const int level=(vr::ContactDebug()+1)%3;
-        string64 command;
-        xr_sprintf(command,"vr_contact_debug %d",level);
-        Console->Execute(command);
-        Msg("* [VR debug] level %d",level);
-        FlushLog();
-        for (int h=0;h<2;++h) vr::HandHaptic(h,level ? 0.3f+0.3f*float(level) : 0.15f);
+        PressAction(actor,kCUSTOM17);
+        Msg("* [VR debug] debug menu key (custom17)");
+        for (int h=0;h<2;++h) vr::HandHaptic(h,0.5f);
     }
     down=both;
     // A session in debug survives a crash or a killed game.
@@ -498,13 +543,13 @@ void VrDebugGestureUpdate(const bool* tracked, const Fmatrix* hands)
 
 void VrHeadGestureUpdate(CActor& actor, const bool* tracked, const Fmatrix* hands)
 {
-    VrDebugGestureUpdate(tracked,hands);
+    VrDebugGestureUpdate(actor,tracked,hands);
     for (int h=0; h<2; ++h)
     {
-        const bool at=tracked[h] && HandFree(actor,h) && actor.m_vr_pickup.pocket_held[h]<0 &&
-            actor.m_vr_pickup.bolt_hand!=h && h!=VrMissileHand(actor) &&
-            h!=actor.m_vr_pickup.slot_hold_hand && h!=actor.m_vr_pickup.device_hand && VrHandAtHead(hands[h].c);
-        const bool trigger=at && vr::HandTrigger(h)>0.65f;
+        // A free hand only: one holding anything uses its trigger for that.
+        const bool at=tracked[h] && HandFree(actor,h) && !HandHoldsOther(actor,h) &&
+            h!=actor.m_vr_pickup.device_hand && VrHandAtHead(hands[h].c);
+        const bool trigger=at && vr::TriggerPulled(vr::HandTrigger(h));
         const bool button=at && vr::HandSecondaryButton(h);
         if (trigger && !head_trigger_down[h])
         {
@@ -541,13 +586,18 @@ void VrHeadGestureUpdate(CActor& actor, const bool* tracked, const Fmatrix* hand
     }
 }
 
-bool VrHandAtEquipment(CActor& actor, const Fvector& position)
+bool VrHandAtEquipment(CActor& actor, const Fvector& position, int hand)
 {
     // The helmet: headlamp and night vision (VrHeadGestureUpdate).
     if (VrHandAtHead(position)) return true;
+    // With a hand, only a body slot that would act on its squeeze (one with
+    // an item to take, or a place to put back what the hand holds): the slots
+    // hang from the head, so bending to the floor brings empty ones down to
+    // the items there, and they took the squeeze from the grab.
     if (vr::BodySlots())
         for (int kind=0; kind<vr::BodySlotCount; ++kind)
         {
+            if (hand>=0 && !Available(actor,kind,hand)) continue;
             Fvector point;
             if (VrBodySlotPoint(actor,kind,point) && point.distance_to(position)<=vr::BodySlotReach(kind,vr::BodySlotRadius()))
                 return true;
@@ -575,7 +625,7 @@ void VrPdaUpdate(CActor& actor)
     {
         // A new squeeze only: the one that opened it may still be held.
         Fmatrix hand;
-        const bool squeezed=vr::HandTransform(h,false,hand) && vr::HandSqueeze(h)>0.65f;
+        const bool squeezed=vr::HandTransform(h,false,hand) && vr::HandSqueeze(h)>vr::pull_threshold;
         if (open && squeezed && !pickup.pda_grip[h] && VrBodySlotPoint(actor,vr::BodyPda,point) &&
             hand.c.distance_to(point)<=vr::BodySlotRadius())
         {
@@ -610,10 +660,8 @@ int VrDetectorHand(CActor& actor)
 
 bool VrHandHoldsItem(CActor& actor, int hand)
 {
-    const auto& pickup=actor.m_vr_pickup;
-    return pickup.grabbed_id[hand]!=u16(-1) || pickup.pocket_held[hand]>=0 || pickup.bolt_hand==hand ||
-        pickup.slot_hold_hand==hand || hand==VrMissileHand(actor) ||
-        (pickup.device_hand==hand && VrDetectorHand(actor)==hand);
+    return HandHoldsOther(actor,hand) ||
+        (actor.m_vr_pickup.device_hand==hand && VrDetectorHand(actor)==hand);
 }
 
 namespace
@@ -1019,24 +1067,50 @@ const float binocular_apparent=50.f, binocular_distance=0.09f;
 // Decided once per update (VrBinocularsUpdate), so drawing in both eyes and
 // the HUD agree.
 bool g_binoculars_raised=false;
-// The eyepieces (the middle of the rear face of the model in the hand: the
-// first-person model looks along its +Z) within 11 cm of the eyes, the
-// binoculars looking where the head does; let go of beyond 16 cm or 45
-// degrees, so the view does not flicker at the edge.
-bool BinocularsRaised(CActor& actor, bool raised)
+// Which end of the model is the eyepiece end, from how the game shows the
+// binoculars in first person (their eyepieces toward the camera): logged
+// once per HUD section. The mesh alone cannot tell; the stock model's
+// objectives measured narrower than its eyepieces.
+int EyepieceEnd(CActor& actor, CWeaponBinoculars& binoculars)
 {
+    const auto& pickup=actor.m_vr_pickup;
+    const int end=pickup.knife_pose_valid ? vr::BinocularEyepieceEnd(pickup.knife_hold.k.z) : 0;
+    // A plain copy: a static shared_str would outlive the string container.
+    static string128 logged="";
+    static int logged_end=2;
+    LPCSTR section=binoculars.HudSection().c_str();
+    if (!section) section="";
+    if (end!=logged_end || xr_strcmp(logged,section))
+    {
+        xr_strcpy(logged,section);
+        logged_end=end;
+        Msg("* [VR binoculars] %s: eyepieces at the %s end (model +Z %.2f along the first-person view)",section,
+            end>0 ? "+Z" : end<0 ? "-Z" : "nearer the head",pickup.knife_pose_valid ? pickup.knife_hold.k.z : 0.f);
+    }
+    return end;
+}
+// The eyepieces: the middle of the eyepiece end's face of the model in the
+// hand (EyepieceEnd), looking along the model's length to the
+// other end (vr::BinocularsAtEyesPolicy).
+bool BinocularsRaised(CActor& actor, bool raised, float& distance, float& alignment)
+{
+    distance=flt_max; alignment=-1.f;
     auto* binoculars=smart_cast<CWeaponBinoculars*>(BeltItemInHand(actor));
     Fmatrix head, pose;
     if (!binoculars || !vr::HeadTransform(head) || !VrKnifePose(actor,pose)) return false;
     IRenderVisual* visual=binoculars->HudItemData()->m_model->dcast_RenderVisual();
     if (!visual) return false;
     const Fbox& box=visual->getVisData().box;
-    Fvector eyepiece; box.getcenter(eyepiece);
-    eyepiece.z=box.min.z;
-    pose.transform_tiny(eyepiece);
-    Fvector forward=pose.k; forward.normalize_safe();
-    const float reach=raised ? 0.16f : 0.11f, aligned=raised ? 0.70f : 0.85f;
-    return eyepiece.distance_to(head.c)<reach && forward.dotproduct(head.k)>aligned;
+    Fvector rear, front; box.getcenter(rear); front=rear;
+    rear.z=box.min.z; front.z=box.max.z;
+    const int end=EyepieceEnd(actor,*binoculars);
+    if (end>0) std::swap(front,rear);
+    pose.transform_tiny(rear); pose.transform_tiny(front);
+    if (!end && front.distance_to(head.c)<rear.distance_to(head.c)) std::swap(front,rear);
+    Fvector forward; forward.sub(front,rear); forward.normalize_safe();
+    distance=rear.distance_to(head.c);
+    alignment=forward.dotproduct(head.k);
+    return vr::BinocularsAtEyesPolicy(distance,alignment,raised);
 }
 bool BinocularsAtEyes(CActor& actor, CWeaponBinoculars*& binoculars, Fmatrix& head)
 {
@@ -1054,10 +1128,16 @@ bool VrBinocularsAtEyes(CActor& actor)
 void VrBinocularsUpdate(CActor& actor)
 {
     const bool was=g_binoculars_raised;
-    g_binoculars_raised=g_vr_owns_present && vr::GameplayActive() && BinocularsRaised(actor,was);
+    float distance=flt_max, alignment=-1.f;
+    g_binoculars_raised=g_vr_owns_present && vr::GameplayActive() && BinocularsRaised(actor,was,distance,alignment);
     if (g_binoculars_raised!=was)
+    {
+        Msg("* [VR binoculars] %s: eyepieces %.0f mm from the eyes, %.0f deg off the view",
+            g_binoculars_raised ? "raised" : "lowered",distance<flt_max ? distance*1000.f : -1.f,
+            rad2deg(acosf(clampr(alignment,-1.f,1.f))));
         if (auto* binoculars=smart_cast<CWeaponBinoculars*>(actor.inventory().ActiveItem()))
             vr::HandHaptic(binoculars->VrWeaponHand(),0.06f);
+    }
     CWeaponBinoculars* binoculars; Fmatrix head;
     if (!g_vr_owns_present || !BinocularsAtEyes(actor,binoculars,head)) return;
     // The zoom factor is the zoomed field of view (x0.75 in the camera), as
@@ -1099,11 +1179,35 @@ void VrHandItemsUpdate(CActor& actor, const bool* tracked, const bool* grip)
         if (!held && !coming) pickup.slot_hold_hand=-1;
         else if (tracked[h] && !grip[h])
         {
-            actor.inventory().Activate(NO_ACTIVE_SLOT,true);
-            vr::HandHaptic(h,0.15f);
+            // Binoculars let go away from their place on the chest are
+            // dropped with the hand's motion; at the chest, and always for
+            // the knife, they go back.
+            auto* binoculars=held ? smart_cast<CWeaponBinoculars*>(active) : nullptr;
+            Fvector home; float range=0.f; Fmatrix hand;
+            const bool at_slot=VrBodySlotHolster(actor,BINOCULAR_SLOT,home,range) &&
+                vr::HandTransform(h,false,hand) && hand.c.distance_to(home)<=range;
             pickup.slot_hold_hand=-1;
+            if (binoculars && !at_slot) VrReleaseHeldWeapon(actor,*binoculars);
+            else
+            {
+                actor.inventory().Activate(NO_ACTIVE_SLOT,true);
+                vr::HandHaptic(h,0.15f);
+            }
         }
     }
+    // Binoculars made active by the inventory, a key or a script, not taken
+    // by a hand: back to their place on the chest, where a hand takes them
+    // and holds them by its grip. Out with no hand holding them, they were
+    // drawn in a hand and only a second grab at the chest put them back.
+    // Not when already on its way out or to another item, nor without body
+    // slots: no chest to take them from, they stay out as the game drew them.
+    if (pickup.slot_hold_hand<0 && vr::BodySlots())
+        if (auto* binoculars=smart_cast<CWeaponBinoculars*>(active))
+            if (!binoculars->VrSupported() && actor.inventory().GetNextActiveSlot()==binoculars->CurrSlot())
+            {
+                actor.inventory().Activate(NO_ACTIVE_SLOT,true);
+                Msg("* [VR binoculars] made active without a hand: back on the chest");
+            }
     // A knife or binoculars without a VR profile: their unseen first-person
     // show and hide are not waited on either.
     for (u16 slot:{KNIFE_SLOT,BINOCULAR_SLOT})
@@ -1138,7 +1242,7 @@ void VrHandItemsUpdate(CActor& actor, const bool* tracked, const bool* grip)
         }
         else
         {
-            const bool trigger=vr::HandTrigger(h)>0.65f;
+            const bool trigger=vr::TriggerPulled(vr::HandTrigger(h));
             if (trigger && !pickup.device_trigger_down)
                 if (auto* light=smart_cast<CFlashlight*>(device)) { light->VrToggleLight(); vr::HandHaptic(h,0.08f); }
             pickup.device_trigger_down=trigger;
@@ -1239,9 +1343,7 @@ void RenderVrChestPda(CActor& actor, const Fmatrix& body)
     Fvector centre; box.getcenter(centre);
     pose.transform_dir(centre);
     pose.c.sub(point,centre).mad(out,0.5f*extent[thin]);
-    if (IKinematics* skeleton=visual->dcast_PKinematics()) skeleton->CalculateBones(TRUE);
-    ::Render->set_Transform(&pose);
-    ::Render->add_Visual(visual);
+    DrawModel(visual,pose);
 }
 }
 
@@ -1276,9 +1378,7 @@ bool RenderVrBoltPouch(CActor& actor, const Fmatrix& body)
     pose.i.set(body.i).mul(scale); pose.j.set(body.j).mul(scale); pose.k.set(body.k).mul(scale);
     Fvector centre; box.getcenter(centre); pose.transform_dir(centre);
     pose.c.sub(point,centre);
-    if (IKinematics* skeleton=visual->dcast_PKinematics()) skeleton->CalculateBones(TRUE);
-    ::Render->set_Transform(&pose);
-    ::Render->add_Visual(visual);
+    DrawModel(visual,pose);
     return true;
 }
 }
@@ -1325,24 +1425,14 @@ void RenderVrBodySlots(CActor& actor)
         IRenderVisual* visual=item->object().Visual();
         Fvector point;
         if (!visual || !VrBodySlotPoint(actor,kind,point)) continue;
-        if (IKinematics* skeleton=visual->dcast_PKinematics()) skeleton->CalculateBones(TRUE);
         Fmatrix pose; pose.identity();
         pose.i=body.i; pose.j=body.k; pose.k.set(0,-1,0);
-        Fvector centre; pose.transform_dir(centre,visual->getVisData().sphere.P);
-        pose.c.sub(point,centre);
-        ::Render->set_Transform(&pose);
-        ::Render->add_Visual(visual);
+        DrawModelAt(visual,pose,point);
     }
     RenderVrChestPda(actor,body);
     const auto draw=[](PIItem item, Fmatrix pose, const Fvector& point)
     {
-        IRenderVisual* visual=item ? item->object().Visual() : nullptr;
-        if (!visual) return;
-        if (IKinematics* skeleton=visual->dcast_PKinematics()) skeleton->CalculateBones(TRUE);
-        Fvector centre; pose.transform_dir(centre,visual->getVisData().sphere.P);
-        pose.c.sub(point,centre);
-        ::Render->set_Transform(&pose);
-        ::Render->add_Visual(visual);
+        if (IRenderVisual* visual=item ? item->object().Visual() : nullptr) DrawModelAt(visual,pose,point);
     };
     const auto& pickup=actor.m_vr_pickup;
     for (int h=0; h<2; ++h)

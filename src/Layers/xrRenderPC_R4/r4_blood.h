@@ -36,6 +36,7 @@ private:
 		}
 	};
 	struct PendingSplat { BloodSplatRequest request; float due = 0; };
+	struct PendingEmit { BloodEmit emit; float due = 0; };
 	struct Stamp { int slot; blood::Splat splat; blood::PageKey key; float wet; };
 	struct GpuTimer;
 
@@ -62,7 +63,7 @@ private:
 	blood::Backoff m_backoff, m_backoff_drops;
 
 	xrCriticalSection m_lock;
-	xr_vector<BloodEmit> m_emits;
+	xr_vector<PendingEmit> m_emits;		// waiting for their delay
 	xr_vector<PendingSplat> m_pending;
 	xr_vector<BloodEmit> m_frame_emits;
 	xr_vector<Stamp> m_stamps;
@@ -70,6 +71,7 @@ private:
 	xr_vector<int> m_visible;		// records drawn this frame
 	xr_vector<float> m_slot_flow_time;	// last fluid step of each slot
 	xr_vector<std::pair<float, int>> m_candidates;	// per-frame scratch
+	xr_vector<int> m_margin;		// resident pages kept only by the residency margin
 	xr_vector<PendingSplat> m_due;
 	xr_vector<u8> m_restoring, m_dirty;
 	xr_vector<u8> m_mips_due;		// slices changed since their mips were built

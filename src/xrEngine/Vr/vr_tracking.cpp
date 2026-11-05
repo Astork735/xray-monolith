@@ -54,23 +54,6 @@ namespace vr
 		out_forward = forward;
 	}
 
-	Fmatrix ToEngineView(const XrPosef& pose,
-	                     Fvector& out_position, Fvector& out_direction, Fvector& out_up)
-	{
-		Fvector right, up, forward;
-		ToEngineBasis(pose.orientation, right, up, forward);
-
-		const Fvector pos = ToEnginePosition(pose.position);
-		out_position = pos;
-		out_direction = forward;
-		out_up = up;
-
-		// Reuse the engine's view builder so handedness matches the renderer.
-		Fmatrix view;
-		view.build_camera_dir(pos, forward, up);
-		return view;
-	}
-
 	Fmatrix MakeAsymmetricProjection(const XrFovf& fov, float near_plane, float far_plane)
 	{
 		// Signed tangents of the runtime-provided asymmetric frustum bounds.

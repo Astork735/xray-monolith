@@ -2,8 +2,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
-#define CHECK(x) do { if (!(x)) { std::fprintf(stderr,"line %d: %s\n",__LINE__,#x); std::exit(1); } } while(0)
-static bool Near(float a, float b, float e=1e-4f) { return std::fabs(a-b)<e; }
+#include "check.h"
 using namespace blood;
 
 static bool Touches(const PageTouch* t, int n, int axis, int u, int v, int w)
@@ -119,8 +118,13 @@ int main()
             pools.Deposit(a,p,tile,cam,ev);
             CHECK(Near(pools.Record(ip).log[0].radius,0.2f));
         }
-        // Log overflow coalesces the oldest splat.
-        for (int i=0;i<6;++i) st.Deposit(a,At(0.1f+0.12f*i,0.f,0.2f,3.f+i),tile,cam,ev);
+        // Log overflow coalesces the oldest splat. (Splashes: drops would
+        // fall into the pool that has grown over the page.)
+        for (int i=0;i<6;++i)
+        {
+            Splat sp=At(0.1f+0.12f*i,0.f,0.2f,3.f+i); sp.kind=SplatSplash;
+            st.Deposit(a,sp,tile,cam,ev);
+        }
         CHECK(int(st.Record(ia).log.size())==4);
         // Extent: flat floor stains stay at the floor height.
         CHECK(Near(st.Record(ia).lo,0.f) && Near(st.Record(ia).hi,0.f));
@@ -221,6 +225,198 @@ int main()
         const auto none=[](const Vec&,const Vec&,float,float&,Vec&,int&){return false;};
         const Contact miss=TraceArc({0,1,0},{1,0,0},9.81f,0.f,1.f,4,none);
         CHECK(!miss.hit && Near(miss.time,1.f));
+    }
+    // Forced kinds: a pool asked for by the game needs no volume threshold
+    // (scaling volumes down cannot remove pools), but only pools on floors.
+    {
+        ShapeHint pool; pool.kind=SplatPool;
+        const Splat small=ShapeFromImpact({0,0,0},{0,1,0},{0,-1,0},0.3f,1,0.f,pool);
+        CHECK(small.kind==SplatPool && small.amount==1.f);
+        CHECK(ShapeFromImpact({0,0,0},{1,0,0},{-1,0,0},0.3f,1,0.f,pool).kind!=SplatPool);
+        // A forced droplet never splashes.
+        ShapeHint drop; drop.kind=SplatDroplet;
+        CHECK(ShapeFromImpact({0,0,0},{1,0,0},{-5,0,0},0.5f,1,0.f,drop).kind==SplatDroplet);
+        // Runs and smears take their size from the hint.
+        ShapeHint run; run.kind=SplatRun; run.radius=0.003f; run.length=0.05f; run.flags=SplatBead; run.group=9;
+        const Splat r=ShapeFromImpact({0,0,0},{1,0,0},{0,-1,0},0.3f,1,0.f,run);
+        CHECK(r.kind==SplatRun && Near(r.radius,0.003f) && Near(2.f*r.radius*r.elongation,0.05f,1e-4f));
+        CHECK(r.dir.y<-0.99f && r.flags==SplatBead && r.group==9 && r.amount<kWallMobile);
+        ShapeHint mist; mist.kind=SplatMist; mist.radius=0.2f;
+        const Splat m=ShapeFromImpact({0,0,0},{1,0,0},{-5,0,0},0.1f,1,0.f,mist);
+        CHECK(m.kind==SplatMist && Near(m.radius,0.2f) && m.amount<kWallMobile);
+    }
+    // Thickness follows volume: specks and small drops stay below the wall
+    // threshold and dry where they land; large deposits run.
+    {
+        const Splat speck=ShapeFromImpact({0,0,0},{1,0,0},{-1,0,0},0.01f,1,0.f);
+        const Splat drop=ShapeFromImpact({0,0,0},{1,0,0},{-1,0,0},0.05f,1,0.f);
+        const Splat big=ShapeFromImpact({0,0,0},{1,0,0},{-1,0,0},0.5f,1,0.f);
+        CHECK(speck.amount<drop.amount && drop.amount<big.amount);
+        CHECK(drop.amount<kWallMobile && big.amount>kWallMobile);
+    }
+    // Stamp extents: the quad holds the kind's whole shape.
+    {
+        PageKey k=KeyAt({0.5f,0,0.5f},AxisPosY,tile);
+        Splat s=At(0.5f,0.f,0.5f,0.f,0.1f); s.kind=SplatSplash; s.elongation=2.f;
+        StampQuad q=QuadInPage(s,k,tile);
+        CHECK(Near(q.au,MajorExtent(s)/tile) && Near(MajorExtent(s),0.1f*2.f*1.8f));
+        s.kind=SplatRun; s.radius=0.003f; s.elongation=10.f;
+        q=QuadInPage(s,k,tile);
+        CHECK(Near(q.au,0.003f*12.f/tile) && Near(q.bv,0.006f/tile));
+    }
+    // Drops falling into a pool grow it; a smear never merges.
+    {
+        PageStore st;
+        int ev;
+        const PageKey k=KeyAt({0.5f,0,0.5f},AxisPosY,tile);
+        Splat pool=At(0.5f,0.f,0.5f,0.f,0.1f); pool.kind=SplatPool;
+        const int id=st.Deposit(k,pool,tile,{0,0,0},ev);
+        st.Deposit(k,At(0.56f,0.f,0.5f,1.f,0.02f),tile,{0,0,0},ev);
+        CHECK(st.Record(id).log.size()==1 && st.Record(id).log[0].radius>0.1f);
+        Splat smear=At(0.5f,0.f,0.5f,2.f,0.05f); smear.kind=SplatSmear;
+        st.Deposit(k,smear,tile,{0,0,0},ev);
+        st.Deposit(k,smear,tile,{0,0,0},ev);
+        CHECK(st.Record(id).log.size()==3);
+        // On a wall, drips on one spot thicken but do not turn into a pool.
+        Splat w=At(0.5f,0.5f,0.5f,0.f,0.06f); w.normal={1,0,0};
+        const PageKey wk=KeyAt(w.pos,AxisPosX,tile);
+        const int wid=st.Deposit(wk,w,tile,{0,0,0},ev);
+        st.Deposit(wk,w,tile,{0,0,0},ev);
+        CHECK(st.Record(wid).log[0].kind==SplatDroplet);
+    }
+    // Run segments of one run log as one splat spanning them; another run
+    // stays apart.
+    {
+        PageStore st;
+        int ev;
+        Splat a=At(0.5f,0.8f,0.5f,1.f,0.003f); a.normal={1,0,0}; a.dir={0,-1,0}; a.kind=SplatRun; a.group=5;
+        a.elongation=0.025f/0.003f;
+        Splat b=a; b.pos.y=0.75f; b.flags=SplatBead; b.time=2.f;
+        const PageKey k=KeyAt(a.pos,AxisPosX,tile);
+        const int id=st.Deposit(k,a,tile,{0,0,0},ev);
+        st.Deposit(k,b,tile,{0,0,0},ev);
+        const Splat& r=st.Record(id).log[0];
+        CHECK(st.Record(id).log.size()==1 && Near(r.pos.y,0.775f,1e-4f));
+        CHECK(Near(2.f*r.radius*r.elongation,0.1f,1e-4f) && r.flags==SplatBead && Near(r.time,2.f));
+        Splat c=a; c.group=6;
+        st.Deposit(k,c,tile,{0,0,0},ev);
+        CHECK(st.Record(id).log.size()==2);
+    }
+    // Coalescing keeps the shape of the larger stain: a pool stays a pool.
+    {
+        StoreLimits l; l.log_capacity=2;
+        PageStore st(l);
+        int ev;
+        const PageKey k=KeyAt({0.5f,0,0.5f},AxisPosY,tile);
+        Splat pool=At(0.3f,0.f,0.3f,0.f,0.2f); pool.kind=SplatPool;
+        Splat mist=At(0.7f,0.f,0.7f,1.f,0.02f); mist.kind=SplatMist;
+        Splat later=At(0.9f,0.f,0.1f,2.f,0.02f); later.kind=SplatSplash;
+        const int id=st.Deposit(k,pool,tile,{0,0,0},ev);
+        st.Deposit(k,mist,tile,{0,0,0},ev);
+        st.Deposit(k,later,tile,{0,0,0},ev);
+        bool has_pool=false;
+        for (const Splat& s : st.Record(id).log) has_pool|=s.kind==SplatPool;
+        CHECK(st.Record(id).log.size()==2 && has_pool);
+    }
+    // Runs: down a wall to the floor, off a ledge, or as far as the blood goes.
+    {
+        // Wall x = 0 facing +x, floor at y = 0.
+        const auto room=[](const Vec& o,const Vec& d,float len,float& dist,Vec& n,int& user)
+        {
+            float best=1e9f; Vec bn;
+            if (d.x<-1e-6f){ const float t=-o.x/d.x; if (t>=0 && t<=len && t<best){best=t;bn={1,0,0};} }
+            if (d.y<-1e-6f){ const float t=-o.y/d.y; if (t>=0 && t<=len && t<best){best=t;bn={0,1,0};} }
+            if (best>len) return false;
+            dist=best; n=bn; user=0; return true;
+        };
+        const RunPlan floor=PlanRun({0,0.2f,0},{1,0,0},0.6f,room);
+        CHECK(floor.end==RunPlan::Floor && Near(floor.end_point.y,0.f,1e-3f) && Near(floor.end_point.x,0.01f,1e-3f));
+        CHECK(floor.count>=5 && floor.times[floor.count-1]>floor.times[1] && floor.times[1]>0.f);
+        for (int i=1;i<floor.count;++i) CHECK(floor.points[i].y<floor.points[i-1].y);
+        // The run takes seconds, slowing as it goes.
+        CHECK(floor.times[floor.count-1]>1.f && floor.times[floor.count-1]<15.f);
+        // Wall only from y = 0.5 up (a table edge): the blood gathers at the edge.
+        const auto ledge=[](const Vec& o,const Vec& d,float len,float& dist,Vec& n,int& user)
+        {
+            if (d.x>=-1e-6f) return false;
+            const float t=-o.x/d.x;
+            if (t<0 || t>len) return false;
+            if (o.y+d.y*t<0.5f) return false;
+            dist=t; n={1,0,0}; user=0; return true;
+        };
+        const RunPlan edge=PlanRun({0,0.6f,0},{1,0,0},1.f,ledge);
+        CHECK(edge.end==RunPlan::Ledge && edge.end_point.y<0.56f && edge.end_point.y>0.45f);
+        // Too little blood to reach anything: it stops on the wall, at its length.
+        const RunPlan stop=PlanRun({0,2.f,0},{1,0,0},0.3f,room);
+        CHECK(stop.end==RunPlan::Stopped && Near(2.f-stop.end_point.y,RunLength(0.3f),1e-3f));
+        // Specks do not run; the length is capped.
+        CHECK(RunLength(0.1f)==0.f && PlanRun({0,2.f,0},{1,0,0},0.1f,room).count==1);
+        CHECK(RunLength(100.f)==kRunMaxLength);
+        const RunPlan longest=PlanRun({0,5.f,0},{1,0,0},100.f,room);
+        CHECK(longest.count<=RunPlan::kMaxPoints && Near(5.f-longest.end_point.y,kRunMaxLength,1e-3f));
+    }
+    // Smears: an imprint where the body rests, a wipe of the slide's length.
+    {
+        const SmearShape still=SmearFromContact({0,1,0},{0.003f,1,0},{0,0,1});
+        CHECK(still.length==0.f);
+        const SmearShape slide=SmearFromContact({0,1,0},{0,0.7f,0.02f},{0,0,1});
+        CHECK(Near(slide.length,0.3f,1e-3f) && slide.dir.y<-0.99f && Near(slide.pos.y,0.85f,1e-3f));
+        CHECK(Near(SmearFromContact({0,3,0},{0,0,0},{0,0,1}).length,0.6f));
+    }
+    // Stain heights: a pool on a board does not show on the floor beside it.
+    {
+        // A floor at y = 0.5 lies inside its slab; heights encode within it.
+        const PageKey k=KeyAt({0.5f,0.5f,0.5f},AxisPosY,tile);
+        const float h=SlabHeight01(0.5f,k,tile);
+        CHECK(h>0.f && h<1.f && EncodeHeight(h)>1.f/255.f);
+        CHECK(EncodeHeight(-0.1f)==0.f && EncodeHeight(1.1f)==0.f);
+        // Decoding back gives the height to a millimetre (slab 25 cm).
+        const float back=(EncodeHeight(h)*255.f-1.f)/254.f*SlabSize(tile)+SlabLow(k,tile);
+        CHECK(Near(back,0.5f,0.0011f));
+        // A step 5 cm down is beyond the tolerance; the board itself is not.
+        CHECK(0.05f>kHeightTolerance);
+        // A flat floor keeps its height across the stain; a ramp keeps its slope.
+        Splat s=At(0.5f,0.5f,0.5f);
+        CHECK(Near(PlaneAlong(s,1,0.9f,0.1f),0.5f));
+        s.normal=Normalize({-0.2f,1,0});
+        CHECK(Near(PlaneAlong(s,1,0.7f,0.5f),0.5f+0.2f*0.2f,1e-4f));
+        // A wall: depth along x stays at the wall.
+        Splat w=At(1.f,1.2f,0.3f); w.normal={-1,0,0};
+        CHECK(Near(PlaneAlong(w,0,0.6f,1.7f),1.f));
+    }
+    // Pool edges: a pool on a 40 cm board finds the board's edges, not the
+    // floor's far side.
+    {
+        // Board: x in [-0.2, 0.2], any z.
+        const auto board=[](const Vec& p){ return p.x>=-0.2f && p.x<=0.2f; };
+        float d[kPoolEdgeDirs];
+        const int n=PoolEdges({0,0.5f,0},0.3f,board,d);
+        CHECK(n>=2);
+        CHECK(Near(d[0],0.2f,0.012f));                     // +x
+        CHECK(Near(d[kPoolEdgeDirs/2],0.2f,0.012f));       // -x
+        CHECK(d[kPoolEdgeDirs/4]<0.f && d[3*kPoolEdgeDirs/4]<0.f); // along the board
+        // A floor wider than the pool: no edges.
+        CHECK(PoolEdges({0,0,0},0.3f,[](const Vec&){return true;},d)==0);
+        CHECK(Near(PoolEdgeDir(0).x,1.f) && Near(PoolEdgeDir(2).z,1.f,1e-5f));
+    }
+    // Stained rectangle: the fluid step and the decal only work where blood
+    // was stamped, plus a margin; a clean page has none.
+    {
+        PageStore st;
+        int ev;
+        const PageKey k=KeyAt({0.5f,0,0.5f},AxisPosY,tile);
+        float u0,v0,u1,v1;
+        PageRecord empty;
+        CHECK(!PageStore::StainedRect(empty,tile,kStainMargin,u0,v0,u1,v1));
+        const int id=st.Deposit(k,At(0.3f,0.f,0.6f,0.f,0.05f),tile,{0,0,0},ev);
+        CHECK(PageStore::StainedRect(st.Record(id),tile,0.f,u0,v0,u1,v1));
+        // The droplet's quad: 1.3 radii round its centre.
+        CHECK(Near(u0,0.3f-0.065f,1e-4f) && Near(u1,0.3f+0.065f,1e-4f));
+        CHECK(Near(v0,0.6f-0.065f,1e-4f) && Near(v1,0.6f+0.065f,1e-4f));
+        // A second stamp grows it; the margin widens it, within the page.
+        st.Deposit(k,At(0.95f,0.f,0.1f,1.f,0.05f),tile,{0,0,0},ev);
+        CHECK(PageStore::StainedRect(st.Record(id),tile,kStainMargin,u0,v0,u1,v1));
+        CHECK(Near(u0,0.235f-kStainMargin,1e-4f) && u1==1.f && v0==0.f && Near(v1,0.665f+kStainMargin,1e-4f));
     }
     std::puts("blood tests passed");
     return 0;

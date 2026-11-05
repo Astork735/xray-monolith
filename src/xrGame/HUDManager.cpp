@@ -210,6 +210,7 @@ void CHUDManager::Render_Last()
 				weapon->VrRenderLooseMagazines();
 				weapon->VrRenderHolster();
 			}
+		RenderVrFloorMagazines();
 		RenderVrPouch(*actor);
 		RenderVrBodySlots(*actor);
 		// The tracked arms, every eye, whether or not the body's own box is in

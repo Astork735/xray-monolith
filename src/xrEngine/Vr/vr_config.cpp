@@ -17,6 +17,7 @@ int   vr_tracking_origin   = 1;      // default: floor-level tracking 0 - eye-le
 float vr_world_scale       = 1.0f;
 float vr_near_plane        = 0.03f;
 int   vr_animated_grip     = 1;
+int   vr_mechanical_fire_rate = 1;
 int   vr_physical_hands    = 0;
 int   vr_physical_weapon   = 0;
 int   vr_contact_debug     = 0;

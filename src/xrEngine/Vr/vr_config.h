@@ -28,6 +28,7 @@ extern float vr_render_scale;       // per-eye render target scale
 
 extern int vr_controller_movement, vr_hands, vr_hand_rays;
 extern int vr_animated_grip;        // 1 = grips from first-person animations
+extern int vr_mechanical_fire_rate; // 1 = single shots and hand-worked actions fire as fast as worked
 extern int vr_physical_hands;       // vr_hand_physics: 0 off, 1 loose objects, 2 objects and world
 extern int vr_physical_weapon;      // vr_weapon_physics: 1 = the held weapon pushes loose objects
 extern int vr_body;                 // 1 = show the player's torso and legs (estimated from the headset)

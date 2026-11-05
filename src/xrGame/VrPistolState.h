@@ -3,11 +3,50 @@
 
 namespace vr
 {
+// How far a trigger or grip is pressed (0..1) to count as pulled or closed,
+// and how far a held grip must open to let go.
+constexpr float pull_threshold=0.65f;
+constexpr float grip_release_threshold=0.35f;
+// A trigger pulled: firing, using, working a part. No hysteresis: a
+// trigger is pressed and released quickly.
+inline bool TriggerPulled(float value) { return value>pull_threshold; }
+// A weapon's trigger, as a real one: it breaks at pull_threshold and resets
+// as the finger lets it forward, not only at rest. Tapping quickly rarely
+// lets an analog trigger back past the break (it bounces between about 1.0
+// and 0.75), which read as one long pull: full auto. Here moving back
+// reset_travel from the deepest point releases it, and moving forward
+// reset_travel from the shallowest (or across the break from below) pulls it
+// again, so each tap is a pull.
+struct FireTrigger
+{
+    static constexpr float reset_travel=0.2f;
+    bool pulled=false;
+    float extreme=0.f;  // deepest while pulled, shallowest while released
+    void Reset() { pulled=false; extreme=0.f; }
+    // Released, but a trigger still held is not a pull: it fires again once
+    // let back past the break (or by the reset travel), as after a shot.
+    void Block() { pulled=false; extreme=1.f; }
+    bool Step(float value)
+    {
+        if (pulled)
+        {
+            extreme=std::max(extreme,value);
+            if (value<=pull_threshold || extreme-value>=reset_travel) { pulled=false; extreme=value; }
+        }
+        else
+        {
+            extreme=std::min(extreme,value);
+            if (value>pull_threshold && (extreme<=pull_threshold || value-extreme>=reset_travel))
+            { pulled=true; extreme=value; }
+        }
+        return pulled;
+    }
+};
 // Holding a weapon or magazine follows the physical grip. Release needs a
 // clearly opened hand, so a relaxed natural hold cannot flicker the grab.
 inline bool GripHeld(float squeeze, bool held)
 {
-    return squeeze>(held ? 0.35f : 0.65f);
+    return squeeze>(held ? grip_release_threshold : pull_threshold);
 }
 // One held grip may claim one holstered weapon. Crossing another holster
 // while still squeezed cannot switch slots; releasing re-arms the next draw.
@@ -107,6 +146,18 @@ template<class Rounds> struct MagazineMechanism
     bool TakeLoose(int index)
     {
         if (held >= 0 || index < 0 || index > 1 || index == inserted) return false;
+        held = index; return true;
+    }
+    // A magazine picked up from the world (VrFloorMagazine) into the hand, in
+    // the place not in the well. Its rounds move in; the pouch magazine it
+    // replaces gives its own to `displaced` (back to reserve for the caller).
+    bool TakeFromWorld(Rounds& rounds, Rounds& displaced)
+    {
+        if (held >= 0) return false;
+        const int index = inserted >= 0 ? 1 - inserted : next_pouch;
+        displaced.insert(displaced.end(), magazines[index].begin(), magazines[index].end());
+        magazines[index].assign(rounds.begin(), rounds.end());
+        rounds.clear();
         held = index; return true;
     }
     bool DiscardHeld()

@@ -725,6 +725,7 @@ void CActor::net_Destroy()
 {
 	vr::ForgetGameplayBody(this);
 	ReleaseVrHandBodies(*this);
+	ReleaseVrFloorMagazines();
 	ReleaseVrBodySlots(*this);
 	inherited::net_Destroy();
 

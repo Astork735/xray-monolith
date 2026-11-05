@@ -101,9 +101,12 @@ namespace xr_imgui
         ImGuiIO& io = ImGui::GetIO();
         io.MouseDrawCursor = false;
 
+        // In layout units: the window's pixels, or VR's UI panel grid.
+        const float width = io.DisplaySize.x > 0.f ? io.DisplaySize.x : static_cast<float>(Device.clientWidth);
+        const float height = io.DisplaySize.y > 0.f ? io.DisplaySize.y : static_cast<float>(Device.clientHeight);
         Fvector2 pos = { io.MousePos.x, io.MousePos.y };
-        pos.x = iFloor(pos.x * (UI_BASE_WIDTH / (float)Device.clientWidth));
-        pos.y = iFloor(pos.y * (UI_BASE_HEIGHT / (float)Device.clientHeight));
+        pos.x = iFloor(pos.x * (UI_BASE_WIDTH / width));
+        pos.y = iFloor(pos.y * (UI_BASE_HEIGHT / height));
 
         GetUICursor().SetUICursorPosition(pos);
 
@@ -136,8 +139,13 @@ namespace xr_imgui
         Ivector2 p;
         IR_GetMousePosReal(Device.m_hWnd, p);
 
+        // Client pixels to layout units (VR lays the overlay out on its UI
+        // panel's grid, not the window).
         ImGuiIO& io = ImGui::GetIO();
-        io.AddMousePosEvent(static_cast<float>(p.x), static_cast<float>(p.y));
+        const bool sized = io.DisplaySize.x > 0.f && io.DisplaySize.y > 0.f && Device.clientWidth && Device.clientHeight;
+        const float sx = sized ? io.DisplaySize.x / static_cast<float>(Device.clientWidth) : 1.f;
+        const float sy = sized ? io.DisplaySize.y / static_cast<float>(Device.clientHeight) : 1.f;
+        io.AddMousePosEvent(static_cast<float>(p.x) * sx, static_cast<float>(p.y) * sy);
     }
 
     void ide::IR_OnKeyboardPress(int key)

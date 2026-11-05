@@ -435,7 +435,17 @@ void CDetailManager::Render()
 
 	// MT
 	MT_SYNC();
-	if (g_vr_rendering_eye) UpdateVisibleM();
+	// VR: each eye (and the scope view) gathers its own lists once per pass,
+	// from cleared lists. The frame's MT_CALC already appended a set from the
+	// saved camera, and every later Render of the pass (sun cascades, spot
+	// shadows) appended another, so grass was drawn two or more times.
+	if (g_vr_rendering_eye && (!m_vr_visible_ready || m_vr_visible_frame != RDEVICE.dwFrame))
+	{
+		clear_visibles();
+		UpdateVisibleM();
+		m_vr_visible_ready = true;
+		m_vr_visible_frame = RDEVICE.dwFrame;
+	}
 
 	RDEVICE.Statistic->RenderDUMP_DT_Render.Begin();
 	g_pGamePersistent->m_pGShaderConstants->m_blender_mode.w = 1.0f; //--#SM+#-- Флaa нaчaлa ?aндa?a o?aвu [begin of grass render]
@@ -492,10 +502,16 @@ void CDetailManager::details_clear()
 {
 	// Disable fade, next render will be scene
 	fade_distance = 99999;
+	m_vr_visible_ready = false;
 
 	if (ps_ssfx_grass_shadows.x <= 0)
 		return;
 
+	clear_visibles();
+}
+
+void CDetailManager::clear_visibles()
+{
 	for (u32 x = 0; x < 3; x++)
 	{
 		vis_list& list = m_visibles[x];

@@ -295,6 +295,17 @@ void CActor::VrAfterCameraUpdate()
 void CActor::VrControls(float dt)
 {
     m_vr_move.set(0,0,0);
+    // On the desktop (VR never started, or fell back to it) the stance left
+    // from VR is let go once; re-applying it every update kept the player
+    // crouched with no way to stand.
+    if (!g_vr_owns_present)
+    {
+        m_vr_stance=m_vr_physical_stance=0;
+        m_vr_stick_forward=0.f;
+        m_vr_sprint_down=false;
+        if (m_vr_applied_stance) VrApplyStance();
+        return;
+    }
     const bool ui_blocked = CurrentGameUI() && CurrentGameUI()->TopInputReceiver() &&
         CurrentGameUI()->TopInputReceiver()->StopAnyMove();
     if (!g_Alive() || Remote() || m_holder || ui_blocked || IsTalking() || m_input_external_handler)

@@ -18,6 +18,9 @@ public:
 	dxRender_Visual* testQ_V;
 	u32 testQ_id;
 	u32 testQ_frame;
+	// A second pass this frame (the other VR eye) whose query is already
+	// out: it only marks, and issues none.
+	bool repeat_pass = false;
 public:
 	smapvis();
 	~smapvis();

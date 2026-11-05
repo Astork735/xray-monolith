@@ -1,4 +1,5 @@
 #include "stdafx.h"
+#include "../../xrEngine/Vr/vr_performance.h"
 
 IC bool pred_area(light* _1, light* _2)
 {
@@ -53,6 +54,10 @@ IC void hud_light_restore(xr_map<light*, std::pair<Fvector, Fvector>>& saved_pos
 
 void CRender::render_lights(light_Package& LP)
 {
+	// VR capture only (vr_perf_capture): shadow-map setup and rendering
+	// against light accumulation, alternating per shadow-map batch.
+	vr::PerfSection perf;
+	perf.Next(vr::PerfStage::LightShadow);
 	xr_map<light*, std::pair<Fvector, Fvector>> saved_pos;
 	//////////////////////////////////////////////////////////////////////////
 	// 0. apply hud_mode projection if necessary
@@ -136,6 +141,7 @@ void CRender::render_lights(light_Package& LP)
 		stats.s_used ++;
 
 		// generate spot shadowmap
+		perf.Next(vr::PerfStage::LightShadow);
 		Target->phase_smap_spot_clear();
 		xr_vector<light*>& source = LP.v_shadowed;
 		light* L = source.back();
@@ -197,6 +203,7 @@ void CRender::render_lights(light_Package& LP)
 		PIX_EVENT(UNSHADOWED_LIGHTS);
 
 		//		switch-to-accumulator
+		perf.Next(vr::PerfStage::LightAccum);
 		Target->phase_accumulator();
 		HOM.Disable();
 
@@ -245,6 +252,7 @@ void CRender::render_lights(light_Package& LP)
 
 				if (RImplementation.o.advancedpp && ps_r2_ls_flags.is(R2FLAG_VOLUMETRIC_LIGHTS))
 				{
+					vr::PerfScope volumetric_timing(vr::PerfStage::LightVolumetric, true);
 					// Current Resolution
 					float w = float(Device.dwWidth);
 					float h = float(Device.dwHeight);
@@ -266,6 +274,7 @@ void CRender::render_lights(light_Package& LP)
 	}
 
 	PIX_EVENT(POINT_LIGHTS_ACCUM);
+	perf.Next(vr::PerfStage::LightAccum);
 	// Point lighting (unshadowed, if left)
 	if (!LP.v_point.empty())
 	{
@@ -317,6 +326,8 @@ void CRender::render_indirect(light* L)
 
 	xr_vector<light_indirect>& Lvec = L->indirect;
 	if (Lvec.empty()) return;
+	// VR capture only (vr_perf_capture); nested in LightAccum.
+	vr::PerfScope timing(vr::PerfStage::LightIndirect, true);
 	float LE = L->color.intensity();
 	for (u32 it = 0; it < Lvec.size(); it++)
 	{

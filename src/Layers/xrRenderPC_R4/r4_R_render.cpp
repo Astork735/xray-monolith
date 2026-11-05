@@ -1,4 +1,5 @@
 #include "stdafx.h"
+#include "../../xrEngine/Vr/vr_performance.h"
 #include "../../xrEngine/igame_persistent.h"
 #include "../xrRender/FBasicVisual.h"
 #include "../../xrEngine/customhud.h"
@@ -16,6 +17,7 @@ IC bool pred_sp_sort(ISpatial* _1, ISpatial* _2)
 
 void CRender::render_main(Fmatrix& m_ViewProjection, bool _fportals)
 {
+    vr::PerfScope timing(vr::PerfStage::Visibility);
 	PIX_EVENT(render_main);
 	//	Msg						("---begin");
 	marker ++;
@@ -223,6 +225,15 @@ extern u32 g_r;
 
 void CRender::Render()
 {
+    struct PerfDrawCount
+    {
+        bool active = vr::PerfFrameActive();
+        u32 before = active ? RCache.stat.calls : 0;
+        ~PerfDrawCount()
+        {
+            if (active && RCache.stat.calls >= before) vr::PerfAddDraws(RCache.stat.calls - before);
+        }
+    } perf_draw_count;
     struct RestoreEffects
     {
         CRender& render; CRender::_options options; Flags32 flags; float blur; bool active;
@@ -232,7 +243,13 @@ void CRender::Render()
     {
         o.ssfx_taa = o.ssfx_motionblur = o.ssfx_motionvectors = 0;
         o.ssfx_ao = o.ssfx_il = o.ssfx_ssr = o.ssfx_sss = 0;
-        o.ssfx_water = o.ssfx_fog = o.ssfx_rain = o.ssfx_volumetric = 0;
+        o.ssfx_water = o.ssfx_fog = o.ssfx_rain = 0;
+        // SSFX volumetric light stays (user decision 2026-11-03): per eye it is
+        // self-contained (its flags reset in phase_scene_prepare, a spatial
+        // blur, no history) and its 1/8 targets have scope twins. Without it a
+        // spot's shafts used the legacy full-eye-resolution pass, most of the
+        // GAMMA local-light cost (vr_perf_capture: 4.7 ms typical, 14.8 ms on
+        // the worst 5% of frames, both eyes).
         ps_r2_mblur = 0;
         // The depth pre-pass (r2_zfill) builds a symmetric projection from the
         // FOV envelope, which does not match the eye's asymmetric one.
@@ -398,6 +415,7 @@ void CRender::Render()
 	//******* Main render :: PART-0	-- first
 	if (!split_the_scene_to_minimize_wait)
 	{
+		vr::PerfScope timing(vr::PerfStage::Geometry, true);
 		PIX_EVENT(DEFER_PART0_NO_SPLIT);
 		// level, DO NOT SPLIT
 		Target->phase_scene_begin();
@@ -411,6 +429,7 @@ void CRender::Render()
 	}
 	else
 	{
+		vr::PerfScope timing(vr::PerfStage::Geometry, true);
 		PIX_EVENT(DEFER_PART0_SPLIT);
 		// level, SPLIT
 		Target->phase_scene_begin();
@@ -478,6 +497,7 @@ void CRender::Render()
 	//******* Main render :: PART-1 (second)
 	if (split_the_scene_to_minimize_wait)
 	{
+		vr::PerfScope timing(vr::PerfStage::Geometry, true);
 		PIX_EVENT(DEFER_PART1_SPLIT);
 		// skybox can be drawn here
 		
@@ -607,6 +627,7 @@ void CRender::Render()
 	// Directional light - fucking sun
 	if (bSUN) //bSUN && Device.dwFrame & 1 --Delayed sun update. Worth to check it in future
 	{
+		vr::PerfScope timing(vr::PerfStage::Sun, true);
 		PIX_EVENT(DEFER_SUN);
 		RImplementation.stats.l_visible ++;
 		if (!ps_r2_ls_flags_ext.is(R2FLAGEXT_SUN_OLD))
@@ -650,6 +671,8 @@ void CRender::Render()
 
 	// Lighting, non dependant on OCCQ
 	{
+		vr::PerfScope timing(vr::PerfStage::LocalLights, true);
+        vr::PerfAddShadowLights(unsigned(LP_normal.v_shadowed.size()));
 		PIX_EVENT(DEFER_LIGHT_NO_OCCQ);
 		Target->phase_accumulator();
 		HOM.Disable();
@@ -658,6 +681,8 @@ void CRender::Render()
 
 	// Lighting, dependant on OCCQ
 	{
+		vr::PerfScope timing(vr::PerfStage::LocalLights, true);
+        vr::PerfAddShadowLights(unsigned(LP_pending.v_shadowed.size()));
 		PIX_EVENT(DEFER_LIGHT_OCCQ);
 		render_lights(LP_pending);
 	}
@@ -669,6 +694,7 @@ void CRender::Render()
 
 	// Postprocess
 	{
+		vr::PerfScope timing(vr::PerfStage::Post, true);
 		PIX_EVENT(DEFER_LIGHT_COMBINE);
 		Target->phase_combine();
     if (g_vr_rendering_eye) g_vr_eye_rendered = true;

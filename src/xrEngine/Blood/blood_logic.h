@@ -108,6 +108,20 @@ inline void PageUv(const Vec& p, const PageKey& k, float tile, float& u, float& 
     v = Comp(p, t2)/tile - float(k.v);
 }
 
+// Surface height of the stains. A page is a flat projection: without it, a
+// pool on a board would also show on the floor beside it, a few centimetres
+// lower but inside the same page box. Every stained texel records the height
+// (along the page's main axis) of the surface its stain landed on, and is
+// not drawn on surfaces more than kHeightTolerance behind it (in front of
+// it, grass blades and litter still take the blood). Stored in the page's
+// alpha as 1..255 over the slab; 0 means unknown (drawn anywhere in the box).
+constexpr float kHeightTolerance = 0.03f;
+// Position of the slab's lower boundary along the main axis.
+inline float SlabLow(const PageKey& k, float tile) { return float(k.w)*SlabSize(tile) + SlabOrigin(tile); }
+// 0..1 across the page's slab (outside: the plane leaves the slab there).
+inline float SlabHeight01(float along, const PageKey& k, float tile) { return (along - SlabLow(k, tile))/SlabSize(tile); }
+inline float EncodeHeight(float h01) { return h01 < 0.f || h01 > 1.f ? 0.f : (1.f + 254.f*h01)/255.f; }
+
 struct PageTouch { PageKey key; float weight = 0; };
 
 // Pages a splat covers: every axis carrying weight for its normal, every
@@ -142,16 +156,38 @@ inline int PagesForSplat(const Vec& p, const Vec& n, float radius, float tile, P
 }
 
 // ---------------------------------------------------------------- splats
-enum SplatKind : uint8_t { SplatDroplet, SplatSplash, SplatPool, SplatKinds };
+// Droplet, splash and pool come from a drop's impact; the others are asked
+// for by the game: fine high-velocity spatter (mist), blood wiped onto a
+// surface by a bleeding body (smear), and blood running down a wall (run).
+// The stamp shader (blood_stamp.ps) draws each kind by this number.
+enum SplatKind : uint8_t { SplatDroplet, SplatSplash, SplatPool, SplatMist, SplatSmear, SplatRun, SplatKinds };
+enum SplatFlags : uint8_t { SplatBead = 1 };   // a run's lower end: the bead of blood that stopped there
+
+// Fluid amounts above this run down walls (blood_flow.cs, wall_mobile).
+// Small drops and specks stay below it and dry where they land; drops piling
+// up on one spot add up past it and run.
+constexpr float kWallMobile = 0.45f;
+// Thickness of one mist speck (blood_stamp.ps, KIND_MIST): never runs.
+constexpr float kMistAmount = 0.38f;
 
 struct ShapeParams
 {
     float droplet_volume = 0.08f; // below: a single droplet
     float pool_volume = 1.2f;     // above, on a floor: a spreading pool
     float splash_speed = 2.0f;    // m/s at impact for a splash with satellites
-    float radius_scale = 0.045f;  // radius (m) of a unit volume
+    float radius_scale = 0.045f;  // radius (m) of a unit volume (about 2 mL)
     float max_radius = 0.45f;
     float max_elongation = 4.f;
+};
+
+// What the game asks for beyond the impact itself (BloodSplatRequest).
+struct ShapeHint
+{
+    int kind = -1;          // forced SplatKind; -1 derives it from volume and impact
+    float length = 0;       // runs and smears: streak length (m)
+    float radius = 0;       // mist, runs and smears: half-width (m)
+    uint8_t flags = 0;
+    uint32_t group = 0;     // runs: segments of one run
 };
 
 struct Splat
@@ -163,7 +199,9 @@ struct Splat
     float amount = 0;         // 0..1 fluid deposited at the centre
     float time = 0;           // deposit time (s, engine global time)
     uint32_t seed = 0;
+    uint32_t group = 0;
     uint8_t kind = SplatDroplet;
+    uint8_t flags = 0;
 };
 
 inline Vec AnyTangent(const Vec& n)
@@ -173,13 +211,21 @@ inline Vec AnyTangent(const Vec& n)
     return Normalize(t, {1, 0, 0});
 }
 
+// Thickness a drop leaves: small drops make thin stains, larger ones thicker.
+inline float AmountForVolume(float volume)
+{
+    return Clamp(0.2f + 0.65f*std::sqrt(std::max(volume, 0.f)/0.5f), 0.2f, 0.85f);
+}
+
 // Shape of a stain from how a drop met the surface: grazing, fast drops
 // stretch along their tangential velocity; large volumes on floors pool.
+// A hint can force the kind: a pool only where the surface is a floor.
 inline Splat ShapeFromImpact(const Vec& pos, const Vec& normal, const Vec& velocity, float volume, uint32_t seed,
-                             float time, const ShapeParams& sp = ShapeParams())
+                             float time, const ShapeHint& hint = ShapeHint(), const ShapeParams& sp = ShapeParams())
 {
     Splat s;
     s.pos = pos; s.normal = Normalize(normal); s.seed = seed; s.time = time;
+    s.flags = hint.flags; s.group = hint.group;
     const float speed = Length(velocity);
     const Vec vdir = Normalize(velocity, Mul(s.normal, -1.f));
     const float head_on = std::fabs(Dot(vdir, s.normal)); // 1 = perpendicular impact
@@ -190,19 +236,64 @@ inline Splat ShapeFromImpact(const Vec& pos, const Vec& normal, const Vec& veloc
     // Spreading grows with speed; area is kept when the stain stretches.
     const float area_radius = sp.radius_scale*std::sqrt(std::max(volume, 0.f))*(1.f + 0.6f*speed_k);
     s.radius = Clamp(area_radius/std::sqrt(s.elongation), 0.004f, sp.max_radius);
-    if (volume >= sp.pool_volume && s.normal.y > 0.7f)
+    const bool floor = s.normal.y > 0.7f;
+
+    if (hint.kind == SplatMist || hint.kind == SplatSmear || hint.kind == SplatRun)
+    {
+        s.kind = uint8_t(hint.kind);
+        s.radius = Clamp(hint.radius > 0 ? hint.radius : area_radius, 0.002f, sp.max_radius);
+        if (hint.length > 0) s.elongation = std::max(1.f, 0.5f*hint.length/s.radius);
+        else if (hint.kind != SplatMist) s.elongation = 1.f;
+        // A run is a thin trail: below the wall threshold, so the GPU step
+        // leaves it where it was planned (its bead may sag a little).
+        // Mist specks are thin and never run.
+        // Mist: the same droplets spread over a wider pattern further from
+        // the wound, so it thins out. Its amount carries that density; each
+        // speck is drawn kMistAmount thick (blood_stamp.ps).
+        if (hint.kind == SplatRun) s.amount = 0.42f;
+        else if (hint.kind == SplatMist) s.amount = kMistAmount*Clamp(0.2f + 0.05f/s.radius, 0.3f, 1.f);
+        else s.amount = std::min(AmountForVolume(volume), 0.6f);
+        return s;
+    }
+    if ((hint.kind == SplatPool || (hint.kind < 0 && volume >= sp.pool_volume)) && floor)
     {
         s.kind = SplatPool; s.elongation = 1.f + 0.3f*(s.elongation - 1.f); s.amount = 1.f;
         s.radius = Clamp(area_radius, 0.004f, sp.max_radius);
     }
-    else if (volume >= sp.droplet_volume && speed >= sp.splash_speed) { s.kind = SplatSplash; s.amount = 0.85f; }
-    else { s.kind = SplatDroplet; s.amount = 0.7f; }
+    else if (hint.kind != SplatDroplet && volume >= sp.droplet_volume && speed >= sp.splash_speed)
+    {
+        s.kind = SplatSplash; s.amount = AmountForVolume(volume);
+    }
+    else { s.kind = SplatDroplet; s.amount = AmountForVolume(volume); }
     return s;
 }
 
+// Extent of a splat's stamp from its centre (m): along the travel direction,
+// with room for splash satellites, a run's bead and a smear's ragged tail;
+// and across it. The stamp shader works in radii of the same quad.
+inline float MajorExtent(const Splat& s)
+{
+    switch (s.kind)
+    {
+    case SplatSplash: return s.radius*s.elongation*1.8f;
+    case SplatMist: return s.radius*s.elongation*1.2f;
+    case SplatSmear: return s.radius*(s.elongation + 0.6f);
+    case SplatRun: return s.radius*(s.elongation + 2.f);
+    default: return s.radius*s.elongation*1.3f;
+    }
+}
+inline float MinorExtent(const Splat& s)
+{
+    switch (s.kind)
+    {
+    case SplatMist: return s.radius*1.2f;
+    case SplatRun: return s.radius*2.f;
+    default: return s.radius*1.3f;
+    }
+}
+
 // Stamp rectangle of a splat in a page: centre, major half-axis (along the
-// travel direction, with room for the splash tail) and minor half-axis, all
-// in page texture coordinates.
+// travel direction) and minor half-axis, all in page texture coordinates.
 struct StampQuad { float cu, cv, au, av, bu, bv; };
 inline StampQuad QuadInPage(const Splat& s, const PageKey& k, float tile)
 {
@@ -212,20 +303,55 @@ inline StampQuad QuadInPage(const Splat& s, const PageKey& k, float tile)
     float du = Comp(s.dir, t1), dv = Comp(s.dir, t2);
     const float l = std::sqrt(du*du + dv*dv);
     if (l < 1e-3f) { du = 1; dv = 0; } else { du /= l; dv /= l; }
-    const float major = s.radius*s.elongation*(s.kind == SplatSplash ? 1.8f : 1.3f)/tile;
-    const float minor = s.radius*1.3f/tile;
+    const float major = MajorExtent(s)/tile;
+    const float minor = MinorExtent(s)/tile;
     q.au = du*major; q.av = dv*major;
     q.bu = -dv*minor; q.bv = du*minor;
     return q;
 }
 
+// Height along a page's main axis of the plane a splat landed on, at world
+// tangent coordinates (c1, c2) of that page: a tilted floor or ramp keeps its
+// slope across the stain. Surfaces nearly edge-on to the axis keep the
+// splat's own height (they barely draw on this page).
+inline float PlaneAlong(const Splat& s, int main, float c1, float c2)
+{
+    int t1, t2; TangentAxes(main, t1, t2);
+    const float nm = Comp(s.normal, main);
+    float along = Comp(s.pos, main);
+    if (std::fabs(nm) > 0.2f)
+        along -= (Comp(s.normal, t1)*(c1 - Comp(s.pos, t1)) + Comp(s.normal, t2)*(c2 - Comp(s.pos, t2)))/nm;
+    return along;
+}
+
+// A run that grew by one more segment: one logged splat spans both.
+inline void ExtendRun(Splat& o, const Splat& s)
+{
+    const float ho = o.radius*o.elongation, hs = s.radius*s.elongation;
+    const float c = Dot(Sub(s.pos, o.pos), o.dir);
+    const float lo = std::min(-ho, c - hs), hi = std::max(ho, c + hs);
+    o.pos = Add(o.pos, Mul(o.dir, 0.5f*(lo + hi)));
+    o.elongation = std::max(1.f, 0.5f*(hi - lo)/std::max(o.radius, 1e-4f));
+    o.flags |= s.flags;
+    o.time = std::max(o.time, s.time);
+}
+
 // ---------------------------------------------------------------- page store
+// Margin round a page's stained rectangle (m): room for the fluid step to
+// spread blood beyond the stamps (a pool keeps spreading while its corpse
+// oozes; a wall dribble runs about its own length).
+constexpr float kStainMargin = 0.08f;
+
 struct PageRecord
 {
     PageKey key;
     std::vector<Splat> log;
     int slot = -1;
     float lo = 0, hi = 0;          // extent of the stained surface along the main axis
+    // Page coordinates (0..1) holding every stamp written to the page; empty
+    // while u1 < u0. The fluid step and the decal work inside it (plus
+    // kStainMargin), not over the whole page.
+    float u0 = 1, v0 = 1, u1 = 0, v1 = 0;
     float last_deposit = 0;        // engine time of the latest splat
     uint32_t last_visible = 0;     // frame the page was last drawn
     bool used = false;
@@ -285,7 +411,19 @@ public:
         r.lo = std::min(r.lo, along - spread);
         r.hi = std::max(r.hi, along + spread);
         r.last_deposit = std::max(r.last_deposit, s.time);
+        GrowStained(r, s, tile);
         return id;
+    }
+
+    // The page rectangle (0..1) round its stamps, widened by `margin` metres;
+    // false if nothing has been stamped.
+    static bool StainedRect(const PageRecord& r, float tile, float margin, float& u0, float& v0, float& u1, float& v1)
+    {
+        if (r.u1 < r.u0 || r.v1 < r.v0) return false;
+        const float m = margin/tile;
+        u0 = Clamp(r.u0 - m, 0.f, 1.f); v0 = Clamp(r.v0 - m, 0.f, 1.f);
+        u1 = Clamp(r.u1 + m, 0.f, 1.f); v1 = Clamp(r.v1 + m, 0.f, 1.f);
+        return u1 > u0 && v1 > v0;
     }
 
     // Physical slot for a page. A page not resident takes a free slot, or the
@@ -328,6 +466,15 @@ public:
     }
 
 private:
+    // Grows the page's stained rectangle to the splat's stamp quad.
+    static void GrowStained(PageRecord& r, const Splat& s, float tile)
+    {
+        const StampQuad q = QuadInPage(s, r.key, tile);
+        const float eu = std::fabs(q.au) + std::fabs(q.bu), ev = std::fabs(q.av) + std::fabs(q.bv);
+        r.u0 = std::min(r.u0, Clamp(q.cu - eu, 0.f, 1.f)); r.u1 = std::max(r.u1, Clamp(q.cu + eu, 0.f, 1.f));
+        r.v0 = std::min(r.v0, Clamp(q.cv - ev, 0.f, 1.f)); r.v1 = std::max(r.v1, Clamp(q.cv + ev, 0.f, 1.f));
+    }
+
     int Allocate(const PageKey& key)
     {
         int id;
@@ -380,26 +527,50 @@ private:
 
     void AddToLog(PageRecord& r, const Splat& s)
     {
-        // A splat landing on an earlier one merges into it (repeated hits on
-        // one spot thicken the stain instead of filling the log).
+        const float max_radius = ShapeParams().max_radius;
         for (Splat& o : r.log)
-            if (Length(Sub(o.pos, s.pos)) < 0.03f && o.kind == s.kind)
+        {
+            // The next segment of a run extends the run already logged.
+            if (s.kind == SplatRun)
             {
-                o.amount = std::min(1.f, o.amount + 0.5f*s.amount);
-                // Drops on one spot add their area (drips grow into a small
-                // pool); a pool request already carries the accumulated
-                // volume (a corpse's ooze), so it keeps the larger size.
-                o.radius = s.kind == SplatPool ? std::max(o.radius, s.radius)
-                    : std::min(std::sqrt(o.radius*o.radius + 0.5f*s.radius*s.radius), ShapeParams().max_radius);
+                if (o.kind == SplatRun && s.group != 0 && o.group == s.group) { ExtendRun(o, s); return; }
+                continue;
+            }
+            // Every wipe is its own mark; runs only grow by their segments.
+            if (s.kind == SplatSmear || o.kind == SplatSmear || o.kind == SplatRun) continue;
+            const float d = Length(Sub(o.pos, s.pos));
+            // A drop falling into a pool joins it.
+            if (o.kind == SplatPool && s.kind == SplatDroplet && d < std::max(0.03f, 0.8f*o.radius))
+            {
+                o.radius = std::min(std::sqrt(o.radius*o.radius + s.radius*s.radius*s.elongation), max_radius);
                 o.time = std::max(o.time, s.time);
                 return;
             }
+            // A splat landing on an earlier one merges into it (repeated hits
+            // on one spot thicken the stain instead of filling the log).
+            if (d < 0.03f && o.kind == s.kind)
+            {
+                o.amount = std::min(1.f, o.amount + 0.5f*s.amount);
+                // Drops on one spot add their area; a pool request already
+                // carries the accumulated volume (a corpse's ooze), so it
+                // keeps the larger size.
+                o.radius = s.kind == SplatPool ? std::max(o.radius, s.radius)
+                    : std::min(std::sqrt(o.radius*o.radius + 0.5f*s.radius*s.radius), max_radius);
+                o.time = std::max(o.time, s.time);
+                // Drips piling up on a floor (a bleeder standing still) pool.
+                if (o.kind == SplatDroplet && o.normal.y > 0.7f && o.radius > 0.05f)
+                {
+                    o.kind = SplatPool; o.amount = 1.f; o.elongation = 1.f;
+                }
+                return;
+            }
+        }
         if (int(r.log.size()) >= m_limits.log_capacity && !r.log.empty()) Coalesce(r);
         r.log.push_back(s);
     }
 
     // Log full: the oldest splat merges with its nearest neighbour into one
-    // wider stain of the same total area.
+    // wider stain of the same total area, shaped like the larger of the two.
     static void Coalesce(PageRecord& r)
     {
         size_t oldest = 0;
@@ -413,14 +584,16 @@ private:
             if (d < best) { best = d; nearest = i; }
         }
         if (nearest == oldest) { r.log.erase(r.log.begin() + long(oldest)); return; }
-        Splat& a = r.log[nearest];
+        const Splat& a = r.log[nearest];
         const Splat& b = r.log[oldest];
         const float wa = a.radius*a.radius*a.elongation, wb = b.radius*b.radius*b.elongation;
         const float wsum = std::max(wa + wb, 1e-8f);
-        a.pos = Add(Mul(a.pos, wa/wsum), Mul(b.pos, wb/wsum));
-        a.radius = std::sqrt((wa + wb)/std::max(a.elongation, 1.f)) + 0.25f*std::min(best, a.radius + b.radius);
-        a.amount = std::max(a.amount, b.amount);
-        a.kind = std::max(a.kind, b.kind);
+        Splat merged = wb > wa ? b : a;
+        merged.pos = Add(Mul(a.pos, wa/wsum), Mul(b.pos, wb/wsum));
+        merged.radius = std::sqrt((wa + wb)/std::max(merged.elongation, 1.f)) + 0.25f*std::min(best, a.radius + b.radius);
+        merged.amount = std::max(a.amount, b.amount);
+        merged.time = std::max(a.time, b.time);
+        r.log[nearest] = merged;
         r.log.erase(r.log.begin() + long(oldest));
     }
 
@@ -553,5 +726,152 @@ Contact TraceArc(Vec p, Vec v, float gravity, float drag, float max_time, int se
     }
     c.point = p; c.velocity = v; c.time = t;
     return c;
+}
+
+// ---------------------------------------------------------------- runs
+// Blood thick enough to run down a wall: how far it goes, where it stops and
+// when it gets there. Planned on the CPU so a run crosses page edges, reaches
+// the floor or drips off a ledge, and survives its page being evicted.
+constexpr float kRunStep = 0.05f;       // metres per planned segment
+constexpr float kRunSpeed = 0.08f;      // m/s at the start; it slows as it thins
+constexpr float kRunVolume = 0.25f;     // smallest wall stain that runs
+constexpr float kRunMaxLength = 1.f;
+
+inline float RunLength(float volume)
+{
+    return volume < kRunVolume ? 0.f : Clamp(0.15f*volume/kRunVolume, 0.f, kRunMaxLength);
+}
+// Time to run `dist` of a run `length` long.
+inline float RunTime(float dist, float length)
+{
+    return dist/kRunSpeed*(1.f + dist/std::max(length, 1e-3f));
+}
+// Down along a surface: gravity with the part into the surface removed.
+inline Vec DownAlong(const Vec& n)
+{
+    const Vec g{0, -1, 0};
+    return Normalize(Sub(g, Mul(n, Dot(g, n))), g);
+}
+
+struct RunPlan
+{
+    enum End { Stopped, Floor, Ledge };
+    static const int kMaxPoints = 24;   // kRunMaxLength / kRunStep, the start and the end
+    int end = Stopped;
+    int count = 0;                  // points along the run, [0] = where the blood landed
+    Vec points[kMaxPoints];
+    Vec normals[kMaxPoints];        // the wall at each point
+    float times[kMaxPoints] = {};   // seconds after landing
+    Vec end_point;                  // floor: where the run meets it; ledge: the edge
+};
+
+// Walks down the wall in short steps, asking `ray(origin, dir, length,
+// distance, normal, user)` (normal facing the ray) for the floor below each
+// step and for the wall under the next point. The wall may tilt or bend; a
+// step that finds no wall is a ledge, anything else in the way stops it.
+template <class RayFn>
+RunPlan PlanRun(const Vec& start, const Vec& normal, float volume, RayFn&& ray)
+{
+    RunPlan plan;
+    const float length = RunLength(volume);
+    Vec p = start, n = Normalize(normal);
+    plan.points[0] = p; plan.normals[0] = n; plan.count = 1;
+    plan.end_point = p;
+    float travelled = 0;
+    while (travelled < length - 1e-4f && plan.count < RunPlan::kMaxPoints)
+    {
+        const Vec d = DownAlong(n);
+        const float step = std::min(kRunStep, length - travelled);
+        float dist = 0; Vec hn; int user = -1;
+        const Vec off = Add(p, Mul(n, 0.01f));
+        if (ray(off, d, step + 0.01f, dist, hn, user))
+        {
+            const Vec hit = Add(off, Mul(d, dist));
+            travelled += dist;
+            plan.points[plan.count] = hit; plan.normals[plan.count] = n;
+            plan.times[plan.count] = RunTime(travelled, length);
+            ++plan.count;
+            plan.end = hn.y > 0.7f ? RunPlan::Floor : RunPlan::Stopped;
+            plan.end_point = hit;
+            return plan;
+        }
+        const Vec q = Add(p, Mul(d, step));
+        const Vec probe = Add(q, Mul(n, 0.02f));
+        if (ray(probe, Mul(n, -1.f), 0.04f, dist, hn, user) && std::fabs(hn.y) < 0.7f)
+        {
+            p = Add(probe, Mul(n, -dist));
+            n = Normalize(hn);
+            travelled += step;
+            plan.points[plan.count] = p; plan.normals[plan.count] = n;
+            plan.times[plan.count] = RunTime(travelled, length);
+            ++plan.count;
+            plan.end_point = p;
+            continue;
+        }
+        // The wall ends inside this step: the blood gathers at the edge.
+        const Vec edge = Add(p, Mul(d, 0.5f*step));
+        travelled += 0.5f*step;
+        plan.points[plan.count] = edge; plan.normals[plan.count] = n;
+        plan.times[plan.count] = RunTime(travelled, length);
+        ++plan.count;
+        plan.end = RunPlan::Ledge;
+        plan.end_point = edge;
+        return plan;
+    }
+    return plan;
+}
+
+// ---------------------------------------------------------------- pool edges
+// Where a pool spreading on a floor runs out of that floor: an edge it pours
+// over (a board, a table, a step). `same(p)` says whether the surface under
+// world point p is still the pool's own (within kHeightTolerance of it).
+// For each of `dirs` directions round `centre`, edge_dist gets the distance to
+// the edge (found within a centimetre or so), or -1 if the floor reaches the
+// pool's radius. Returns how many directions met an edge.
+constexpr int kPoolEdgeDirs = 8;
+inline Vec PoolEdgeDir(int i, int dirs = kPoolEdgeDirs)
+{
+    const float a = 6.2831853f*float(i)/float(dirs);
+    return {std::cos(a), 0.f, std::sin(a)};
+}
+template <class SameFn>
+int PoolEdges(const Vec& centre, float radius, SameFn&& same, float* edge_dist, int dirs = kPoolEdgeDirs)
+{
+    int found = 0;
+    for (int i = 0; i < dirs; ++i)
+    {
+        const Vec d = PoolEdgeDir(i, dirs);
+        edge_dist[i] = -1.f;
+        if (same(Add(centre, Mul(d, radius)))) continue;
+        float lo = 0.f, hi = radius;
+        for (int k = 0; k < 5; ++k)
+        {
+            const float mid = 0.5f*(lo + hi);
+            if (same(Add(centre, Mul(d, mid)))) lo = mid; else hi = mid;
+        }
+        edge_dist[i] = lo;
+        ++found;
+    }
+    return found;
+}
+
+// ---------------------------------------------------------------- smears
+// Blood transferred from a bleeding body touching a surface: a blotted
+// imprint where it rests, a wipe along the surface where it slides (from the
+// previous contact point to this one).
+struct SmearShape { Vec pos, dir; float length = 0; };
+inline SmearShape SmearFromContact(const Vec& prev, const Vec& cur, const Vec& normal, float max_length = 0.6f)
+{
+    SmearShape s;
+    const Vec n = Normalize(normal);
+    const Vec move = Sub(cur, prev);
+    const Vec along = Sub(move, Mul(n, Dot(move, n)));
+    const float len = Length(along);
+    if (len < 0.01f) { s.pos = cur; s.dir = AnyTangent(n); return s; }
+    s.dir = Mul(along, 1.f/len);
+    s.length = std::min(len, max_length);
+    // The wipe ends where the body is now.
+    s.pos = Sub(cur, Mul(s.dir, 0.5f*s.length));
+    return s;
 }
 }

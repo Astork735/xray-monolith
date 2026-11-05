@@ -41,8 +41,6 @@ public:
     // inventory at vr_ui_distance; the in-game HUD at vr_hud_distance,
     // vr_hud_scale times the menu's width.
     void UiPanel(float& width, float& distance) const;
-    // Project a world point onto the head-locked gameplay UI quad.
-    bool WorldToUi(const Fvector& world, float& u, float& v) const;
     bool UiPanelAnchored() const { return m_menu_anchor_valid; }
     void SetMenuActive(bool active, bool inventory = false);
     const vr::GraphicsConfig& Graphics() const { return m_graphics; }

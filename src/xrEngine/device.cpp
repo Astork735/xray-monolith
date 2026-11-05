@@ -1,4 +1,5 @@
 #include "stdafx.h"
+#include "Vr/vr_performance.h"
 #include "../xrCDB/frustum.h"
 #include "xr_ioconsole.h"
 #include "xr_input.h"
@@ -490,8 +491,11 @@ void CRenderDevice::on_idle()
 #ifdef VR_ENABLED
     vr::PrepareStereoSimulation();
 #endif
-	FrameMove();
-
+    {
+        vr::PerfScope timing(vr::PerfStage::Simulation);
+        FrameMove();
+    }
+    vr::PerfSetEngineFrame(dwFrame);
 
 	// Precache
 	if (dwPrecacheFrame)
@@ -561,6 +565,7 @@ void CRenderDevice::on_idle()
     START_PROFILE("Resume threads");
     if (serial_vr_work)
     {
+        vr::PerfScope timing(vr::PerfStage::FrameWork);
         vr::RunFrameWork(seqParallel, [&] { seqFrameMT.Process(rp_Frame); });
         if (psLua_ParallelGC && LuaGC)
         {
@@ -656,8 +661,11 @@ void CRenderDevice::on_idle()
     if (FrameTime < DSUpdateDelta)
         Sleep(DSUpdateDelta - FrameTime);
 #endif
-	if (!b_is_Active)
-		Sleep(1);
+    {
+        vr::PerfScope timing(vr::PerfStage::Tail);
+        if (!b_is_Active) Sleep(1);
+    }
+    vr::PerfEndFrame();
 }
 
 #ifdef INGAME_EDITOR

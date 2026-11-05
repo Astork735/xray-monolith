@@ -1,4 +1,5 @@
 #pragma once
+#include "VrVec.h"
 #include <cmath>
 #include <cfloat>
 
@@ -21,11 +22,10 @@ enum BodySlotKind
     BodySlotCount
 };
 inline bool IsPocket(int kind) { return kind >= BodyPocket1 && kind <= BodyPocket4; }
-struct BodyVec { float x, y, z; };
 
 // Head position plus a local offset in the yaw frame whose forward is the
 // horizontal direction (fx, fz). X-Ray is left-handed: right = up x forward.
-inline BodyVec BodyToWorld(const BodyVec& head, float fx, float fz, const BodyVec& local)
+inline V3 BodyToWorld(const V3& head, float fx, float fz, const V3& local)
 {
     float length = std::sqrt(fx*fx + fz*fz);
     if (!(length > 1e-4f)) { fx = 0.f; fz = 1.f; length = 1.f; }
@@ -39,7 +39,7 @@ constexpr float belt_raise = 0.16f;
 
 // Laid out for a right-handed player; mirrored left to right for a
 // left-handed one (holster and pouch swap hips too).
-inline BodyVec BodySlotLocal(int kind, float hip_height, float hip_width = 0.22f, bool mirrored = false)
+inline V3 BodySlotLocal(int kind, float hip_height, float hip_width = 0.22f, bool mirrored = false)
 {
     // The chest places do not widen with the hips.
     const float hand = mirrored ? -1.f : 1.f, belt = -hip_height + belt_raise, side = hand*hip_width/0.22f;
@@ -61,9 +61,9 @@ inline BodyVec BodySlotLocal(int kind, float hip_height, float hip_width = 0.22f
     {
         // On an arc around the stomach 13 cm above the belt, quick slot 1
         // on the left for either hand: two at the sides, two to the front.
-        static const BodyVec arc[4] = {{-0.20f, 0.f, -0.05f}, {-0.07f, 0.f, 0.02f},
+        static const V3 arc[4] = {{-0.20f, 0.f, -0.05f}, {-0.07f, 0.f, 0.02f},
                                        {0.07f, 0.f, 0.02f}, {0.20f, 0.f, -0.05f}};
-        const BodyVec& place = arc[kind - BodyPocket1];
+        const V3& place = arc[kind - BodyPocket1];
         return {place.x, belt + 0.13f, place.z};
     }
     default:             return {0.f, 0.f, 0.f};
@@ -109,15 +109,14 @@ inline bool BodySlotOnBody(int kind, bool mirrored, BodyPlace& place)
 // for mouth_dwell_ms is eaten, drunk or applied.
 constexpr float mouth_reach = 0.12f;
 constexpr unsigned mouth_dwell_ms = 300;
-inline BodyVec MouthPoint(const BodyVec& head, float fx, float fz)
+inline V3 MouthPoint(const V3& head, float fx, float fz)
 {
     return BodyToWorld(head, fx, fz, {0.f, -0.08f, 0.08f});
 }
 
-inline float BodyDistance(const BodyVec& a, const BodyVec& b)
+inline float BodyDistance(const V3& a, const V3& b)
 {
-    const float x = a.x - b.x, y = a.y - b.y, z = a.z - b.z;
-    return std::sqrt(x*x + y*y + z*z);
+    return Length(a - b);
 }
 
 // How far from a place a hand reaches it: the pockets sit close together
@@ -125,7 +124,7 @@ inline float BodyDistance(const BodyVec& a, const BodyVec& b)
 inline float BodySlotReach(int kind, float radius) { return IsPocket(kind) ? radius*0.65f : radius; }
 
 // The nearest available place within reach, or -1 (points indexed by kind).
-inline int NearestBodySlot(const BodyVec* points, const bool* available, int count, const BodyVec& hand,
+inline int NearestBodySlot(const V3* points, const bool* available, int count, const V3& hand,
     float radius, float& distance)
 {
     int best = -1;
@@ -137,5 +136,29 @@ inline int NearestBodySlot(const BodyVec* points, const bool* available, int cou
         if (d <= BodySlotReach(i, radius) && d < distance) { best = i; distance = d; }
     }
     return best;
+}
+// Which end of a binoculars model is its eyepiece end, from how the game
+// shows them in first person (eyepieces toward the camera): view_z is the
+// model's +Z along the first-person view. +Z looking away puts the
+// eyepieces at -Z (-1), toward the camera at +Z (+1). Held reversed, the
+// objectives at the eyes, the binoculars then look at the head and are not
+// raised. A first-person pose across the view (or none) gives 0: the end
+// nearer the head is taken then, and a reversed hold is not told apart.
+inline int BinocularEyepieceEnd(float view_z)
+{
+    if (view_z>0.3f) return -1;
+    if (view_z<-0.3f) return 1;
+    return 0;
+}
+// Binoculars at the eyes: the eyepiece end within reach of the eyes and the
+// binoculars looking where the head does. A headset's shell keeps the
+// eyepieces 8-12 cm ahead of the eyes. Let go only well beyond that, so the
+// view does not flicker at the edge.
+constexpr float binocular_raise_reach = 0.17f, binocular_keep_reach = 0.23f;
+constexpr float binocular_raise_aligned = 0.80f, binocular_keep_aligned = 0.65f;
+inline bool BinocularsAtEyesPolicy(float eyepiece_distance, float alignment, bool raised)
+{
+    return eyepiece_distance < (raised ? binocular_keep_reach : binocular_raise_reach) &&
+        alignment > (raised ? binocular_keep_aligned : binocular_raise_aligned);
 }
 }

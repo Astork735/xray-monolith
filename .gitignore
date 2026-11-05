@@ -9,6 +9,7 @@ _build/
 /**/x64/
 **/.vs/
 *.pdb
+*.obj
 *.ilk
 *.user
 *.VC.db
@@ -40,3 +41,6 @@ compressor/mod/
 *~
 
 __pycache__/
+# game assets extracted locally (tools/vr_extract_*.py); not redistributed
+gamedata/**/*.ogf
+gamedata/**/*.ogg

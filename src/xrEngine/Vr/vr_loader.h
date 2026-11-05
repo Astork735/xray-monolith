@@ -20,48 +20,58 @@
 #ifdef VR_ENABLED
 
 // --- entry points we resolve ------------------------------------------------
+// One list for the declarations, definitions, resolution and clearing
+// (vr_loader.cpp). Every use pastes or quotes the name (## or #), so the
+// aliases below never expand inside it.
 // Global (resolved with XR_NULL_HANDLE):
-extern PFN_xrGetInstanceProcAddr                   xrGetInstanceProcAddr_p;
-extern PFN_xrCreateInstance                        xrCreateInstance_p;
-extern PFN_xrEnumerateInstanceExtensionProperties  xrEnumerateInstanceExtensionProperties_p;
+#define VR_XR_GLOBAL_FUNCTIONS(X) \
+	X(xrCreateInstance) \
+	X(xrEnumerateInstanceExtensionProperties)
 
 // Instance level (resolved once an XrInstance exists):
-extern PFN_xrGetInstanceProperties               xrGetInstanceProperties_p;
-extern PFN_xrGetSystem                           xrGetSystem_p;
-extern PFN_xrCreateSession                       xrCreateSession_p;
-extern PFN_xrDestroySession                      xrDestroySession_p;
-extern PFN_xrDestroyInstance                     xrDestroyInstance_p;
-extern PFN_xrCreateReferenceSpace                xrCreateReferenceSpace_p;
-extern PFN_xrDestroySpace                        xrDestroySpace_p;
-extern PFN_xrBeginSession                        xrBeginSession_p;
-extern PFN_xrEndSession                          xrEndSession_p;
-extern PFN_xrPollEvent                           xrPollEvent_p;
-extern PFN_xrWaitFrame                           xrWaitFrame_p;
-extern PFN_xrBeginFrame                          xrBeginFrame_p;
-extern PFN_xrLocateViews                         xrLocateViews_p;
-extern PFN_xrEndFrame                            xrEndFrame_p;
-extern PFN_xrEnumerateSwapchainFormats           xrEnumerateSwapchainFormats_p;
-extern PFN_xrEnumerateViewConfigurationViews     xrEnumerateViewConfigurationViews_p;
-extern PFN_xrCreateSwapchain                     xrCreateSwapchain_p;
-extern PFN_xrEnumerateSwapchainImages            xrEnumerateSwapchainImages_p;
-extern PFN_xrDestroySwapchain                    xrDestroySwapchain_p;
-extern PFN_xrAcquireSwapchainImage               xrAcquireSwapchainImage_p;
-extern PFN_xrWaitSwapchainImage                  xrWaitSwapchainImage_p;
-extern PFN_xrReleaseSwapchainImage               xrReleaseSwapchainImage_p;
-extern PFN_xrCreateActionSet                     xrCreateActionSet_p;
-extern PFN_xrDestroyActionSet                    xrDestroyActionSet_p;
-extern PFN_xrStringToPath                        xrStringToPath_p;
-extern PFN_xrCreateAction                        xrCreateAction_p;
-extern PFN_xrCreateActionSpace                   xrCreateActionSpace_p;
-extern PFN_xrSuggestInteractionProfileBindings   xrSuggestInteractionProfileBindings_p;
-extern PFN_xrSyncActions                         xrSyncActions_p;
-extern PFN_xrAttachSessionActionSets             xrAttachSessionActionSets_p;
-extern PFN_xrGetActionStateBoolean xrGetActionStateBoolean_p;
-extern PFN_xrGetActionStateFloat                 xrGetActionStateFloat_p;
-extern PFN_xrGetActionStateVector2f              xrGetActionStateVector2f_p;
-extern PFN_xrGetActionStatePose                  xrGetActionStatePose_p;
-extern PFN_xrLocateSpace                         xrLocateSpace_p;
-extern PFN_xrApplyHapticFeedback                 xrApplyHapticFeedback_p;
+#define VR_XR_INSTANCE_FUNCTIONS(X) \
+	X(xrGetInstanceProperties) \
+	X(xrGetSystem) \
+	X(xrCreateSession) \
+	X(xrDestroySession) \
+	X(xrDestroyInstance) \
+	X(xrCreateReferenceSpace) \
+	X(xrDestroySpace) \
+	X(xrBeginSession) \
+	X(xrEndSession) \
+	X(xrPollEvent) \
+	X(xrWaitFrame) \
+	X(xrBeginFrame) \
+	X(xrLocateViews) \
+	X(xrEndFrame) \
+	X(xrEnumerateSwapchainFormats) \
+	X(xrEnumerateViewConfigurationViews) \
+	X(xrCreateSwapchain) \
+	X(xrEnumerateSwapchainImages) \
+	X(xrDestroySwapchain) \
+	X(xrAcquireSwapchainImage) \
+	X(xrWaitSwapchainImage) \
+	X(xrReleaseSwapchainImage) \
+	X(xrCreateActionSet) \
+	X(xrDestroyActionSet) \
+	X(xrStringToPath) \
+	X(xrCreateAction) \
+	X(xrCreateActionSpace) \
+	X(xrSuggestInteractionProfileBindings) \
+	X(xrSyncActions) \
+	X(xrAttachSessionActionSets) \
+	X(xrGetActionStateBoolean) \
+	X(xrGetActionStateFloat) \
+	X(xrGetActionStateVector2f) \
+	X(xrGetActionStatePose) \
+	X(xrLocateSpace) \
+	X(xrApplyHapticFeedback)
+
+#define VR_XR_DECLARE(NAME) extern PFN_##NAME NAME##_p;
+extern PFN_xrGetInstanceProcAddr xrGetInstanceProcAddr_p;
+VR_XR_GLOBAL_FUNCTIONS(VR_XR_DECLARE)
+VR_XR_INSTANCE_FUNCTIONS(VR_XR_DECLARE)
+#undef VR_XR_DECLARE
 
 // Map the API names onto the resolved pointers.
 #define xrGetInstanceProcAddr                  xrGetInstanceProcAddr_p
@@ -97,7 +107,7 @@ extern PFN_xrApplyHapticFeedback                 xrApplyHapticFeedback_p;
 #define xrSuggestInteractionProfileBindings    xrSuggestInteractionProfileBindings_p
 #define xrSyncActions                          xrSyncActions_p
 #define xrAttachSessionActionSets              xrAttachSessionActionSets_p
-#define xrGetActionStateBoolean xrGetActionStateBoolean_p
+#define xrGetActionStateBoolean                xrGetActionStateBoolean_p
 #define xrGetActionStateFloat                  xrGetActionStateFloat_p
 #define xrGetActionStateVector2f               xrGetActionStateVector2f_p
 #define xrGetActionStatePose                   xrGetActionStatePose_p

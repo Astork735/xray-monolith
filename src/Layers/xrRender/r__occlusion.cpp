@@ -2,6 +2,7 @@
 #include ".\r__occlusion.h"
 
 #include "QueryHelper.h"
+#include "../../xrEngine/Vr/vr_performance.h"
 
 R_occlusion::R_occlusion(void)
 {
@@ -100,6 +101,7 @@ R_occlusion::occq_result R_occlusion::occq_get(u32& ID)
 
 	//	Igor: prevent release crash if we issue too many queries
 	if (ID == iInvalidHandle) return 0xFFFFFFFF;
+    vr::PerfScope timing(vr::PerfStage::QueryWait);
 
 	occq_result fragments = 0;
 	HRESULT hr;

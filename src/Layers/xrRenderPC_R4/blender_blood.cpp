@@ -6,8 +6,14 @@ void CBlender_blood_stamp::Compile(CBlender_Compile& C)
 {
 	IBlender::Compile(C);
 
-	// Additive: amount and wet amount accumulate where splats overlap.
+	// Element 0, additive: amount and wet amount accumulate where splats
+	// overlap. Element 1, maximum: a growing pool is stamped again and again
+	// at a slightly larger size; adding would pile its soft rim up into a hard
+	// edge. Alpha holds the stained surface's height (blood::kHeightTolerance):
+	// the highest stain's, never a sum.
 	C.r_Pass("blood_stamp", "blood_stamp", false, FALSE, FALSE, TRUE, D3DBLEND_ONE, D3DBLEND_ONE);
+	if (C.iElement == 1) C.RS.SetRS(D3DRS_BLENDOP, D3DBLENDOP_MAX);
+	C.RS.SetRS(D3DRS_BLENDOPALPHA, D3DBLENDOP_MAX);
 	C.r_CullMode(D3DCULL_NONE);
 	C.r_End();
 }

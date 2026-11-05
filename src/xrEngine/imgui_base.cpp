@@ -143,7 +143,8 @@ namespace xr_imgui
 
     void ide::OnFrame()
     {
-        if (!!!Device.b_is_Active) return;
+        // VR keeps drawing with the window in the background.
+        if (!Device.b_is_Active && !g_vr_owns_present) return;
 
         const float frametime = m_timer.GetElapsed_sec();
         m_timer.Start();
@@ -166,9 +167,11 @@ namespace xr_imgui
             if (imgui_metrics)  ImGui::ShowMetricsWindow(&imgui_metrics);
         }
 
-        if (io.WantSetMousePos)
+        if (io.WantSetMousePos && io.DisplaySize.x > 0.f && io.DisplaySize.y > 0.f)
         {
-            POINT pos = { (int)io.MousePos.x, (int)io.MousePos.y };
+            // Layout units (VR's UI panel grid) back to client pixels.
+            POINT pos = { (int)(io.MousePos.x * Device.clientWidth / io.DisplaySize.x),
+                (int)(io.MousePos.y * Device.clientHeight / io.DisplaySize.y) };
             ClientToScreen(Device.m_hWnd, &pos);
             SetCursorPos(pos.x, pos.y);
         }

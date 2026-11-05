@@ -9428,6 +9428,27 @@
     <ClCompile Include="VrWeaponInteraction.cpp">
       <Filter>Core\Client\Objects\items &amp; weapons\Weapons</Filter>
     </ClCompile>
+    <ClCompile Include="VrWeaponModel.cpp">
+      <Filter>Core\Client\Objects\items &amp; weapons\Weapons</Filter>
+    </ClCompile>
+    <ClCompile Include="VrWeaponProfile.cpp">
+      <Filter>Core\Client\Objects\items &amp; weapons\Weapons</Filter>
+    </ClCompile>
+    <ClCompile Include="VrBodyAnchors.cpp">
+      <Filter>Core\Client\Objects\items &amp; weapons\Weapons</Filter>
+    </ClCompile>
+    <ClCompile Include="VrPickup.cpp">
+      <Filter>Core\Client\Objects\items &amp; weapons\Weapons</Filter>
+    </ClCompile>
+    <ClCompile Include="VrHandBodies.cpp">
+      <Filter>Core\Client\Objects\items &amp; weapons\Weapons</Filter>
+    </ClCompile>
+    <ClCompile Include="VrFloorMagazines.cpp">
+      <Filter>Core\Client\Objects\items &amp; weapons\Weapons</Filter>
+    </ClCompile>
+    <ClCompile Include="VrWeaponUpdate.cpp">
+      <Filter>Core\Client\Objects\items &amp; weapons\Weapons</Filter>
+    </ClCompile>
     <ClCompile Include="VrBodySlots.cpp">
       <Filter>Core\Client\Objects\items &amp; weapons\Weapons</Filter>
     </ClCompile>

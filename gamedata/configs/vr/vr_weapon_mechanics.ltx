@@ -3,37 +3,69 @@
 ; Every weapon's mechanics are worked out from its engine class, its ltx,
 ; its first-person animations and its model, and written to the log:
 ;   * [VR mechanics] wpn_svd: rifle, self_loading, detachable(10), ...
-; A section here, named after the weapon section (or its parent_section),
-; corrects any of them. Only the keys given change.
+; A section here corrects them. It applies to the weapon section of its
+; name, to that name with underscore suffixes (wpn_m4a1 covers
+; wpn_m4a1_custom) and to the weapon's parent_section the same way. Every
+; section that applies is used: the more specific one wins key by key and
+; keeps the other keys of the less specific one. The log names them:
+;   * [VR mechanics] wpn_m4a1_custom: overrides from [wpn_m4a1 < wpn_m4a1_custom]
 ;
-; family    = unknown | pistol | revolver | bolt_action | lever_action |
-;             pump_shotgun | break_action | semi_shotgun | rifle | smg |
-;             machine_gun | launcher
 ; action    = none | self_loading | manual_bolt | lever | pump | break |
 ;             revolver | launcher
 ; feed      = none | detachable | internal_rounds | tube | belt | cylinder |
 ;             chambers | muzzle
-; capacity  = rounds
 ; has_bolt_catch, has_bolt_release, has_slide_stop, has_slide_release,
-; requires_manual_charging, supports_last_round_hold_open,
-; has_charging_handle, has_dust_cover, magazine_removable,
+; supports_last_round_hold_open, has_dust_cover, handle_notch,
 ; vr_reload_supported = true | false
-;   (vr_reload_supported = false leaves the weapon on the game's own reload)
+;   (vr_reload_supported = false, or feed = none | cylinder | muzzle, leaves
+;   the weapon on the game's own reload: its magazine, shells or barrels
+;   are not handled by hand)
+;
+; An override changes how VR treats what the model shows; it cannot add a
+; magazine, pump or barrels the model does not have. Such a feed or action
+; is logged as not applied, as is any unknown key. family, capacity,
+; requires_manual_charging, has_charging_handle and magazine_removable follow
+; from the keys above and the weapon's own ltx, and are refused here.
 ;
 ; Examples:
 ;
 ; [wpn_some_semi_rifle]
-; family = rifle
 ; action = self_loading
 ;
 ; [wpn_some_bolt_rifle]
-; family = bolt_action
 ; action = manual_bolt
 ; feed = internal_rounds
 ;
 ; [wpn_some_ar15]
 ; has_bolt_catch = true
 ; supports_last_round_hold_open = true
+
+; ---------------------------------------------------------------------------
+; Names the derivation looks for. Not a weapon: every weapon uses these.
+; Lists are comma-separated parts of a name. Without this section (or a key)
+; the values below are built in.
+;
+; spent_case_bones   bone names of a spent case, never a live round to load
+;                    by hand (also named as a shell: cartridge, patron,
+;                    shell, gilza or bullet)
+; loose_rounds       ammunition : mesh : half length (m). A clip-fed model
+;                    with no single live round shows this mesh in the hand
+;                    for ammunition whose section contains the part (the
+;                    mesh comes from the game's meshes, e.g. extracted by
+;                    tools\vr_extract_sks_round.py)
+; red_dot_shaders, red_dot_textures    a sight's glass is a red dot
+; soft_lens_shaders  a magnified scope's soft black lens (exit-pupil shadow)
+; glass_shaders, glass_textures        any other sight glass
+; Shader and texture parts match exactly; bone and ammunition parts ignore case.
+
+[vr_derivation]
+spent_case_bones   = gilza
+loose_rounds       = 7.62x39:vr\round_762x39.ogf:0.028
+red_dot_shaders    = light_dot, reflex
+red_dot_textures   = red_lens, crosshair_dot
+soft_lens_shaders  = black_soft, scope_reticle
+glass_shaders      = lfo_, scope_color, scope_lens
+glass_textures     = crosshair, _lense
 
 ; ---------------------------------------------------------------------------
 ; Firearm knowledge the vanilla models do not show (their animations have no
@@ -48,177 +80,142 @@
 [wpn_m4]
 supports_last_round_hold_open = true
 has_bolt_catch = true
-requires_manual_charging = false
 
 [wpn_m4a1]
 supports_last_round_hold_open = true
 has_bolt_catch = true
-requires_manual_charging = false
 
 [wpn_m16]
 supports_last_round_hold_open = true
 has_bolt_catch = true
-requires_manual_charging = false
 
 [wpn_hk416]
 supports_last_round_hold_open = true
 has_bolt_catch = true
-requires_manual_charging = false
 
 [wpn_hk417]
 supports_last_round_hold_open = true
 has_bolt_catch = true
-requires_manual_charging = false
 
 [wpn_lr300]
 supports_last_round_hold_open = true
 has_bolt_catch = true
-requires_manual_charging = false
 
 [wpn_sr25]
 supports_last_round_hold_open = true
 has_bolt_catch = true
-requires_manual_charging = false
 
 [wpn_ar15]
 supports_last_round_hold_open = true
 has_bolt_catch = true
-requires_manual_charging = false
 
 [wpn_ar15_freedom]
 supports_last_round_hold_open = true
 has_bolt_catch = true
-requires_manual_charging = false
 
 [wpn_adar2_15]
 supports_last_round_hold_open = true
 has_bolt_catch = true
-requires_manual_charging = false
 
 [wpn_xm4]
 supports_last_round_hold_open = true
 has_bolt_catch = true
-requires_manual_charging = false
 
 [wpn_mk47]
 supports_last_round_hold_open = true
 has_bolt_catch = true
-requires_manual_charging = false
 
 [wpn_brn180]
 supports_last_round_hold_open = true
 has_bolt_catch = true
-requires_manual_charging = false
 
 [wpn_howa20]
 supports_last_round_hold_open = true
 has_bolt_catch = true
-requires_manual_charging = false
 
 [wpn_scar]
 supports_last_round_hold_open = true
 has_bolt_catch = true
-requires_manual_charging = false
 
 [wpn_sig550]
 supports_last_round_hold_open = true
 has_bolt_catch = true
-requires_manual_charging = false
 
 [wpn_sig552]
 supports_last_round_hold_open = true
 has_bolt_catch = true
-requires_manual_charging = false
 
 [wpn_sig550_sniper]
 supports_last_round_hold_open = true
 has_bolt_catch = true
-requires_manual_charging = false
 
 [wpn_g36]
 supports_last_round_hold_open = true
 has_bolt_catch = true
-requires_manual_charging = false
 
 [wpn_g36c]
 supports_last_round_hold_open = true
 has_bolt_catch = true
-requires_manual_charging = false
 
 [wpn_g36k]
 supports_last_round_hold_open = true
 has_bolt_catch = true
-requires_manual_charging = false
 
 [wpn_g36ka4]
 supports_last_round_hold_open = true
 has_bolt_catch = true
-requires_manual_charging = false
 
 [wpn_g36v]
 supports_last_round_hold_open = true
 has_bolt_catch = true
-requires_manual_charging = false
 
 [wpn_xm8]
 supports_last_round_hold_open = true
 has_bolt_catch = true
-requires_manual_charging = false
 
 [wpn_l85]
 supports_last_round_hold_open = true
 has_bolt_catch = true
-requires_manual_charging = false
 
 [wpn_aug_a3]
 supports_last_round_hold_open = true
 has_bolt_catch = true
-requires_manual_charging = false
 
 [wpn_fn2000]
 supports_last_round_hold_open = true
 has_bolt_catch = true
-requires_manual_charging = false
 
 [wpn_dtmdr]
 supports_last_round_hold_open = true
 has_bolt_catch = true
-requires_manual_charging = false
 
 [wpn_grot]
 supports_last_round_hold_open = true
 has_bolt_catch = true
-requires_manual_charging = false
 
 [wpn_fal]
 supports_last_round_hold_open = true
 has_bolt_catch = true
-requires_manual_charging = false
 
 [wpn_mk14]
 supports_last_round_hold_open = true
 has_bolt_catch = true
-requires_manual_charging = false
 
 [wpn_mp7]
 supports_last_round_hold_open = true
 has_bolt_catch = true
-requires_manual_charging = false
 
 [wpn_kriss_vector]
 supports_last_round_hold_open = true
 has_bolt_catch = true
-requires_manual_charging = false
 
 [wpn_vz61]
 supports_last_round_hold_open = true
 has_bolt_catch = true
-requires_manual_charging = false
 
 [wpn_ump45]
 supports_last_round_hold_open = true
 has_bolt_catch = true
-requires_manual_charging = false
 
 ; Holds open on the last round (the magazine follower); no release button:
 ; pull the handle back a little and let go.
@@ -226,27 +223,29 @@ requires_manual_charging = false
 [wpn_svt40]
 supports_last_round_hold_open = true
 has_bolt_catch = false
-requires_manual_charging = true
 
 [wpn_g43]
 supports_last_round_hold_open = true
 has_bolt_catch = false
-requires_manual_charging = true
 
 [wpn_m82]
 supports_last_round_hold_open = true
 has_bolt_catch = false
-requires_manual_charging = true
 
 [wpn_sks]
 supports_last_round_hold_open = true
 has_bolt_catch = false
-requires_manual_charging = true
 
 [wpn_type63]
 supports_last_round_hold_open = true
 has_bolt_catch = false
-requires_manual_charging = true
+
+; Hand-worked bolt-actions whose shot animation slides the bolt without
+; turning any bone (no turn to find): the VSSK Vykhlop. Worked by hand, its
+; shot sound's baked-in bolt layer is dropped.
+
+[wpn_vssk]
+action = manual_bolt
 
 ; HK roller-delayed: no hold-open. The charging handle hooks into its notch
 ; (pull fully back, lift ~2 cm) to hold the bolt open; a slap down on it

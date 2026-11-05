@@ -533,7 +533,7 @@ void CWeaponSSRS::state_Fire(float dt)
 			else if (fAiOneShotTime > 0.f && smart_cast<CAI_Stalker*>(H_Parent()))
 				fShotTimeCounter = 60.f / fAiOneShotTime;
 			else
-				fShotTimeCounter = fOneShotTime;
+				fShotTimeCounter = VrShotTime(fOneShotTime);
 			//Alundaio: END
 
 			if (E)

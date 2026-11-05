@@ -54,6 +54,10 @@ void CWeaponRG6::Load(LPCSTR section)
 
 void CWeaponRG6::FireStart()
 {
+	// VR: the base FireStart refuses a shot the hand-worked action does not
+	// allow (barrels open, frame broken), but the launch below is inline and
+	// would fire anyway (an M79 fired while open for loading).
+	if (!VrCanFire()) { OnEmptyClick(); return; }
 	if (GetState() == eIdle && getRocketCount() && iAmmoElapsed)
 	{
 		inheritedSG::FireStart();

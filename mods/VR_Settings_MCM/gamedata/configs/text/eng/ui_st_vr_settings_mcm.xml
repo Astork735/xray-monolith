@@ -59,6 +59,8 @@
 	<string id="ui_mcm_vr_hand_rays_desc"><text>Show the pointing rays used to aim at items and usable objects.</text></string>
 	<string id="ui_mcm_vr_animated_grip"><text>Grip From Weapon Animations</text></string>
 	<string id="ui_mcm_vr_animated_grip_desc"><text>Hold weapons the way their first-person animations hold them.</text></string>
+	<string id="ui_mcm_vr_mechanical_fire_rate"><text>Mechanical Fire Rate</text></string>
+	<string id="ui_mcm_vr_mechanical_fire_rate_desc"><text>Single shots and hand-worked actions fire as fast as you pull the trigger and work the action, not at the weapon's fire rate. Automatic and burst fire keep it.</text></string>
 	<string id="ui_mcm_vr_hand_physics"><text>Physical Hands</text></string>
 	<string id="ui_mcm_vr_hand_physics_desc"><text>Let your hands push loose objects, and also stop against walls and the world.</text></string>
 	<string id="ui_mcm_vr_weapon_physics"><text>Physical Weapon</text></string>

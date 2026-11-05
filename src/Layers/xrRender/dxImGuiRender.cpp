@@ -67,6 +67,26 @@ void dxImGuiRender::Frame()
 void dxImGuiRender::Render(ImDrawData* data)
 {
 #if defined(USE_DX11)
+    // The VR UI panel: ImGui lays out on the 4:3 UI grid and is scaled to
+    // the bound panel texture, whose pixels are wider than tall there.
+    D3D11_VIEWPORT target{};
+    UINT count = 1;
+    if (g_vr_ui_pass && data->DisplaySize.x > 0 && data->DisplaySize.y > 0)
+        HW.pContext->RSGetViewports(&count, &target);
+    else
+        count = 0;
+    if (count && target.Width > 0 && target.Height > 0)
+    {
+        const ImVec2 scale{ target.Width / data->DisplaySize.x, target.Height / data->DisplaySize.y };
+        for (int i = 0; i < data->CmdListsCount; ++i)
+            for (ImDrawVert& vertex : data->CmdLists[i]->VtxBuffer)
+            {
+                vertex.pos.x *= scale.x;
+                vertex.pos.y *= scale.y;
+            }
+        data->ScaleClipRects(scale);
+        data->DisplaySize = { target.Width, target.Height };
+    }
     ImGui_ImplDX11_RenderDrawData(data);
 #elif defined(USE_DX10)
     ImGui_ImplDX10_RenderDrawData(data);

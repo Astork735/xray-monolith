@@ -1,5 +1,6 @@
 #pragma once
 #include <cmath>
+#include "VrVec.h"
 
 namespace vr
 {
@@ -15,29 +16,22 @@ namespace vr
 // jump cannot snap it. A hand that ends up too far from where the part lets
 // it be (the part reached a limit, or the hand pulled away) lets go, as does
 // one that loses tracking for a moment; nothing is stretched or teleported.
-struct PartVec { float x=0.f, y=0.f, z=0.f; };
-inline PartVec PartAdd(const PartVec& a, const PartVec& b) { return {a.x+b.x, a.y+b.y, a.z+b.z}; }
-inline PartVec PartSub(const PartVec& a, const PartVec& b) { return {a.x-b.x, a.y-b.y, a.z-b.z}; }
-inline PartVec PartScale(const PartVec& a, float s) { return {a.x*s, a.y*s, a.z*s}; }
-inline float PartDot(const PartVec& a, const PartVec& b) { return a.x*b.x+a.y*b.y+a.z*b.z; }
-inline PartVec PartCross(const PartVec& a, const PartVec& b)
-{ return {a.y*b.z-a.z*b.y, a.z*b.x-a.x*b.z, a.x*b.y-a.y*b.x}; }
-inline float PartLength(const PartVec& a) { return std::sqrt(PartDot(a,a)); }
-inline PartVec PartNormal(const PartVec& a)
-{ const float l=PartLength(a); return l>1e-6f ? PartScale(a,1.f/l) : PartVec{1.f,0.f,0.f}; }
+// Unit length; along x when there is no direction (an axis must have one).
+inline V3 PartNormal(const V3& a)
+{ const float l=Length(a); return l>1e-6f ? a*(1.f/l) : V3{1.f,0.f,0.f}; }
 
 enum PartKind { PartHinge, PartSlider };
 
 struct PartDef
 {
     PartKind kind=PartHinge;
-    PartVec pivot{}, axis{1.f,0.f,0.f};
+    V3 pivot{}, axis{1.f,0.f,0.f};
     float min=0.f, max=1.f;
     // Open once the value reaches open_at, closed once it is back at or
     // below closed_at; between the two each keeps its last state.
     float open_at=0.8f, closed_at=0.05f;
     // Where a hand takes it, with the part at its minimum.
-    PartVec grab{};
+    V3 grab{};
     float grab_radius=0.06f, release_distance=0.06f;
     float max_speed=8.f;  // rad/s or m/s
     // Free, it falls back to its minimum from below open_at (a cover that
@@ -63,42 +57,42 @@ enum PartEvent : unsigned
 
 // Rotates p about the part's axis through its pivot by angle (right-handed),
 // or moves it along the axis by travel.
-inline PartVec PartMove(const PartDef& def, float value, const PartVec& p)
+inline V3 PartMove(const PartDef& def, float value, const V3& p)
 {
-    const PartVec a=PartNormal(def.axis);
-    if (def.kind==PartSlider) return PartAdd(p,PartScale(a,value));
-    const PartVec v=PartSub(p,def.pivot);
+    const V3 a=PartNormal(def.axis);
+    if (def.kind==PartSlider) return p+a*value;
+    const V3 v=p-def.pivot;
     const float c=std::cos(value), s=std::sin(value);
     // Rodrigues: v c + (a x v) s + a (a.v)(1-c)
-    PartVec r=PartScale(v,c);
-    r=PartAdd(r,PartScale(PartCross(a,v),s));
-    r=PartAdd(r,PartScale(a,PartDot(a,v)*(1.f-c)));
-    return PartAdd(def.pivot,r);
+    V3 r=v*c;
+    r=r+Cross(a,v)*s;
+    r=r+a*(Dot(a,v)*(1.f-c));
+    return def.pivot+r;
 }
 // The 3x3 rotation PartMove applies to directions (rows: images of x, y, z).
 inline void PartRotation(const PartDef& def, float value, float m[3][3])
 {
-    const PartVec basis[3]={{1.f,0.f,0.f},{0.f,1.f,0.f},{0.f,0.f,1.f}};
+    const V3 basis[3]={{1.f,0.f,0.f},{0.f,1.f,0.f},{0.f,0.f,1.f}};
     PartDef origin=def; origin.pivot={};
     for (int r=0;r<3;++r)
     {
-        const PartVec moved=def.kind==PartSlider ? basis[r] : PartMove(origin,value,basis[r]);
+        const V3 moved=def.kind==PartSlider ? basis[r] : PartMove(origin,value,basis[r]);
         m[r][0]=moved.x; m[r][1]=moved.y; m[r][2]=moved.z;
     }
 }
 
 // The hand's own coordinate on the part's path: its angle about the axis
 // (measured in the plane square to it) or its travel along the axis.
-inline float PartCoordinate(const PartDef& def, const PartVec& hand)
+inline float PartCoordinate(const PartDef& def, const V3& hand)
 {
-    const PartVec a=PartNormal(def.axis);
-    const PartVec d=PartSub(hand,def.pivot);
-    if (def.kind==PartSlider) return PartDot(d,a);
+    const V3 a=PartNormal(def.axis);
+    const V3 d=hand-def.pivot;
+    if (def.kind==PartSlider) return Dot(d,a);
     // A fixed basis square to the axis, right-handed with it.
-    const PartVec helper=std::fabs(a.x)<0.9f ? PartVec{1.f,0.f,0.f} : PartVec{0.f,1.f,0.f};
-    const PartVec u=PartNormal(PartCross(helper,a));
-    const PartVec v=PartCross(a,u);
-    return std::atan2(PartDot(d,v),PartDot(d,u));
+    const V3 helper=std::fabs(a.x)<0.9f ? V3{1.f,0.f,0.f} : V3{0.f,1.f,0.f};
+    const V3 u=PartNormal(Cross(helper,a));
+    const V3 v=Cross(a,u);
+    return std::atan2(Dot(d,v),Dot(d,u));
 }
 inline float PartWrap(float angle)
 {
@@ -107,7 +101,7 @@ inline float PartWrap(float angle)
     while (angle<-pi) angle+=2.f*pi;
     return angle;
 }
-inline PartVec PartAnchor(const PartDef& def, const PartState& state)
+inline V3 PartAnchor(const PartDef& def, const PartState& state)
 {
     return PartMove(def,state.value,def.grab);
 }
@@ -115,7 +109,7 @@ inline PartVec PartAnchor(const PartDef& def, const PartState& state)
 struct PartInput
 {
     bool tracked=false, grip=false, grip_edge=false;
-    PartVec hand{};   // the hand in weapon model space
+    V3 hand{};   // the hand in weapon model space
     float dt=0.f;
     bool allowed=true; // the reload rules let it move now
 };
@@ -148,18 +142,18 @@ inline unsigned StepPart(const PartDef& def, PartState& state, int hand, const P
             }
             // Pulled away from where the part can be: let go. The distance
             // it was taken from counts as held, not as pulled away.
-            if (PartLength(PartSub(PartAnchor(def,state),in.hand))>state.slack+def.release_distance)
+            if (Length(PartAnchor(def,state)-in.hand)>state.slack+def.release_distance)
             { state.hand=-1; events|=PartReleased|PartSlipped; }
         }
     }
     else if (state.hand<0 && in.tracked && in.grip_edge &&
-        PartLength(PartSub(PartAnchor(def,state),in.hand))<=def.grab_radius)
+        Length(PartAnchor(def,state)-in.hand)<=def.grab_radius)
     {
         state.hand=hand;
         state.lost=0.f;
         float coordinate=PartCoordinate(def,in.hand);
         state.offset=def.kind==PartHinge ? PartWrap(coordinate-state.value) : coordinate-state.value;
-        state.slack=PartLength(PartSub(PartAnchor(def,state),in.hand));
+        state.slack=Length(PartAnchor(def,state)-in.hand);
         events|=PartGrabbed;
     }
     return events;
@@ -188,18 +182,18 @@ inline unsigned SettlePart(const PartDef& def, PartState& state, float dt)
 // square to the axis, so the cross product of two displacements lies along
 // it. Of the pairs given, the one least parallel is used (points on one line
 // through the pivot all move the same way). Zero when nothing turned.
-inline PartVec AxisFromMotion(const PartVec* before, const PartVec* after, int count)
+inline V3 AxisFromMotion(const V3* before, const V3* after, int count)
 {
-    PartVec best{};
+    V3 best{};
     float best_length=0.f;
     for (int a=0;a<count;++a)
         for (int b=a+1;b<count;++b)
         {
-            const PartVec axis=PartCross(PartSub(after[a],before[a]),PartSub(after[b],before[b]));
-            const float length=PartLength(axis);
+            const V3 axis=Cross(after[a]-before[a],after[b]-before[b]);
+            const float length=Length(axis);
             if (length>best_length) { best_length=length; best=axis; }
         }
-    return best_length>1e-8f ? PartScale(best,1.f/best_length) : PartVec{};
+    return best_length>1e-8f ? best*(1.f/best_length) : V3{};
 }
 
 // Puts a part back at rest (closed), as on load or before a save.

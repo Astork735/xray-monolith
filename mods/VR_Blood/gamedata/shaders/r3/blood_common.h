@@ -6,6 +6,10 @@
 static const float3 blood_fresh = float3(0.30, 0.012, 0.010);
 static const float3 blood_dried = float3(0.10, 0.028, 0.020);
 static const float blood_relief = 0.15;	// surface relief in fluid-amount units
+// Fluid amount that stays put (blood_flow.cs). The wall value must match
+// blood::kWallMobile: the game makes small drops, mist and runs thinner than it.
+static const float blood_floor_film = 0.04;
+static const float blood_wall_film = 0.45;
 
 float blood_hash1(float n)
 {

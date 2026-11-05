@@ -793,7 +793,7 @@ void CWeaponMagazined::state_Fire(float dt)
 				fShotTimeCounter = fModeShotTime;
 			}
 			else
-				fShotTimeCounter = fOneShotTime;
+				fShotTimeCounter = VrShotTime(fOneShotTime);
 			//Alundaio: END
 
 			++m_iShotNum;

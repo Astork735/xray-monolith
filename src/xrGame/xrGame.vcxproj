@@ -4259,6 +4259,13 @@
       <PrecompiledHeaderOutputFile>$(IntDir)$(ProjectName)_script.pch</PrecompiledHeaderOutputFile>
     </ClCompile>
     <ClCompile Include="VrWeaponInteraction.cpp" />
+    <ClCompile Include="VrWeaponModel.cpp" />
+    <ClCompile Include="VrWeaponProfile.cpp" />
+    <ClCompile Include="VrBodyAnchors.cpp" />
+    <ClCompile Include="VrPickup.cpp" />
+    <ClCompile Include="VrHandBodies.cpp" />
+    <ClCompile Include="VrFloorMagazines.cpp" />
+    <ClCompile Include="VrWeaponUpdate.cpp" />
     <ClCompile Include="VrBodySlots.cpp" />
     <ClCompile Include="VrWristDisplay.cpp" />
     <ClCompile Include="VrKeyboard.cpp" />

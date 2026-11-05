@@ -491,7 +491,6 @@ public:
         bool native_reload_down=false;
         bool native_reload_armed=false;
         bool grip_held[2]{};
-        u16 gripped_weapon_id=u16(-1);
         // Hand motion for throwing, and a pending throw.
         bool hand_valid[2]{};
         Fmatrix hand_previous[2];
@@ -516,10 +515,13 @@ public:
         u16 pick_id=u16(-1);
         float pick_range=0.f;
         int pick_element=0;
-        // A weapon picked up by hand, wielded in that hand once it arrives.
+        // A weapon picked up by hand, wielded in that hand once it arrives;
+        // or, wield_stow, a carried weapon put in its holster on that hand's
+        // side (left there, not drawn).
         u16 wield_id=u16(-1);
         int wield_hand=1;
         u32 wield_expires=0;
+        bool wield_stow=false;
         // Physical hands (spheres at the palms).
         CPhysicsShell* hand_body[2]{};
         float hand_blocked[2]{};

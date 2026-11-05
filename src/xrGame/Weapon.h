@@ -95,9 +95,17 @@ public:
     virtual void VrReleaseInactiveHeld();
     virtual bool VrLeftHandBusy() const;
     virtual void VrPrepareSave();
+    // As VrPrepareSave for a weapon leaving the hand (a drop): the same ammo
+    // normalization, keeping its measured model.
+    void VrPrepareDrop();
     virtual void VrPrepareSnapshot();
     bool VrModularAttachments() const { return m_modular_attachments; }
     bool VrCanFire() const;
+    // The time to the next shot: in VR with vr_mechanical_fire_rate, a single
+    // shot is limited by the trigger and the hand-worked or self-cycling
+    // action (VrCanFire), not by the rpm; automatic and burst fire keep it.
+    float VrShotTime(float native);
+    bool VrCycling() const;
     bool VrBlockReload() const;
     bool VrUsesMagazineButton() const;
     bool VrAimTransform(Fmatrix& world) const;
@@ -132,6 +140,8 @@ public:
     bool VrGripField(int side, vr::ContactScene& scene, Fmatrix& world, float& ceiling,
         const void*& object, vr::GripKind& kind);
     bool VrHolsterPoint(CActor& actor, Fvector& point, float& range);
+    // Letting go at the holster now puts it back (its ring shows only then).
+    bool VrHolsterArmed() const;
     bool VrSupportHandOverride(Fmatrix& grip) const;
     int VrWeaponHand() const;
     bool VrPrepare();

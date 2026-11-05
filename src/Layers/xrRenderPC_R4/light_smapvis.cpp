@@ -25,6 +25,16 @@ void smapvis::invalidate()
 void smapvis::begin()
 {
 	RImplementation.clear_Counters();
+	// The light's shadow map rendered again this frame (each VR eye): its
+	// query from the first pass is read next frame (flushoccq). Resetting it
+	// here lost that query, never returned to the pool; the pool drained and
+	// all hardware occlusion stopped until a device reset.
+	repeat_pass = state == state_working && testQ_V && testQ_frame == Device.dwFrame + 1;
+	if (repeat_pass)
+	{
+		mark();
+		return;
+	}
 	switch (state)
 	{
 	case state_counting:
@@ -51,6 +61,11 @@ void smapvis::end()
 	RImplementation.get_Counters(ts, td);
 	RImplementation.stats.ic_total += ts;
 	RImplementation.set_Feedback(0, 0);
+	if (repeat_pass)
+	{
+		repeat_pass = false;
+		return;
+	}
 
 	switch (state)
 	{
