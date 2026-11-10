@@ -214,10 +214,11 @@ int main()
         vr::PartState s; vr::ResetPart(d,s);
         vr::StepPart(d,s,0,Hand(d.grab,true,true));
         const float dt=1.f/90.f;
-        // A hand jumping to 70 degrees moves the cover by max_speed*dt only.
+        // A hand jumping to 70 degrees moves the held cover by 5*max_speed*dt
+        // only (a held part keeps up with a quick flick, not a teleport).
         const vr::V3 far=vr::PartMove(d,70.f*pi/180.f,d.grab);
         vr::StepPart(d,s,0,Hand(far,true,false,dt));
-        CHECK(Near(s.value,d.max_speed*dt,1e-4f));
+        CHECK(Near(s.value,5.f*d.max_speed*dt,1e-4f));
         CHECK(s.hand<0); // the anchor lags 6+ cm behind: let go, not dragged
         // Steady motion is followed exactly.
         vr::ResetPart(d,s);

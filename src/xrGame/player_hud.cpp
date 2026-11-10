@@ -11,6 +11,9 @@
 #include "weapon.h"
 #include "script_attachment_manager.h"
 #include "../xrEngine/CameraBase.h"
+// VrWeaponUpdate.cpp: logs a long load (VR only).
+u32 VrTextureBytes();
+void VrNoteWorkLoaded(const char* what, const char* object, float ms, u32 textures_before);
 
 extern int g_nearwall;
 
@@ -228,7 +231,7 @@ void attachable_hud_item::set_bone_visible(const shared_str& bone_name, BOOL bVi
 void attachable_hud_item::update(bool bForce)
 {
 	if (!bForce && m_upd_firedeps_frame == Device.dwFrame) return;
-	bool is_16x9 = UI().is_widescreen();
+	bool is_16x9 = UI().hud_widescreen();
 
 	if (!!m_measures.m_prop_flags.test(hud_item_measures::e_16x9_mode_now) != is_16x9)
 		m_measures.load(m_sect_name, m_model);
@@ -364,7 +367,7 @@ void attachable_hud_item::render_item_ui()
 
 void hud_item_measures::load(const shared_str& sect_name, IKinematics* K)
 {
-	bool is_16x9 = UI().is_widescreen();
+	bool is_16x9 = UI().hud_widescreen();
 	string64 _prefix;
 	xr_sprintf(_prefix, "%s", is_16x9 ? "_16x9" : "");
 	string128 val_name;
@@ -591,7 +594,11 @@ void attachable_hud_item::load(const shared_str& sect_name)
 	// Visual
 	LPCSTR visual_name = pSettings->r_string(sect_name, "item_visual");
 	::Render->hud_loading = true;
+	CTimer load_timer; load_timer.Start();
+	const u32 textures_before = VrTextureBytes();
 	IKinematicsAnimated* visual = ::Render->model_Create(visual_name)->dcast_PKinematicsAnimated();
+	// A long first load of a weapon's HUD model is a hitch on its draw (VR logs it).
+	VrNoteWorkLoaded("the game's HUD model: load", sect_name.c_str(), load_timer.GetElapsed_sec() * 1000.f, textures_before);
 	::Render->hud_loading = false;
 	R_ASSERT2(visual, make_string("could not create model %s, section %s", visual_name, sect_name.c_str()));
 	m_model = smart_cast<IKinematics*>(visual);
@@ -610,7 +617,7 @@ player_hud_motion* attachable_hud_item::find_motion(const shared_str& anm_name)
 {
 	R_ASSERT(strstr(anm_name.c_str(), "anm_") == anm_name.c_str());
 	string256 anim_name_r;
-	bool is_16x9 = UI().is_widescreen();
+	bool is_16x9 = UI().hud_widescreen();
 	xr_sprintf(anim_name_r, "%s%s", anm_name.c_str(), ((m_attach_place_idx == 1) && is_16x9) ? "_16x9" : "");
 
 	player_hud_motion* anm = m_hand_motions->find_motion(anim_name_r);
@@ -1620,7 +1627,7 @@ u32 player_hud::script_anim_play(u8 hand, LPCSTR section, LPCSTR anm_name, bool 
 	xr_string pos = "hands_position";
 	xr_string rot = "hands_orientation";
 
-	if (UI().is_widescreen())
+	if (UI().hud_widescreen())
 	{
 		pos.append("_16x9");
 		rot.append("_16x9");

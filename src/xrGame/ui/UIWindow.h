@@ -228,8 +228,22 @@ public:
 	// the centre, so each grows inward from its edge (see vr::HudInsetOffset).
 	static float s_vr_hud_inset;
 	bool m_vr_hud_root = false;
-	static void DrawHudElement(CUIWindow& element, float k);
+	// Shown windows drawn as HUD pieces: those that touch (a panel's frame,
+	// text and icon; a script's frame and the bars laid on it) move together,
+	// anchored on their joint outline, as this frame's layout places them.
+	static void DrawHudPieces(const xr_vector<CUIWindow*>& windows, float k);
+	// A HUD root's pieces as DrawHudChildren draws them (a full-screen
+	// child's own children), and this frame's layout of all pieces drawn,
+	// whoever draws them (CUIGameCustom::Render).
+	static void CollectHudPieces(CUIWindow& root, xr_vector<CUIWindow*>& out);
+	static void LayoutHudPieces(const xr_vector<CUIWindow*>& windows, float k);
+	static void ClearHudLayout();
 private:
+	// This frame's layout (LayoutHudPieces): a window's offset, placed while
+	// its stamp is the current one (ClearHudLayout moves the stamp on).
+	static u32 s_vr_hud_layout;
+	u32 m_vr_hud_layout = 0;
+	Fvector2 m_vr_hud_offset{};
 	// The children of a HUD root: pieces that touch (a panel's frame, text
 	// and icon) move together, anchored on their joint outline.
 	void DrawHudChildren(float k);

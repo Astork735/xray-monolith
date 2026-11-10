@@ -1,7 +1,6 @@
 #pragma once
-// Bone, mesh and motion helpers for measuring VR weapon models: shared by
-// VrWeaponProfile.cpp (derivation) and VrWeaponInteraction.cpp (handling).
-// Not for use outside the VR weapon files.
+// Bone, mesh and motion helpers shared by VR weapon derivation, handling
+// and body-item grip sampling. Internal to the VR gameplay implementation.
 #include "VrWeaponInteraction.h"
 #include "VrWeaponNames.h"
 #include "VrContactField.h"
@@ -25,6 +24,17 @@ struct BoneBounds : public SEnumVerticesCallback
     void operator()(const Fvector& p) override { box.modify(p); ++count; }
 };
 bool Descends(IKinematics& model, u16 id, u16 root);
+// One holds the other (a bolt and the handle it hangs from).
+inline bool OnOneChain(IKinematics& model, u16 a, u16 b) { return Descends(model,a,b) || Descends(model,b,a); }
+// f(id) for root and every bone below it, in id order; nothing for BI_NONE.
+template<class F> void ForSubtree(IKinematics& model, u16 root, F f)
+{
+    if (root==BI_NONE) return;
+    for (u16 id=0;id<model.LL_BoneCount();++id)
+        if (Descends(model,id,root)) f(id);
+}
+// The bind-space vertices of root and every bone below it.
+void EnumSubtreeVertices(IKinematics& model, u16 root, SEnumVerticesCallback& out);
 // Model-space pose of a bone below a part VR draws at its bind place (a
 // magazine): the part as bound, what hangs below it as the weapon's own
 // idle lays it out (rest_local, parent-relative). A GAMMA RPD's
@@ -58,6 +68,9 @@ bool MeasureMagazine(IKinematics& model, u16 magazine, Fbox& box, const xr_vecto
 bool MeasureBone(IKinematics& model, u16 bone, Fbox& box, bool subtree,
     const xr_vector<Fmatrix>* rest_local=nullptr, u16 rest_root=BI_NONE, const xr_vector<Fmatrix>* bind=nullptr);
 u16 FindTrigger(IKinematics& model);
+// The receiver: the trigger's parent (the chain VR draws at its bind place),
+// else the root. trigger: FindTrigger's result when known, else found here.
+u16 ReceiverBone(IKinematics& model, u16 trigger=BI_NONE);
 // Centroids of the lowest and highest 15% of a bone subtree's vertices.
 struct SlabCentroids : public SEnumVerticesCallback
 {
@@ -163,10 +176,23 @@ struct PointCollector : public SEnumVerticesCallback
 // `centre_x`: the bore's line across the model (most models are built on
 // x=0; some, such as the Mosin's, about 15 cm aside).
 Fvector GrabPoint(IKinematics& model, u16 part, bool pistol, float centre_x);
+// A part whose own mesh is two knobs, one each side of the bore and level
+// with each other, with nothing between them (a P90's charging handle):
+// each knob's outer face. False for a part with a body across the bore (an
+// AR-15's T, an MP7's) or on one side only.
+struct KnobPair { Fvector left, right; };
+std::optional<KnobPair> SideKnobs(IKinematics& model, u16 part, float centre_x);
 // A private copy of a hud model, for sampling its animations.
 IRenderVisual* HudCopy(LPCSTR visual);
 // Plays a motion on every partition of a model, from its first frame.
 void PlayOnAllParts(IKinematicsAnimated& animated, MotionID motion);
+// A first-person hands motion, played as player_hud plays it (play_blend):
+// on every partition, whether or not its file has tracks for every bone of
+// the hands model. The game plays exactly these motions on these models;
+// PlayOnAllParts refused one missing a track (GAMMA hands carry bones older
+// motion files lack), and the hands were sampled in their bind pose, off the
+// gun. False when the motion is not in the model at all.
+bool PlayHandsMotion(IKinematicsAnimated& hands, MotionID motion, float* length=nullptr);
 // Advances a model's animation by dt and evaluates its bones.
 void EvaluateBones(IKinematicsAnimated& animated, IKinematics& model, float dt);
 // A private copy of a hud model (HudCopy), deleted with this.
@@ -223,13 +249,23 @@ xr_vector<VrLooseRound> DefaultLooseRounds();
 // shaders: [vr_derivation] in that file, else these defaults.
 struct VrNameTables
 {
-    xr_vector<xr_string> spent_case_bones=NameList({"gilza"});
+    xr_vector<xr_string> spent_case_bones=NameList({"gilza","casing"});
+    // A bolt or carrier: cycles on a shot even when the shots do not animate
+    // it, and is taken as the cycling part when no animation moves one.
+    xr_vector<xr_string> bolt_bones=NameList({"zatvor","bolt","carrier"});
+    // A charging handle (not a bare "handle": that also names carry handles).
+    xr_vector<xr_string> charging_handle_bones=NameList({"charg","cocking","rukoyat"});
     xr_vector<VrLooseRound> loose_rounds=DefaultLooseRounds();
     xr_vector<xr_string> red_dot_shaders=NameList({"light_dot","reflex"});
     xr_vector<xr_string> red_dot_textures=NameList({"red_lens","crosshair_dot"});
     xr_vector<xr_string> soft_lens_shaders=NameList({"black_soft","scope_reticle"});
     xr_vector<xr_string> glass_shaders=NameList({"lfo_","scope_color","scope_lens"});
     xr_vector<xr_string> glass_textures=NameList({"crosshair","_lense"});
+    // Devices a script tunes with the mouse buttons (GAMMA's RF receiver):
+    // in a VR hand, tuned by its trigger and upper face button.
+    xr_vector<xr_string> mouse_tuned_devices=NameList({"detector_radio"});
+    // A grenade's pin (with its ring under it): a stock grenade's "eka".
+    xr_vector<xr_string> grenade_pin_bones=NameList({"eka","pin","ring"});
 };
 // [vr_derivation] from the overrides file over the defaults, read once.
 const VrNameTables& VrNames();

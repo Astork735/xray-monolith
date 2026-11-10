@@ -49,6 +49,18 @@
 	<string id="ui_mcm_vr_hip_height_desc"><text>Distance from your eyes down to the belt: holster, ammunition pouch and belt slots. Raise it if they are too high for you.</text></string>
 	<string id="ui_mcm_vr_hip_width"><text>Hip Width (m)</text></string>
 	<string id="ui_mcm_vr_hip_width_desc"><text>Sideways distance from your centre to the pistol holster and the ammunition pouch.</text></string>
+	<string id="ui_mcm_vr_message_text_size"><text>PDA Message Text Size</text></string>
+	<string id="ui_mcm_vr_message_text_size_desc"><text>Size of PDA message text on the HUD, times its usual size (1 = as on a monitor). Longer messages wrap onto more lines. New messages are laid out at the new size; ones already shown keep their line breaks until they fade.</text></string>
+	<string id="ui_mcm_vr_body_tracking"><text>Body Tracking (Quest via Virtual Desktop)</text></string>
+	<string id="ui_mcm_vr_body_tracking_desc"><text>Meta body tracking bends your arms at your real elbows, moves your shoulders and turns your torso and body places with your real chest. Your hands still follow the controllers. Needs Virtual Desktop's own OpenXR runtime (VDXR) with Forward tracking data to PC on, and Body tracking on in the Quest's Movement tracking settings. A Quest 3 reads your upper body with its cameras; a Quest 2 estimates it from the headset and controllers.</text></string>
+	<string id="ui_mcm_vr_body_tracking_min_confidence"><text>Body Tracking Confidence</text></string>
+	<string id="ui_mcm_vr_body_tracking_min_confidence_desc"><text>How sure the headset must be of your body before it is used. Raise it if your arms twitch; lower it if body tracking rarely takes over.</text></string>
+	<string id="ui_mcm_vr_seated_reach"><text>Seated Floor Reach</text></string>
+	<string id="ui_mcm_vr_seated_reach_desc"><text>Playing seated, reaching down beside your chair toward the real floor brings your hand down to the in-game floor, so you can pick things up. When seated: only when your real floor is well above the game's. Always: whenever it is nearer at all (also for shorter players standing). Your hips, holster and belt are never moved. Needs the Quest boundary (room floor).</text></string>
+	<string id="ui_mcm_vr_shoulder_width"><text>Shoulder Width (m, 0 = measured)</text></string>
+	<string id="ui_mcm_vr_shoulder_width_desc"><text>Distance between your shoulder joints, about 0.36 m on an average adult. Spreads the shoulder holsters and the chest and pocket places. 0 measures it with body tracking.</text></string>
+	<string id="ui_mcm_vr_arm_length"><text>Arm Length (m, 0 = measured)</text></string>
+	<string id="ui_mcm_vr_arm_length_desc"><text>From your shoulder joint to your wrist, about 0.60 m on an average adult. Lengthens or shortens the visible arms to yours. 0 measures it with body tracking.</text></string>
 
 	<!-- Hands and weapons -->
 	<string id="ui_mcm_vr_hands"><text>Show Hands</text></string>
@@ -90,6 +102,8 @@
 	<string id="ui_mcm_vr_near_plane"><text>Near Clip (m)</text></string>
 	<string id="ui_mcm_vr_near_plane_desc"><text>Closest distance that is drawn. Lower lets you see hands and sights very close to your eyes.</text></string>
 	<string id="ui_mcm_vr_shared_shadows"><text>Shared Sun Shadows</text></string>
+	<string id="ui_mcm_vr_legacy_water"><text>Simple Water</text></string>
+	<string id="ui_mcm_vr_legacy_water_desc"><text>Draws water in VR with the standard Anomaly water shader (sky reflection only) instead of the Screen Space Shaders water (screen-space reflections, waves, caustics). Much cheaper when a lot of water is in view, and plainer looking. Takes effect immediately.</text></string>
 	<string id="ui_mcm_vr_shared_shadows_desc"><text>Render the sun's shadows once for both eyes instead of once per eye. Faster outdoors; turn off to compare.</text></string>
 	<string id="ui_mcm_vr_scope_quality"><text>Scope View Quality</text></string>
 	<string id="ui_mcm_vr_ui_distance"><text>Menu Distance (m)</text></string>
@@ -99,7 +113,7 @@
 	<string id="ui_mcm_vr_hud_scale"><text>HUD Size</text></string>
 	<string id="ui_mcm_vr_hud_scale_desc"><text>How large the in-game HUD is at its distance. Higher makes the ammunition count and messages larger but moves them further toward the edges of your view; lower pulls them in toward the centre, where the lenses are sharpest, and makes them smaller. Size and distance together set how much of your view the HUD covers (Size 1 at 1 m: about 75 degrees across).</text></string>
 	<string id="ui_mcm_vr_depth_layer"><text>Depth for Reprojection</text></string>
-	<string id="ui_mcm_vr_depth_layer_desc"><text>Gives the headset runtime each eye's depth, so frames it has to reproject (when the game misses the headset's frame rate) keep near objects steady. Turn off if edges near your hands or weapon wobble.</text></string>
+	<string id="ui_mcm_vr_depth_layer_desc"><text>Gives the headset runtime each eye's depth, so frames it has to reproject (when the game misses the headset's frame rate) can keep near objects steady. Off by default: it costs GPU time every frame, and Virtual Desktop showed no visible gain from it. Turn it on only if your runtime uses depth and near objects swim when it reprojects.</text></string>
 	<string id="ui_mcm_vr_scope_quality_desc"><text>Detail of the magnified scope image: pixels rendered per pixel the lens covers in your eye. 1 matches the headset; higher is sharper and slower. 0 renders it at full eye resolution, as before.</text></string>
 	<string id="ui_mcm_vr_wrist_display"><text>Wrist Status Display</text></string>
 	<string id="ui_mcm_vr_wrist_display_desc"><text>Look at the back of your off-hand wrist, forearm across your view as when reading a watch: bars show health (red) and stamina (yellow), plus radiation (green), psy health (blue), bleeding (dark red) and hunger (brown) when they matter.</text></string>

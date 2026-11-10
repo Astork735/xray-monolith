@@ -28,6 +28,8 @@
 #include "Bolt.h"
 #include "string_table.h"
 
+void VrNoteWork(const char* what, const char* object, float ms);
+
 CInventoryOwner::CInventoryOwner()
 {
 	m_pTrade = NULL;
@@ -335,7 +337,14 @@ void CInventoryOwner::OnItemTake(CInventoryItem* inventory_item)
 {
 	CGameObject* object = smart_cast<CGameObject*>(this);
 	VERIFY(object);
-	object->callback(GameObject::eOnItemTake)(inventory_item->object().lua_game_object());
+	{
+		// VR: the scripts' share of a pickup's cost (VrWeaponUpdate.cpp).
+		CTimer script_timer; script_timer.Start();
+		object->callback(GameObject::eOnItemTake)(inventory_item->object().lua_game_object());
+		if (object == smart_cast<CGameObject*>(Level().CurrentControlEntity()))
+			VrNoteWork("on_item_take script callbacks", inventory_item->object().cNameSect().c_str(),
+			           script_timer.GetElapsed_sec() * 1000.f);
+	}
 
 	attach(inventory_item);
 

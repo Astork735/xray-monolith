@@ -2,6 +2,7 @@
 #include "dxFontRender.h"
 
 #include "../../xrEngine/GameFont.h"
+#include "../../xrEngine/Vr/vr_ui_policy.h"
 
 dxFontRender::dxFontRender()
 {
@@ -35,11 +36,12 @@ void dxFontRender::OnRender(CGameFont& owner)
 		owner.uFlags |= CGameFont::fsValid;
 	}
 
-	// The VR UI layer is eye-sized (nearly square) but shown at 4:3, so its
-	// pixels are wider than tall there: glyphs drawn into it are narrowed to
-	// keep their shape. Text drawn into the eyes (square pixels) is not.
+	// The VR UI layer is eye-sized (nearly square) but shown at 16:9
+	// (vr::kUiPanelAspect), so its pixels are wider than tall there: glyphs
+	// drawn into it are narrowed to keep their shape. Text drawn into the
+	// eyes (square pixels) is not.
 	const float scale_x = g_current_font_scale.x * (g_vr_ui_pass && Device.dwHeight ?
-		float(Device.dwWidth) / float(Device.dwHeight) * (768.f / 1024.f) : 1.f);
+		float(Device.dwWidth) / float(Device.dwHeight) * vr::kUiPanelAspect : 1.f);
 
 	for (u32 i = 0; i < owner.strings.size();)
 	{

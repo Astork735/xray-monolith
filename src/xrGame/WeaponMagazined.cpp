@@ -1754,9 +1754,19 @@ void CWeaponMagazined::PlayAnimIdle()
 		: PlayHUDMotion("anm_idle", TRUE, NULL, GetState());
 }
 
+extern bool g_hud_motion_without_scripts;
 void CWeaponMagazined::PlayAnimShoot()
 {
 	VERIFY(GetState() == eFire);
+	// A bolt or lever worked by a VR hand: its shot motion is played without
+	// the scripts' animation hook, which plays the action's sound with it
+	// (GAMMA's VSSK: its bolt sound on every shot). The hand plays it.
+	struct WithoutScripts
+	{
+		bool was;
+		explicit WithoutScripts(bool on) : was(g_hud_motion_without_scripts) { if (on) g_hud_motion_without_scripts = true; }
+		~WithoutScripts() { g_hud_motion_without_scripts = was; }
+	} without_scripts(VrHandWorkedShot());
 	if (iAmmoElapsed > 1 || !HudAnimationExist("anm_shot_l"))
 	{
 		if(!IsZoomed() || !HudAnimationExist("anm_shots_aim"))

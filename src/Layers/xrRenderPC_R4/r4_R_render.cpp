@@ -222,6 +222,7 @@ void CRender::render_menu()
 }
 
 extern u32 g_r;
+extern ENGINE_API int vr_legacy_water; // device.cpp
 
 void CRender::Render()
 {
@@ -243,7 +244,12 @@ void CRender::Render()
     {
         o.ssfx_taa = o.ssfx_motionblur = o.ssfx_motionvectors = 0;
         o.ssfx_ao = o.ssfx_il = o.ssfx_ssr = o.ssfx_sss = 0;
-        o.ssfx_water = o.ssfx_fog = o.ssfx_rain = 0;
+        o.ssfx_fog = o.ssfx_rain = 0;
+        // SSFX water stays (user decision 2026-11-09). Without it water fell
+        // back to its material's legacy shader, which SSS 23 leaves without
+        // its env cubemaps (white water in GAMMA). Its reflection history is
+        // kept per view: Matrix_previous by vr_view_slot, rt_ssfx_water by
+        // the right eye's own surface (vr_water_history_begin).
         // SSFX volumetric light stays (user decision 2026-11-03): per eye it is
         // self-contained (its flags reset in phase_scene_prepare, a spatial
         // blur, no history) and its 1/8 targets have scope twins. Without it a
@@ -256,6 +262,10 @@ void CRender::Render()
         ps_r2_ls_flags.set(R2FLAG_EXP_MT_CALC | R2FLAG_DOF | R2FLAG_ZFILL, FALSE);
         ps_r2_ls_flags.set(R2FLAG_EXP_DONT_TEST_UNSHADOWED | R2FLAG_EXP_DONT_TEST_SHADOWED, TRUE);
     }
+    // MCM "Simple Water": with SSFX water installed, the eyes draw water with
+    // the stock water pass (vr_water.ps). The material's own pass is not used:
+    // SSS 23 pairs it with a specular that divides by zero (white water).
+    Target->vr_simple_water = g_vr_rendering_eye && vr_legacy_water && o.ssfx_water;
 
 	PIX_EVENT(CRender_Render);
 
@@ -576,13 +586,16 @@ void CRender::Render()
 	{
 		// Save previus and current matrices
 		{
-			static Fmatrix mm_saved_viewproj;
+			// One per view: each VR eye and the scope's view reproject from
+			// their own previous frame (vr_view_slot).
+			static Fmatrix mm_saved_viewproj[CRenderTarget::vr_view_slots];
 
 			if (!Device.m_SecondViewport.IsSVPFrame())
 			{
-				Target->Matrix_previous.mul(mm_saved_viewproj, Device.mInvView);
+				Fmatrix& saved = mm_saved_viewproj[Target->vr_view_slot()];
+				Target->Matrix_previous.mul(saved, Device.mInvView);
 				Target->Matrix_current.set(Device.mProject);
-				mm_saved_viewproj.set(Device.mFullTransform);
+				saved.set(Device.mFullTransform);
 			}
 		}
 

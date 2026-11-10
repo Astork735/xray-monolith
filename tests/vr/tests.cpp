@@ -56,12 +56,20 @@ PFN_xrGetActionStateVector2f xrGetActionStateVector2f_p = nullptr;
 PFN_xrGetActionStatePose xrGetActionStatePose_p = nullptr;
 PFN_xrLocateSpace xrLocateSpace_p = nullptr;
 PFN_xrApplyHapticFeedback xrApplyHapticFeedback_p = nullptr;
+PFN_xrGetSystemProperties xrGetSystemProperties_p = nullptr;
+PFN_xrCreateBodyTrackerFB xrCreateBodyTrackerFB_p = nullptr;
+PFN_xrDestroyBodyTrackerFB xrDestroyBodyTrackerFB_p = nullptr;
+PFN_xrLocateBodyJointsFB xrLocateBodyJointsFB_p = nullptr;
+PFN_xrRequestBodyTrackingFidelityMETA xrRequestBodyTrackingFidelityMETA_p = nullptr;
+PFN_xrGetVisibilityMaskKHR xrGetVisibilityMaskKHR_p = nullptr;
+int vr_body_tracking=1;
+float vr_body_tracking_min_confidence=0.5f;
 TestDevice Device;
 bool g_vr_owns_present = false;
 TestPersistent* g_pGamePersistent = nullptr;
 int vr_enabled=1,vr_tracking_origin=0,vr_debug=0,vr_snap_turn=1,vr_smooth_turn=0;
 float vr_world_scale=1,vr_render_scale=1,vr_snap_turn_angle=30,vr_near_plane=0.03f;
-int vr_depth_layer=1;
+int vr_depth_layer=0;
 float vr_ui_distance=1.5f;
 float vr_hud_distance=1.f, vr_hud_scale=1.f;
 int vr_shared_shadows=1;
@@ -82,6 +90,21 @@ struct Runtime
     bool loader=true,headset=true,no_ready=false,stopping=false;
     // The runtime offers XR_KHR_composition_layer_depth and D24S8 swapchains.
     bool depth=false; int depth_views=0;
+    // XR_KHR_visibility_mask offered, and its entry point found; mask queries.
+    bool mask=false, mask_functions=true; int mask_queries=0;
+    // Meta body tracking: offered (XR_FB_body_tracking, and the fidelity
+    // request), its entry points found, supported by the system; trackers
+    // alive, the last locate's space and time, the body's state.
+    bool body=false, fidelity=false, body_functions=true, body_supported=true;
+    int trackers=0; bool high_fidelity=false;
+    // The headset can track at high (camera) fidelity, and the fidelity it
+    // reports tracking at.
+    bool fidelity_supported=true; XrBodyTrackingFidelityMETA fidelity_level=XR_BODY_TRACKING_FIDELITY_LOW_META;
+    int system_queries=0;
+    XrSpace body_base=XR_NULL_HANDLE; XrTime body_time=0;
+    bool body_active=true; float body_confidence=0.9f;
+    // STAGE's handle and its origin (the real floor) in every other space.
+    XrSpace stage_space=XR_NULL_HANDLE; float stage_y=0.f;
     int binding_profiles=0;
     int fail_action=0,fail_chain=0;
     DXGI_FORMAT color_format=DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
@@ -93,9 +116,70 @@ static XrInstance Instance(){return reinterpret_cast<XrInstance>(1);}
 static XrSession Session(){return reinterpret_cast<XrSession>(2);}
 static XrResult XRAPI_PTR EnumerateExtensions(const char*,uint32_t capacity,uint32_t*count,XrExtensionProperties*out)
 {
-    *count=runtime.depth?2:1;
-    if(capacity)strcpy_s(out[0].extensionName,XR_KHR_D3D11_ENABLE_EXTENSION_NAME);
-    if(capacity>1&&runtime.depth)strcpy_s(out[1].extensionName,XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME);
+    std::vector<const char*> names{XR_KHR_D3D11_ENABLE_EXTENSION_NAME};
+    if(runtime.depth)names.push_back(XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME);
+    if(runtime.body)names.push_back(XR_FB_BODY_TRACKING_EXTENSION_NAME);
+    if(runtime.body&&runtime.fidelity)names.push_back(XR_META_BODY_TRACKING_FIDELITY_EXTENSION_NAME);
+    if(runtime.mask)names.push_back(XR_KHR_VISIBILITY_MASK_EXTENSION_NAME);
+    *count=uint32_t(names.size());
+    for(uint32_t i=0;i<capacity&&i<*count;++i)strcpy_s(out[i].extensionName,names[i]);
+    return XR_SUCCESS;
+}
+static XrResult XRAPI_PTR SystemProperties(XrInstance,XrSystemId,XrSystemProperties*out)
+{
+    ++runtime.system_queries;
+    for(auto*next=reinterpret_cast<XrBaseOutStructure*>(out->next);next;next=next->next)
+    {
+        if(next->type==XR_TYPE_SYSTEM_BODY_TRACKING_PROPERTIES_FB)
+            reinterpret_cast<XrSystemBodyTrackingPropertiesFB*>(next)->supportsBodyTracking=runtime.body_supported;
+        if(next->type==XR_TYPE_SYSTEM_PROPERTIES_BODY_TRACKING_FIDELITY_META)
+            reinterpret_cast<XrSystemPropertiesBodyTrackingFidelityMETA*>(next)->supportsBodyTrackingFidelity=runtime.fidelity_supported;
+    }
+    return XR_SUCCESS;
+}
+static XrResult XRAPI_PTR CreateBodyTracker(XrSession,const XrBodyTrackerCreateInfoFB*info,XrBodyTrackerFB*out)
+{
+    REQUIRE(info->type==XR_TYPE_BODY_TRACKER_CREATE_INFO_FB&&info->bodyJointSet==XR_BODY_JOINT_SET_DEFAULT_FB);
+    ++runtime.trackers;*out=reinterpret_cast<XrBodyTrackerFB>(uintptr_t(50));return XR_SUCCESS;
+}
+static XrResult XRAPI_PTR DestroyBodyTracker(XrBodyTrackerFB){--runtime.trackers;return XR_SUCCESS;}
+// One hidden triangle per eye: the lower-right half of the image, for the
+// field of view LocateViews reports ({-0.7, 0.8, 0.9, -0.75} radians).
+static XrResult XRAPI_PTR GetVisibilityMask(XrSession,XrViewConfigurationType config,uint32_t view,
+    XrVisibilityMaskTypeKHR type,XrVisibilityMaskKHR*mask)
+{
+    REQUIRE(config==XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO&&view<2&&type==XR_VISIBILITY_MASK_TYPE_HIDDEN_TRIANGLE_MESH_KHR);
+    ++runtime.mask_queries;
+    mask->vertexCountOutput=3;mask->indexCountOutput=3;
+    if(!mask->vertexCapacityInput&&!mask->indexCapacityInput)return XR_SUCCESS;
+    if(mask->vertexCapacityInput<3||mask->indexCapacityInput<3)return XR_ERROR_SIZE_INSUFFICIENT;
+    const float l=std::tan(-0.7f),r=std::tan(0.8f),u=std::tan(0.9f),d=std::tan(-0.75f);
+    mask->vertices[0]={l,d};mask->vertices[1]={r,d};mask->vertices[2]={r,u};
+    for(uint32_t i=0;i<3;++i)mask->indices[i]=i;
+    return XR_SUCCESS;
+}
+static XrResult XRAPI_PTR RequestFidelity(XrBodyTrackerFB,XrBodyTrackingFidelityMETA fidelity)
+{runtime.high_fidelity=fidelity==XR_BODY_TRACKING_FIDELITY_HIGH_META;return XR_SUCCESS;}
+static XrResult XRAPI_PTR LocateBody(XrBodyTrackerFB,const XrBodyJointsLocateInfoFB*info,XrBodyJointLocationsFB*out)
+{
+    REQUIRE(runtime.trackers==1&&out->jointCount==XR_BODY_JOINT_COUNT_FB&&out->jointLocations);
+    runtime.body_base=info->baseSpace;runtime.body_time=info->time;
+    out->isActive=runtime.body_active;out->confidence=runtime.body_confidence;
+    for(auto*next=reinterpret_cast<XrBaseOutStructure*>(out->next);next;next=next->next)
+        if(next->type==XR_TYPE_BODY_TRACKING_FIDELITY_STATUS_META)
+            reinterpret_cast<XrBodyTrackingFidelityStatusMETA*>(next)->fidelity=runtime.fidelity_level;
+    for(uint32_t i=0;i<out->jointCount;++i)
+    {
+        auto&joint=out->jointLocations[i];
+        joint.locationFlags=XR_SPACE_LOCATION_POSITION_VALID_BIT|XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+        joint.pose={{0,0,0,1},{0,runtime.head_y-0.3f,0}};
+    }
+    // The left arm: shoulder, elbow out to the side, wrist ahead (OpenXR: -z ahead).
+    out->jointLocations[XR_BODY_JOINT_LEFT_ARM_UPPER_FB].pose.position={-0.18f,runtime.head_y-0.25f,0.f};
+    out->jointLocations[XR_BODY_JOINT_LEFT_ARM_LOWER_FB].pose.position={-0.3f,runtime.head_y-0.5f,-0.1f};
+    out->jointLocations[XR_BODY_JOINT_LEFT_HAND_WRIST_FB].pose.position={-0.2f,runtime.head_y-0.5f,-0.4f};
+    out->jointLocations[XR_BODY_JOINT_RIGHT_HAND_WRIST_FB].locationFlags=0;
+    out->time=info->time;
     return XR_SUCCESS;
 }
 static XrResult XRAPI_PTR CreateInstance(const XrInstanceCreateInfo*,XrInstance*out)
@@ -110,8 +194,12 @@ static XrResult XRAPI_PTR Proc(XrInstance,const char*,PFN_xrVoidFunction*out)
 static XrResult XRAPI_PTR CreateSession(XrInstance,const XrSessionCreateInfo*,XrSession*out)
 {++runtime.sessions;runtime.event=0;*out=Session();return XR_SUCCESS;}
 static XrResult XRAPI_PTR DestroySession(XrSession){--runtime.sessions;runtime.running=false;runtime.attached=false;return XR_SUCCESS;}
-static XrResult XRAPI_PTR CreateSpace(XrSession,const XrReferenceSpaceCreateInfo*,XrSpace*out)
-{*out=reinterpret_cast<XrSpace>(uintptr_t(10+ ++runtime.spaces));return XR_SUCCESS;}
+static XrResult XRAPI_PTR CreateSpace(XrSession,const XrReferenceSpaceCreateInfo*info,XrSpace*out)
+{
+    *out=reinterpret_cast<XrSpace>(uintptr_t(10+ ++runtime.spaces));
+    if(info->referenceSpaceType==XR_REFERENCE_SPACE_TYPE_STAGE)runtime.stage_space=*out;
+    return XR_SUCCESS;
+}
 static XrResult XRAPI_PTR DestroySpace(XrSpace){--runtime.spaces;return XR_SUCCESS;}
 static XrResult XRAPI_PTR BeginSession(XrSession,const XrSessionBeginInfo*){runtime.running=true;return XR_SUCCESS;}
 static XrResult XRAPI_PTR EndSession(XrSession){runtime.running=false;return XR_SUCCESS;}
@@ -129,7 +217,7 @@ static XrResult XRAPI_PTR Poll(XrInstance,XrEventDataBuffer*buffer)
         runtime.space_change=false;
         auto*out=reinterpret_cast<XrEventDataReferenceSpaceChangePending*>(buffer);
         out->type=XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING;out->session=Session();
-        out->referenceSpaceType=XR_REFERENCE_SPACE_TYPE_LOCAL;out->changeTime=runtime.waits*10000000;return XR_SUCCESS;
+        out->referenceSpaceType=XR_REFERENCE_SPACE_TYPE_LOCAL;out->changeTime=XrTime(runtime.waits)*10000000;return XR_SUCCESS;
     }
     if(runtime.queued_state!=XR_SESSION_STATE_UNKNOWN)
     {
@@ -143,7 +231,7 @@ static XrResult XRAPI_PTR Poll(XrInstance,XrEventDataBuffer*buffer)
     out->state=runtime.event++==0?XR_SESSION_STATE_READY:XR_SESSION_STATE_FOCUSED;return XR_SUCCESS;
 }
 static XrResult XRAPI_PTR WaitFrame(XrSession,const XrFrameWaitInfo*,XrFrameState*out)
-{REQUIRE(runtime.running&&!runtime.begun);++runtime.waits;out->shouldRender=runtime.render;out->predictedDisplayTime=runtime.waits*10000000;return runtime.wait_frame;}
+{REQUIRE(runtime.running&&!runtime.begun);++runtime.waits;out->shouldRender=runtime.render;out->predictedDisplayTime=XrTime(runtime.waits)*10000000;return runtime.wait_frame;}
 static XrResult XRAPI_PTR BeginFrame(XrSession,const XrFrameBeginInfo*)
 {REQUIRE(!runtime.begun);++runtime.begins;runtime.begun=true;return runtime.begin_frame;}
 static XrResult XRAPI_PTR EndFrame(XrSession,const XrFrameEndInfo*info)
@@ -296,8 +384,14 @@ static XrResult XRAPI_PTR Boolean(XrSession,const XrActionStateGetInfo*,XrAction
 static XrResult XRAPI_PTR Float(XrSession,const XrActionStateGetInfo*,XrActionStateFloat*out){out->isActive=runtime.active;out->currentState=0.75f;return XR_SUCCESS;}
 static XrResult XRAPI_PTR Vector(XrSession,const XrActionStateGetInfo*,XrActionStateVector2f*out){out->isActive=runtime.active;out->currentState={0.5f,0.25f};return XR_SUCCESS;}
 static XrResult XRAPI_PTR Pose(XrSession,const XrActionStateGetInfo*,XrActionStatePose*out){out->isActive=runtime.active;return XR_SUCCESS;}
-static XrResult XRAPI_PTR Locate(XrSpace,XrSpace,XrTime,XrSpaceLocation*out)
-{out->locationFlags=runtime.tracking?XR_SPACE_LOCATION_POSITION_VALID_BIT|XR_SPACE_LOCATION_ORIENTATION_VALID_BIT:0;out->pose={{0,std::sin(runtime.head_yaw*0.5f),0,std::cos(runtime.head_yaw*0.5f)},{runtime.head_x,runtime.head_y,0}};return XR_SUCCESS;}
+static XrResult XRAPI_PTR Locate(XrSpace space,XrSpace,XrTime,XrSpaceLocation*out)
+{
+    if(space&&space==runtime.stage_space)
+    {
+        out->locationFlags=XR_SPACE_LOCATION_POSITION_VALID_BIT|XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+        out->pose={{0,0,0,1},{0,runtime.stage_y,0}};return XR_SUCCESS;
+    }
+    out->locationFlags=runtime.tracking?XR_SPACE_LOCATION_POSITION_VALID_BIT|XR_SPACE_LOCATION_ORIENTATION_VALID_BIT:0;out->pose={{0,std::sin(runtime.head_yaw*0.5f),0,std::cos(runtime.head_yaw*0.5f)},{runtime.head_x,runtime.head_y,0}};return XR_SUCCESS;}
 static XrResult XRAPI_PTR Haptic(XrSession,const XrHapticActionInfo*,const XrHapticBaseHeader*){return XR_SUCCESS;}
 namespace vr
 {
@@ -305,6 +399,19 @@ const char*ResultToString(XrResult){return "mock result";}
 bool Succeeded(XrResult result,const char*){return XR_SUCCEEDED(result);}
 bool LoadOpenXR(){return runtime.loader;}
 bool LoadOpenXRInstance(XrInstance){return true;}
+bool LoadOpenXRBodyTracking(XrInstance,bool fidelity)
+{
+    if(!runtime.body_functions){xrCreateBodyTrackerFB_p=nullptr;return false;}
+    xrGetSystemProperties_p=SystemProperties;xrCreateBodyTrackerFB_p=CreateBodyTracker;
+    xrDestroyBodyTrackerFB_p=DestroyBodyTracker;xrLocateBodyJointsFB_p=LocateBody;
+    xrRequestBodyTrackingFidelityMETA_p=fidelity?RequestFidelity:nullptr;
+    return true;
+}
+bool LoadOpenXRVisibilityMask(XrInstance)
+{
+    xrGetVisibilityMaskKHR_p=runtime.mask_functions?GetVisibilityMask:nullptr;
+    return runtime.mask_functions;
+}
 void UnloadOpenXR(){}
 }
 static void Connect()
@@ -341,14 +448,14 @@ static void Math()
     REQUIRE(Close((0.2f*matrix._33+matrix._43)/0.2f,0));
     REQUIRE(Close((1000*matrix._33+matrix._43)/1000,1));
 }
-static void CheckColorView(ID3D11RenderTargetView* target)
+static void CheckColorView(ID3D11RenderTargetView* target, bool expect_clear=false)
 {
     D3D11_RENDER_TARGET_VIEW_DESC view{};target->GetDesc(&view);
     const auto expected=runtime.color_format==DXGI_FORMAT_B8G8R8A8_UNORM_SRGB?DXGI_FORMAT_B8G8R8A8_UNORM:DXGI_FORMAT_R8G8B8A8_UNORM;
     REQUIRE(view.Format==expected);
     ID3D11DeviceContext* context=nullptr;runtime.device->GetImmediateContext(&context);
     const float encoded[4]={0.25f,0.5f,0.75f,1};
-    context->ClearRenderTargetView(target,encoded);
+    if (!expect_clear) context->ClearRenderTargetView(target,encoded);
     ID3D11Resource* resource=nullptr;target->GetResource(&resource);
     ID3D11Texture2D* texture=nullptr;
     REQUIRE(SUCCEEDED(resource->QueryInterface(__uuidof(ID3D11Texture2D),reinterpret_cast<void**>(&texture))));
@@ -362,9 +469,13 @@ static void CheckColorView(ID3D11RenderTargetView* target)
     const auto* bytes=static_cast<const unsigned char*>(mapped.pData);
     // The engine's encoded midpoint must stay 128, not become 188 through
     // an additional hardware sRGB encode. Check channels too (RGBA/BGRA).
-    REQUIRE(bytes[1]>=127&&bytes[1]<=128&&bytes[3]==255);
-    REQUIRE(bytes[expected==DXGI_FORMAT_B8G8R8A8_UNORM?2:0]==64);
-    REQUIRE(bytes[expected==DXGI_FORMAT_B8G8R8A8_UNORM?0:2]==191);
+    if (expect_clear) REQUIRE(bytes[0]==0&&bytes[1]==0&&bytes[2]==0&&bytes[3]==0);
+    else
+    {
+        REQUIRE(bytes[1]>=127&&bytes[1]<=128&&bytes[3]==255);
+        REQUIRE(bytes[expected==DXGI_FORMAT_B8G8R8A8_UNORM?2:0]==64);
+        REQUIRE(bytes[expected==DXGI_FORMAT_B8G8R8A8_UNORM?0:2]==191);
+    }
     context->Unmap(staging,0);staging->Release();texture->Release();resource->Release();context->Release();
 }
 struct HandDrawer
@@ -448,6 +559,20 @@ static void MenuPointerPolicy()
     REQUIRE(!inside&&Close(u,1.f)&&Close(v,0.5f));
     REQUIRE(!vr::QuadRayCursor({0,0,0},{0,0,-1},1.5f,1.5f,1,u,v,inside));
     REQUIRE(!inside&&Close(u,-1.f)&&Close(v,-1.f));
+    // A world point onto the head-locked HUD panel (world2ui in VR): along
+    // the line from the eyes, unclamped; behind the head mirrored, outside.
+    REQUIRE(vr::ProjectOntoQuad({0,0,10},1.f,1.5f,1.f,u,v,inside)&&inside&&Close(u,0.5f)&&Close(v,0.5f));
+    // 20 m ahead, 6 m right and 4 m up: at 1 m, 0.3 m right and 0.2 m up.
+    REQUIRE(vr::ProjectOntoQuad({6,4,20},1.f,1.5f,1.f,u,v,inside)&&inside);
+    REQUIRE(Close(u,0.5f+0.3f/1.5f)&&Close(v,0.5f-0.2f));
+    // The same direction gives the same place whatever the distance.
+    float u2,v2; bool inside2;
+    REQUIRE(vr::ProjectOntoQuad({0.3f,0.2f,1},1.f,1.5f,1.f,u2,v2,inside2)&&Close(u,u2)&&Close(v,v2));
+    // Off the panel: not clamped, not inside.
+    REQUIRE(vr::ProjectOntoQuad({10,0,1},1.f,1.5f,1.f,u,v,inside)&&!inside&&u>1.f);
+    // Behind the head: mirrored through the centre, never inside.
+    REQUIRE(vr::ProjectOntoQuad({1,0,-2},1.f,1.5f,1.f,u,v,inside)&&!inside&&u<0.5f);
+    REQUIRE(!vr::ProjectOntoQuad({1,1,0},1.f,1.5f,1.f,u,v,inside)&&!inside);
     vr::UiClickState click;
     REQUIRE(click.Step(true,true)==0); // held trigger on menu entry is not a click
     REQUIRE(click.Step(true,false)==0);
@@ -625,6 +750,7 @@ struct PistolTestModel
     std::vector<Fmatrix> bind;
     PistolTestBone bones[bone_count]; bool visible[bone_count]; PistolTestData data[bone_count];
     bool invalid=true;
+    unsigned bind_queries=0, data_queries=0, calculations=0;
     PistolTestModel()
     {
         bind.resize(bone_count);
@@ -633,18 +759,19 @@ struct PistolTestModel
         // wpn_body is the root; gilza stands in for an unlisted magazine sub-bone.
         data[0].parent=65535;data[2].parent=4;data[12].parent=11;
     }
-    PistolTestData& LL_GetData(unsigned short i){return data[i];}
+    PistolTestData& LL_GetData(unsigned short i){++data_queries;return data[i];}
     unsigned short LL_BoneID(const char* name){for(unsigned short i=0;i<bone_count;++i)if(std::strcmp(name,names[i])==0)return i;return 65535;}
     unsigned short LL_BoneCount(){return bone_count;}
     bool LL_GetBoneVisible(unsigned short i){return visible[i];}
     void LL_SetBoneVisible(unsigned short i,bool value,bool)
     {visible[i]=value;bones[i].mTransform=bones[i].mTransformHidden;invalid=true;}
     PistolTestBone& LL_GetBoneInstance(unsigned short i){return bones[i];}
-    void LL_GetBindTransform(std::vector<Fmatrix>& result){result=bind;}
+    void LL_GetBindTransform(std::vector<Fmatrix>& result){++bind_queries;result=bind;}
     void CalculateBones_Invalidate(){invalid=true;}
     void CalculateBones(bool)
     {
         if(!invalid)return;
+        ++calculations;
         for(int i=0;i<bone_count;++i)
         {
             auto& bone=bones[i];
@@ -658,6 +785,24 @@ struct PistolTestModel
 };
 static void PistolTestCallback(PistolTestBone* bone)
 {bone->mTransform=*static_cast<Fmatrix*>(bone->callback_param());}
+static void LooseRoundRendering()
+{
+    // The selected shell alone survives hidden parents/siblings on a private
+    // HUD copy. Repeated eye preparation and a renderer recalculation retain it.
+    PistolTestModel shell;
+    shell.names[9]="shell"; shell.names[11]="shell_carrier"; shell.names[12]="shell_casing";
+    std::vector<Fmatrix> poses;
+    vr::WeaponPoseCache<std::vector<Fmatrix>> cache;
+    const auto prepare=[&]() { return vr::ApplyWeaponPose(shell,poses,PistolTestCallback,2,nullptr,0.f,nullptr,
+        {"shell"},true,true,true,nullptr,{}, {},nullptr,0.f,{},true,&cache,50); };
+    REQUIRE(prepare());
+    for (int bone=0;bone<shell.bone_count;++bone) REQUIRE(shell.visible[bone]==(bone==9));
+    REQUIRE(!prepare());
+    shell.CalculateBones_Invalidate(); shell.CalculateBones(true); vr::CollapseHiddenSkinning(shell);
+    REQUIRE(Close(shell.bones[9].mRenderTransform._11,1.f));
+    REQUIRE(Close(shell.bones[0].mRenderTransform._11,0.f));
+    REQUIRE(Close(shell.bones[11].mRenderTransform._11,0.f));
+}
 static void ReloadMagazineRegression()
 {
     Fmatrix parent; parent.identity();
@@ -777,13 +922,113 @@ static void PistolRendering()
     // ...and stays with the loose magazine-only model.
     REQUIRE(pistol.visible[2]&&!pistol.visible[3]);
     // A moving part carries its children (a charging handle on a bolt), and
-    // nothing else moves.
+    // nothing else moves. Reusing the pose buffer must always start at bind,
+    // including a stroke returning to zero and a separately moving handle.
     PistolTestModel cycling;
     cycling.data[3].parent=7;
-    vr::ApplyWeaponPose(cycling,poses,PistolTestCallback,2,"slide",0.02f,"bullets",
-        {"magazin","bullets"},false,true,true);
-    REQUIRE(Close(poses[7].c.z,0.0659581f-0.02f)&&Close(poses[3].c.z,-0.02f));
-    REQUIRE(Close(poses[9].c.z,0)&&Close(poses[4].c.z,-0.0004783f));
+    cycling.names[10]="handle";
+    cycling.data[9].parent=10;
+    const float slide_travel[]={0.02f,0.04f,0.f,0.01f,0.01f,0.f};
+    const float handle_travel[]={0.f,0.01f,0.025f,0.f,0.01f,0.f};
+    for (bool calculate:{true,false})
+        for (int step=0;step<6;++step)
+        {
+            vr::ApplyWeaponPose(cycling,poses,PistolTestCallback,2,"slide",slide_travel[step],"bullets",
+                {"magazin","bullets"},false,step%2==0,step%2==0,nullptr,{}, {},
+                "handle",handle_travel[step],{},calculate);
+            // Deferred calculation uses the same callbacks as the immediate
+            // path; later per-eye recalculation must retain the posed parts.
+            for (int eye=0;eye<2;++eye)
+            {
+                cycling.CalculateBones_Invalidate(); cycling.CalculateBones(true);
+                vr::CollapseHiddenSkinning(cycling);
+                for (int id=0;id<cycling.bone_count;++id)
+                {
+                    Fmatrix expected=cycling.bind[id];
+                    if (id==7 || id==3) expected.c.z-=slide_travel[step];
+                    else if (id==10 || id==9) expected.c.z-=handle_travel[step];
+                    const auto& bone=cycling.bones[id];
+                    for (int row=0;row<4;++row)
+                        for (int col=0;col<4;++col)
+                        {
+                            REQUIRE(Close(bone.mTransformHidden.m[row][col],cycling.bind[id].m[row][col]));
+                            REQUIRE(Close(bone.mTransform.m[row][col],expected.m[row][col]));
+                        }
+                }
+                REQUIRE(cycling.visible[4]==(step%2==0) && cycling.visible[2]==(step%2==0));
+                REQUIRE(Close(cycling.bones[4].mRenderTransform._11,step%2==0 ? 1.f : 0.f));
+            }
+        }
+}
+static void PoseCaching()
+{
+    PistolTestModel model;
+    model.data[3].parent=7;
+    model.names[10]="handle"; model.data[9].parent=10;
+    std::vector<Fmatrix> poses;
+    vr::WeaponPoseCache<std::vector<Fmatrix>> cache;
+    const auto draw=[&](PistolTestModel& visual, unsigned frame, bool rounds, float travel=0.02f,
+        float handle=0.01f, bool magazine_only=false, const char* hidden=nullptr)
+    {
+        return vr::ApplyWeaponPose(visual,poses,PistolTestCallback,2,"slide",travel,"bullets",
+            {"magazin","bullets"},magazine_only,true,rounds,hidden,{}, {},"handle",handle,
+            {"magazin_2"},true,&cache,frame);
+    };
+    REQUIRE(draw(model,10,true));
+    REQUIRE(model.bind_queries==1 && model.calculations==1);
+    const auto topology_reads=model.data_queries;
+    const auto* pose_data=poses.data();
+    const auto* mask_data=cache.requested.data();
+    const auto* bone_data=cache.bones.data();
+    const auto* order_data=cache.order.data();
+    REQUIRE(!draw(model,10,true)); // second eye
+    REQUIRE(model.calculations==1 && model.bind_queries==1 && model.data_queries==topology_reads);
+    // A later renderer recalculation still has valid callbacks and hidden skinning.
+    model.CalculateBones_Invalidate(); model.CalculateBones(true); vr::CollapseHiddenSkinning(model);
+    REQUIRE(!draw(model,10,true));
+    REQUIRE(Close(model.bones[7].mTransform.c.z,model.bind[7].c.z-0.02f));
+    REQUIRE(Close(model.bones[3].mTransform.c.z,model.bind[3].c.z-0.02f));
+    REQUIRE(Close(model.bones[9].mTransform.c.z,model.bind[9].c.z-0.01f));
+    REQUIRE(!model.visible[11] && !model.visible[12]);
+    REQUIRE(Close(model.bones[12].mRenderTransform._11,0.f));
+    // Inputs may change between views: contents, travel, visibility and pose mode.
+    REQUIRE(draw(model,10,false));
+    REQUIRE(!model.visible[1]);
+    REQUIRE(draw(model,10,false,0.04f,0.03f));
+    REQUIRE(Close(model.bones[3].mTransform.c.z,model.bind[3].c.z-0.04f));
+    REQUIRE(Close(model.bones[9].mTransform.c.z,model.bind[9].c.z-0.03f));
+    REQUIRE(draw(model,10,false,0.04f,0.03f,false,"handle"));
+    REQUIRE(!model.visible[10] && !model.visible[9]); // unlisted child inherits the hidden root
+    REQUIRE(draw(model,10,true,0.f,0.f,true));
+    REQUIRE(!model.visible[0] && model.visible[4] && model.visible[2]);
+    const auto before_next_frame=model.calculations;
+    REQUIRE(draw(model,11,true,0.f,0.f,true));
+    REQUIRE(model.calculations==before_next_frame+1);
+    REQUIRE(model.bind_queries==1 && model.data_queries==topology_reads);
+    REQUIRE(poses.data()==pose_data && cache.requested.data()==mask_data &&
+        cache.bones.data()==bone_data && cache.order.data()==order_data);
+
+    // Same bone count, different visual and ordering: never reuse the weapon's IDs.
+    PistolTestModel dedicated;
+    std::swap(dedicated.names[4],dedicated.names[10]);
+    dedicated.data[2].parent=10;
+    dedicated.bind[10].c.z=0.35f;
+    REQUIRE(draw(dedicated,11,true,0.f,0.f,true));
+    REQUIRE(dedicated.bind_queries==1 && dedicated.visible[10] && dedicated.visible[2] && !dedicated.visible[4]);
+    REQUIRE(Close(poses[10].c.z,0.35f));
+
+    // A released model can be recreated at the exact same address, in the same frame.
+    cache.Reset();
+    dedicated.bind[10].c.z=0.72f;
+    dedicated.data[2].parent=4;
+    REQUIRE(draw(dedicated,11,true,0.f,0.f,true));
+    REQUIRE(dedicated.bind_queries==2 && !dedicated.visible[2]);
+    REQUIRE(Close(poses[10].c.z,0.72f));
+    REQUIRE(!draw(dedicated,11,true,0.f,0.f,true));
+    poses.clear();
+    REQUIRE(draw(dedicated,11,true,0.f,0.f,true));
+    REQUIRE(poses.size()==dedicated.bone_count && dedicated.bind_queries==2);
+    puts("PASS: VR pose cache reuses warmed buffers/topology and second-eye preparation; input and visual changes refresh it");
 }
 static void SightOptics()
 {
@@ -979,6 +1224,7 @@ static int eye_calls=0;
 static bool Eye(const VrEyeRenderContext&eye,void*)
 {CheckColorView(eye.target);++eye_calls;REQUIRE(!eye.depth);REQUIRE(eye.width==144&&eye.height==160);REQUIRE(Close(eye.view._41,eye.eye==0?0.031f:-0.031f));return true;}
 static bool FailedEye(const VrEyeRenderContext&,void*){return false;}
+static bool NoDepthEye(const VrEyeRenderContext&eye,void*){REQUIRE(!eye.depth);return true;}
 static bool DepthEye(const VrEyeRenderContext&eye,void*)
 {
     REQUIRE(eye.depth);D3D11_TEXTURE2D_DESC d{};static_cast<ID3D11Texture2D*>(eye.depth)->GetDesc(&d);
@@ -1054,16 +1300,155 @@ static void BodyPolicies()
     REQUIRE(!height.Step(true,0.1f,0.1f));
     for(int i=0;i<19;++i)REQUIRE(!height.Step(true,0.3f,0.1f));
     for(int i=0;i<40;++i)REQUIRE(!height.Step(true,-0.5f,0.1f)&&!height.Step(false,0.5f,0.1f));
+    // After a recenter: straightening up from a head lowered while
+    // recentering is taken at once, however little, for 3 s; a duck or a
+    // tremor is not; then only the 20 cm / 2 s rule.
+    height.Reset();height.Aligned();
+    REQUIRE(height.Settling()&&height.Step(true,0.05f,0.1f));
+    REQUIRE(!height.Step(true,-0.3f,0.1f)&&!height.Step(true,0.005f,0.1f));
+    REQUIRE(height.Step(true,0.12f,0.1f));
+    for(int i=0;i<30;++i)height.Step(true,-0.1f,0.1f);
+    REQUIRE(!height.Settling()&&!height.Step(true,0.12f,0.1f));
 }
 static void Clean()
 {
     CVrSystem::Get().Shutdown();
-    REQUIRE(!runtime.instances&&!runtime.sessions&&!runtime.spaces&&!runtime.sets&&!runtime.chains);
+    REQUIRE(!runtime.instances&&!runtime.sessions&&!runtime.spaces&&!runtime.sets&&!runtime.chains&&!runtime.trackers);
     REQUIRE(runtime.begins==runtime.ends);
+}
+// Meta body tracking: optional throughout. Without it VR starts as before;
+// with it the joints are located in the view space at the frame's display
+// time, and only while the runtime calls the body active and confident.
+static void VisibilityMask()
+{
+    // The pure maths: image placement and clipping to the image square.
+    const vr::MaskPoint mid=vr::MaskPointToImage({0.5f,0.f},-0.5f,1.5f,-1.f,1.f);
+    REQUIRE(Close(mid.x,0.f)&&Close(mid.y,0.f));
+    REQUIRE(Close(vr::MaskPointToImage({1.5f,1.f},-0.5f,1.5f,-1.f,1.f).x,1.f));
+    REQUIRE(Close(vr::ClippedTriangleArea({-1,-1},{1,-1},{1,1}),2.f));
+    REQUIRE(Close(vr::ClippedTriangleArea({2,2},{3,2},{3,3}),0.f));
+    REQUIRE(Close(vr::ClippedTriangleArea({-10,-10},{10,-10},{0,10}),4.f));
+    REQUIRE(Close(vr::ClippedTriangleArea({0,0},{2,0},{0,2}),1.f));
+    const vr::MaskPoint square[4]={{-2,-1},{2,-1},{2,1},{-2,1}};const uint32_t both[6]={0,1,2,0,2,3},bad[3]={0,1,7};
+    REQUIRE(Close(vr::HiddenImageShare(square,4,both,6,-2.f,2.f,-1.f,1.f),1.f));
+    REQUIRE(Close(vr::HiddenImageShare(square,4,both,3,-2.f,2.f,-1.f,1.f),0.5f));
+    REQUIRE(Close(vr::HiddenImageShare(square,4,bad,3,-2.f,2.f,-1.f,1.f),0.f));
+    REQUIRE(Close(vr::HiddenImageShare(square,4,both,6,1.f,-1.f,-1.f,1.f),0.f));
+    auto& system=CVrSystem::Get();
+    // Not offered: unknown, and never queried.
+    runtime.mask=false;runtime.mask_queries=0;
+    REQUIRE(system.Initialize(runtime.device,1920,1080,DXGI_FORMAT_R8G8B8A8_UNORM));
+    REQUIRE(system.PrepareFrame());system.SubmitFrame();
+    REQUIRE(runtime.mask_queries==0&&system.VisibilityMaskShare(0)<0.f&&system.VisibilityMaskShare(1)<0.f);
+    Clean();
+    // Offered, but its entry point is missing: VR still starts.
+    runtime.mask=true;runtime.mask_functions=false;
+    REQUIRE(system.Initialize(runtime.device,1920,1080,DXGI_FORMAT_R8G8B8A8_UNORM));
+    REQUIRE(system.PrepareFrame());system.SubmitFrame();
+    REQUIRE(runtime.mask_queries==0&&system.VisibilityMaskShare(0)<0.f);
+    Clean();runtime.mask_functions=true;
+    // Offered: both eyes fetched (counts, then triangles) and measured once
+    // the views are located.
+    REQUIRE(system.Initialize(runtime.device,1920,1080,DXGI_FORMAT_R8G8B8A8_UNORM));
+    REQUIRE(runtime.mask_queries==4);
+    REQUIRE(system.PrepareFrame());system.SubmitFrame();
+    REQUIRE(Close(system.VisibilityMaskShare(0),0.5f)&&Close(system.VisibilityMaskShare(1),0.5f));
+    Clean();REQUIRE(system.VisibilityMaskShare(0)<0.f);runtime.mask=false;
+}
+static void BodyTracking()
+{
+    auto& system=CVrSystem::Get();
+    XrPosef joint;
+    // Not offered.
+    runtime.body=false;
+    REQUIRE(system.Initialize(runtime.device,1920,1080,DXGI_FORMAT_R8G8B8A8_UNORM));
+    REQUIRE(system.PrepareFrame());
+    REQUIRE(runtime.trackers==0&&!system.BodyTrackingTracked()&&!system.BodyJoint(XR_BODY_JOINT_CHEST_FB,joint));
+    system.SubmitFrame();Clean();
+    // Offered, but its entry points are missing: VR still starts.
+    runtime.body=true;runtime.body_functions=false;
+    REQUIRE(system.Initialize(runtime.device,1920,1080,DXGI_FORMAT_R8G8B8A8_UNORM));
+    REQUIRE(system.PrepareFrame()&&runtime.trackers==0&&!system.BodyTrackingTracked());
+    system.SubmitFrame();Clean();runtime.body_functions=true;
+    // Offered, but the runtime does not report support yet (Virtual Desktop
+    // before the headset sends the body): asked again every few seconds,
+    // not every frame, and made once it does.
+    runtime.body_supported=false;
+    REQUIRE(system.Initialize(runtime.device,1920,1080,DXGI_FORMAT_R8G8B8A8_UNORM));
+    REQUIRE(system.PrepareFrame()&&runtime.trackers==0);system.SubmitFrame();
+    const int queries=runtime.system_queries;
+    REQUIRE(queries>=1);
+    REQUIRE(system.PrepareFrame()&&runtime.trackers==0);system.SubmitFrame();
+    REQUIRE(runtime.system_queries==queries);
+    runtime.body_supported=true;
+    // 10 ms a frame in the mock: past the 3 s interval.
+    for(int i=0;i<310&&!runtime.trackers;++i){REQUIRE(system.PrepareFrame());system.SubmitFrame();}
+    REQUIRE(runtime.trackers==1&&runtime.system_queries==queries+1);
+    // Turning vr_body_tracking off and on asks again at once.
+    vr_body_tracking=0;runtime.body_supported=false;
+    REQUIRE(system.PrepareFrame()&&runtime.trackers==0);system.SubmitFrame();
+    runtime.body_supported=true;vr_body_tracking=1;
+    REQUIRE(system.PrepareFrame()&&runtime.trackers==1);system.SubmitFrame();
+    Clean();
+    // A headset without camera tracking (Quest 2): high fidelity is not
+    // asked for, and the runtime reports low.
+    runtime.fidelity=true;runtime.fidelity_supported=false;runtime.high_fidelity=false;
+    REQUIRE(system.Initialize(runtime.device,1920,1080,DXGI_FORMAT_R8G8B8A8_UNORM));
+    REQUIRE(system.PrepareFrame()&&runtime.trackers==1&&!runtime.high_fidelity);
+    REQUIRE(system.BodyTrackingFidelity()==XR_BODY_TRACKING_FIDELITY_LOW_META);
+    system.SubmitFrame();Clean();
+    runtime.fidelity_supported=true;
+    // Supported, with high fidelity offered: asked for.
+    runtime.fidelity=true;runtime.high_fidelity=false;
+    REQUIRE(system.Initialize(runtime.device,1920,1080,DXGI_FORMAT_R8G8B8A8_UNORM));
+    REQUIRE(system.PrepareFrame());
+    REQUIRE(runtime.trackers==1&&runtime.high_fidelity);
+    runtime.fidelity_level=XR_BODY_TRACKING_FIDELITY_HIGH_META;
+    REQUIRE(system.BodyTrackingFidelity()==XR_BODY_TRACKING_FIDELITY_LOW_META);
+    REQUIRE(runtime.body_time==XrTime(runtime.waits)*10000000&&runtime.body_base!=XR_NULL_HANDLE);
+    REQUIRE(system.BodyTrackingTracked());
+    REQUIRE(system.BodyJoint(XR_BODY_JOINT_LEFT_ARM_LOWER_FB,joint)&&Close(joint.position.x,-0.3f)&&Close(joint.position.y,1.1f));
+    system.SubmitFrame();
+    REQUIRE(system.PrepareFrame()&&system.BodyTrackingFidelity()==XR_BODY_TRACKING_FIDELITY_HIGH_META);
+    runtime.fidelity_level=XR_BODY_TRACKING_FIDELITY_LOW_META;
+    // A joint the runtime has no position for.
+    REQUIRE(!system.BodyJoint(XR_BODY_JOINT_RIGHT_HAND_WRIST_FB,joint)&&!system.BodyJoint(XR_BODY_JOINT_COUNT_FB,joint));
+    // The real floor: STAGE's origin, 1.6 m under the calibrated eye.
+    float floor=0.f;
+    REQUIRE(system.RealFloorInBody(floor)&&Close(floor,-1.6f));
+    system.SubmitFrame();
+    // Not confident enough, or not active: not used.
+    runtime.body_confidence=0.2f;
+    REQUIRE(system.PrepareFrame()&&!system.BodyTrackingTracked()&&!system.BodyJoint(XR_BODY_JOINT_CHEST_FB,joint));
+    system.SubmitFrame();
+    runtime.body_confidence=0.9f;runtime.body_active=false;
+    REQUIRE(system.PrepareFrame()&&!system.BodyTrackingTracked());system.SubmitFrame();
+    runtime.body_active=true;
+    REQUIRE(system.PrepareFrame()&&system.BodyTrackingTracked());system.SubmitFrame();
+    // vr_body_tracking 0 ends the tracker; 1 makes it again.
+    vr_body_tracking=0;
+    REQUIRE(system.PrepareFrame()&&runtime.trackers==0&&!system.BodyTrackingTracked());system.SubmitFrame();
+    vr_body_tracking=1;
+    REQUIRE(system.PrepareFrame()&&runtime.trackers==1&&system.BodyTrackingTracked());system.SubmitFrame();
+    // The headset loses tracking: no joints.
+    runtime.tracking=false;
+    REQUIRE(system.PrepareFrame()&&!system.BodyTrackingTracked()&&!system.RealFloorInBody(floor));system.SubmitFrame();
+    runtime.tracking=true;
+    // The session stops: no joints until it runs again; then tracked.
+    REQUIRE(system.PrepareFrame());runtime.stopping=true;system.PollEvents();
+    REQUIRE(!system.BodyTrackingTracked());
+    runtime.queued_state=XR_SESSION_STATE_READY;system.PollEvents();
+    runtime.queued_state=XR_SESSION_STATE_FOCUSED;system.PollEvents();
+    REQUIRE(system.PrepareFrame()&&system.BodyTrackingTracked()&&runtime.trackers==1);system.SubmitFrame();
+    // Shutdown ends the tracker (Clean checks), and a new session makes one.
+    Clean();
+    REQUIRE(system.Initialize(runtime.device,1920,1080,DXGI_FORMAT_R8G8B8A8_UNORM));
+    REQUIRE(system.PrepareFrame()&&runtime.trackers==1);system.SubmitFrame();Clean();
+    runtime.body=runtime.fidelity=false;
 }
 int main()
 {
-    Math();GameplayPolicies();HandRendering();PistolRendering();ReloadMagazineRegression();SightOptics();MenuPointerPolicy();PhysicsProbeAndFrameWork();Connect();
+    Math();GameplayPolicies();HandRendering();PistolRendering();LooseRoundRendering();ReloadMagazineRegression();PoseCaching();SightOptics();MenuPointerPolicy();PhysicsProbeAndFrameWork();Connect();
     ID3D11DeviceContext* context=nullptr;D3D_FEATURE_LEVEL level;
     REQUIRE(SUCCEEDED(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&runtime.device,&level,&context)));
     IDXGIDevice*dxgi=nullptr;IDXGIAdapter*adapter=nullptr;DXGI_ADAPTER_DESC desc{};
@@ -1081,6 +1466,9 @@ int main()
     Fmatrix identity;identity.identity();system.SetWorldOrigin(identity);
     REQUIRE(system.RenderScene(Eye,nullptr));REQUIRE(system.RenderScene(Eye,nullptr));REQUIRE(eye_calls==2);
     REQUIRE(runtime.syncs==initial_syncs+1);system.SubmitFrame();system.SubmitFrame();REQUIRE(runtime.projection_layers==1&&runtime.layers==2);
+    // Acquisition owns the clear, including a frame submitted without a normal
+    // render Begin (startup/device failure): the previous image must not leak.
+    REQUIRE(system.PrepareFrame());CheckColorView(system.UiTarget(),true);system.SubmitFrame();
     runtime.render=false;const int acquired=runtime.acquires;
     REQUIRE(system.PrepareFrame());system.RenderScene(Eye,nullptr);system.SubmitFrame();REQUIRE(runtime.acquires==acquired&&runtime.layers==0);
     runtime.render=true;runtime.tracking=false;REQUIRE(system.PrepareFrame());system.RenderScene(Eye,nullptr);system.SubmitFrame();REQUIRE(runtime.projection_layers==0);
@@ -1132,19 +1520,30 @@ int main()
     REQUIRE(!system.Initialize(runtime.device,1920,1080,DXGI_FORMAT_R8G8B8A8_UNORM));Clean();
     runtime.color_format=DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
     HeightCalibration();Clean();MenuAnchoring();Clean();
+    BodyTracking();
     BodyPolicies();
-    // Depth layer: offered depth swapchains are filled per eye and submitted.
+    VisibilityMask();
+    // Depth layer off (the default): the swapchains exist, but nothing is
+    // acquired, copied or submitted.
     runtime.depth=true;
+    REQUIRE(vr_depth_layer==0);
+    REQUIRE(system.Initialize(runtime.device,1920,1080,DXGI_FORMAT_R8G8B8A8_UNORM));
+    REQUIRE(runtime.chains==5&&system.PrepareFrame());system.SetWorldOrigin(identity);
+    REQUIRE(system.RenderScene(NoDepthEye,nullptr));system.SubmitFrame();
+    REQUIRE(runtime.projection_layers==1&&runtime.depth_views==0);
+    Clean();REQUIRE(runtime.chains==0);
+    // Depth layer on: offered depth swapchains are filled per eye and submitted.
+    vr_depth_layer=1;
     REQUIRE(system.Initialize(runtime.device,1920,1080,DXGI_FORMAT_R8G8B8A8_UNORM));
     REQUIRE(runtime.chains==5&&system.PrepareFrame());system.SetWorldOrigin(identity);
     REQUIRE(system.RenderScene(DepthEye,nullptr));system.SubmitFrame();
     REQUIRE(runtime.projection_layers==1&&runtime.depth_views==2);
     REQUIRE(system.PrepareFrame());system.RenderScene(FailedEye,nullptr);system.SubmitFrame();
     REQUIRE(runtime.depth_views==0);
-    Clean();REQUIRE(runtime.chains==0);runtime.depth=false;
+    Clean();REQUIRE(runtime.chains==0);runtime.depth=false;vr_depth_layer=0;
     runtime.no_ready=true;const auto timeout_start=GetTickCount64();
     REQUIRE(!system.Initialize(runtime.device,1920,1080,DXGI_FORMAT_R8G8B8A8_UNORM));
     REQUIRE(GetTickCount64()-timeout_start>=5000&&GetTickCount64()-timeout_start<10000);Clean();
     context->Release();runtime.device->Release();
-    puts("PASS: arguments, coordinates, asymmetric projection, stereo dispatch, sRGB/UNORM color contract, height calibration, turn pivot, collision sweep, sticks, lifecycle, cleanup, inactive input, tracking loss, timeout, session loss");
+    puts("PASS: arguments, coordinates, asymmetric projection, stereo dispatch, sRGB/UNORM color contract, height calibration, turn pivot, collision sweep, sticks, lifecycle, cleanup, inactive input, tracking loss, timeout, session loss, body tracking, visibility mask, depth layer default off");
 }

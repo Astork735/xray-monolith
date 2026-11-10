@@ -504,6 +504,8 @@ CTexture* CResourceManager::_CreateTexture(LPCSTR _Name)
 		m_textures.insert(mk_pair(T->set_name(Name), T));
 		T->Preload();
 		if (RDEVICE.b_is_Ready && !bDeferredLoad) T->Load();
+		// Loaded on the background worker (BackgroundEnd).
+		if (m_background_tracking) m_background_tracking->push_back(T);
 		return T;
 	}
 }

@@ -136,7 +136,10 @@ inline unsigned StepPart(const PartDef& def, PartState& state, int hand, const P
             if (target>def.max) target=def.max;
             if (in.allowed)
             {
-                const float step=def.max_speed*in.dt;
+                // Held, it keeps up with the hand (five times its own settling
+                // speed): a cover flicked open fast fell behind and the hand
+                // slipped off it while still squeezing.
+                const float step=5.f*def.max_speed*in.dt;
                 const float delta=target-state.value;
                 state.value+=delta>step ? step : (delta<-step ? -step : delta);
             }

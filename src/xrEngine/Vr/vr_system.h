@@ -1,6 +1,9 @@
 #pragma once
 #include "vr_common.h"
 #include "vr_graphics_d3d11.h"
+#include "vr_body_tracking.h"
+#include "vr_visibility_mask.h"
+#include <vector>
 #ifdef VR_ENABLED
 
 struct VrEyeRenderContext
@@ -70,6 +73,9 @@ public:
     // The calibrated eye height is taken again at the head's current height
     // (position and heading unchanged).
     void RecalibrateHeight();
+    // Counts the times the view was aligned onto the body (calibration and
+    // every recenter): HeightRecalibration settles the eye height after each.
+    unsigned AlignCount() const { return m_align_count; }
     // The body's owner is going away: the next one is calibrated afresh even
     // if it is allocated at the same address.
     void ForgetBody(const void* owner) { if (m_body_owner == owner) { m_body_owner = nullptr; m_gameplay_bound = false; } }
@@ -78,7 +84,21 @@ public:
     // world (with the head-collision offset): TrackingToWorld is their product.
     Fmatrix TrackingToBody(const XrPosef& pose) const;
     Fmatrix BodyPlacement() const;
+    // Meta body tracking: a tracked joint (XrBodyJointFB) this frame, in the
+    // same tracking space as the head and controllers (TrackingToWorld).
+    bool BodyJoint(int joint, XrPosef& pose) const { return m_views_valid && m_body.Joint(joint, pose); }
+    bool BodyTrackingTracked() const { return m_views_valid && m_body.Tracked(); }
+    // The fidelity the runtime reports tracking at (XrBodyTrackingFidelityMETA), 0 unknown.
+    int BodyTrackingFidelity() const { return m_body.Fidelity(); }
+    float BodyTrackingConfidence() const { return m_body.Confidence(); }
+    // The real floor (the room's STAGE floor) in the body's frame: its height
+    // relative to the calibrated eye, in engine units. False without STAGE.
+    bool RealFloorInBody(float& y) const;
     const char* StateName() const;
+    // XR_KHR_visibility_mask: the share (0..1) of the eye's image the lenses
+    // hide, once its mask and field of view are known; -1 before (or when the
+    // runtime does not offer the mask).
+    float VisibilityMaskShare(int eye) const { return eye >= 0 && eye < 2 ? m_mask_share[eye] : -1.f; }
 private:
 #ifdef XR_VR_TEST
     friend struct VrTestAccess;
@@ -122,6 +142,25 @@ private:
     bool m_depth_extension = false, m_depth_submitted[2]{};
     float m_depth_near = 0.03f, m_depth_far = 1000.f;
     bool m_hp_extension = false;
+    // XR_FB_body_tracking (and its high-fidelity request), with the tracker
+    // made while vr_body_tracking is on.
+    bool m_body_extension = false, m_fidelity_extension = false;
+    CVrBodyTracker m_body;
+    // XR_KHR_visibility_mask: each eye's hidden triangles (view-space
+    // tangents), fetched at start and again when the runtime says they
+    // changed. The share is measured (and logged) once the eye's field of
+    // view is known.
+    bool m_visibility_mask_extension = false;
+    std::vector<vr::MaskPoint> m_mask_vertices[2];
+    std::vector<uint32_t> m_mask_indices[2];
+    bool m_mask_report[2]{};
+    float m_mask_share[2]{-1.f, -1.f};
+    void QueryVisibilityMask(int eye);
+    void ReportVisibilityMask();
+    void UpdateBodyTracking(XrTime time);
+    // The STAGE space's origin (the real floor) in the tracking space.
+    XrPosef m_floor_pose{{0,0,0,1},{0,0,0}};
+    bool m_floor_valid = false;
     XrSessionState m_state = XR_SESSION_STATE_UNKNOWN;
     XrFrameState m_frame_state{XR_TYPE_FRAME_STATE};
     XrView m_views[2]{{XR_TYPE_VIEW}, {XR_TYPE_VIEW}};
@@ -137,6 +176,7 @@ private:
     bool m_session_running = false, m_frame_begun = false, m_lost = false;
     bool m_views_valid = false, m_origin_valid = false, m_head_valid = false;
     bool m_recenter_pending = false;
+    unsigned m_align_count = 0;
     bool m_preserve_origin = false, m_scene_rendered = false, m_scene_attempted = false;
     bool m_ui_ready = false;
     XrTime m_space_change_time = 0;

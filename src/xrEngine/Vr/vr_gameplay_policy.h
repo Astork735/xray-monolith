@@ -184,14 +184,30 @@ inline float AdaptiveNearPlane(float closest_hand, float minimum, float world_sc
 // Standing up after a seated calibration: the head held more than 20 cm above
 // the calibrated eye for 2 s is not a stretch or a jump, so the eye height is
 // taken again there. Ducking (below) never re-calibrates: that is a crouch.
+// For the few seconds after a calibration or recenter (Aligned), any rise is
+// taken at once: a head lowered while recentering (looking down at the
+// button) had made that the standing eye, and straightening up less than
+// 20 cm left the in-game head that much too high for good. Step's true asks
+// for the eye height to be taken where the head is now.
+constexpr float height_settle_seconds = 3.f;
 struct HeightRecalibration
 {
     float above = 0.f;
-    void Reset() { above = 0.f; }
+    float settle = 0.f; // seconds of settling left
+    void Reset() { above = 0.f; settle = 0.f; }
+    void Aligned() { above = 0.f; settle = height_settle_seconds; }
+    bool Settling() const { return settle > 0.f; }
     bool Step(bool valid, float head_above_m, float dt)
     {
+        const float step = std::max(0.f, std::min(dt, 0.1f));
+        if (settle > 0.f)
+        {
+            settle = std::max(0.f, settle - step);
+            // 1 cm: not every tracking tremor.
+            if (valid && std::isfinite(head_above_m) && head_above_m > 0.01f) { above = 0.f; return true; }
+        }
         if (!valid || !std::isfinite(head_above_m) || head_above_m <= 0.20f) { above = 0.f; return false; }
-        above += std::max(0.f, std::min(dt, 0.1f));
+        above += step;
         if (above < 2.f) return false;
         above = 0.f;
         return true;

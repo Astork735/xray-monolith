@@ -36,6 +36,8 @@
 #include "../xrEngine/Vr/vr_overlay_draw.h"
 #include "../xrEngine/bone.h"
 #include "../xrEngine/EnnumerateVertices.h"
+#include "../xrEngine/Fmesh.h"
+#include "../xrEngine/SkeletonMotions.h"
 #include "WeaponShotgun.h"
 #include "WeaponBM16.h"
 #include "WeaponRG6.h"
@@ -132,14 +134,58 @@ bool VrHandgun(CWeapon& weapon)
     return !long_kind && (smart_cast<CWeaponPistol*>(&weapon)!=nullptr || smart_cast<CWeaponRevolver*>(&weapon)!=nullptr);
 }
 
+namespace
+{
+// Every interaction, for the claim sweep (VrUpdateHandClaims). Game thread.
+xr_vector<CVrWeaponInteraction*>& Interactions()
+{
+    static xr_vector<CVrWeaponInteraction*> all;
+    return all;
+}
+}
 CVrWeaponInteraction::CVrWeaponInteraction(CWeapon* weapon) : m_weapon(*weapon)
 {
     m_supported=LoadProfile();
     m_hand=vr::DominantHand();
+    Interactions().push_back(this);
     // A derived profile is measured once the weapon is the player's (see
     // Interact), never for every weapon in the level.
 }
-CVrWeaponInteraction::~CVrWeaponInteraction() { Destroy(); }
+CVrWeaponInteraction::~CVrWeaponInteraction()
+{
+    auto& all=Interactions();
+    all.erase(std::remove(all.begin(),all.end(),this),all.end());
+    Destroy();
+}
+void VrUpdateHandClaims(CActor& actor)
+{
+    for (CVrWeaponInteraction* interaction:Interactions()) interaction->UpdateHandClaim(actor);
+}
+// Drawn for each eye. What weapons draw beside the one in the hand: thrown
+// shells and dropped magazines (only a weapon the player has held has VR
+// state, Interactions()), and the holsters: the two weapon slots, and a
+// weapon on its way into a hand. A GAMMA inventory (300+ items) was walked
+// for them twice per eye, and every backpack weapon got VR state from it.
+void VrRenderWeaponProps(CActor& actor)
+{
+    for (CVrWeaponInteraction* interaction:Interactions()) interaction->RenderLooseMagazines();
+    CWeapon* drawn[2]={nullptr,nullptr};
+    int n=0;
+    for (u16 slot:{INV_SLOT_2,INV_SLOT_3})
+        if (auto* weapon=smart_cast<CWeapon*>(actor.inventory().ItemFromSlot(slot)))
+        {
+            weapon->VrRenderHolster();
+            drawn[n++]=weapon;
+        }
+    const auto& pickup=actor.m_vr_pickup;
+    if (pickup.wield_id!=u16(-1) && !pickup.wield_stow)
+        if (auto* weapon=smart_cast<CWeapon*>(Level().Objects.net_Find(pickup.wield_id)))
+            if (weapon->H_Parent()==&actor && weapon!=drawn[0] && weapon!=drawn[1]) weapon->VrRenderHolster();
+}
+void VrRenderWeaponMagazines()
+{
+    for (CVrWeaponInteraction* interaction:Interactions()) interaction->RenderBasicMagazines();
+}
 
 bool CVrWeaponInteraction::Mode() const
 {
@@ -156,46 +202,88 @@ Fvector CVrWeaponInteraction::GripLocal() const
     // animation's weapon hand when there is one (mirrored for a left hand),
     // so the drawn hand lies on the real hand; otherwise the measured grip.
     // The hands are sampled by RefreshAuthoredHands, never here.
-    if (vr::AnimatedGrip() && !m_cloud.empty())
+    if (vr::AnimatedGrip() && !m_model_data.cloud.empty())
     {
-        if (m_authored[1].valid && m_palm_trusted)
+        if (m_hands.authored[1].valid && m_hands.palm_trusted)
         {
             // Mirrored about the bore, which need not be the model's x=0.
-            Fvector palm=m_authored[1].palm;
-            const float centre=m_profile.has_trigger_point ? m_profile.trigger_point.x : 0.f;
-            if (!m_hand) palm.x=2.f*centre-palm.x;
-            return palm;
+            const Fvector& palm=m_hands.authored[1].palm;
+            return m_hand ? palm : AcrossBore(palm);
         }
     }
     return m_profile.grip_offset;
 }
 
-bool CVrWeaponInteraction::SectionCentre(const Fvector& point, float& centre, bool& inside) const
+namespace
 {
-    // Mesh points in a 2.4 cm slice along the bore and 3 cm across, below the
-    // bore line (not the barrels or sights above it).
-    const float top=m_profile.muzzle.square_magnitude()>EPS_S ? m_profile.muzzle.y-0.005f : point.y+0.08f;
-    float above=flt_max, below=-flt_max;
-    for (const Fvector& p:m_cloud)
+// Msg's own 2048-byte limit, for the whole line.
+void WeaponLog(char mark, const shared_str& section, LPCSTR format, va_list args)
+{
+    string2048 text;
+    _vsnprintf(text,sizeof(text)-1,format,args);
+    text[sizeof(text)-1]=0;
+    Msg("%c [VR weapon] %s: %s",mark,section.c_str(),text);
+}
+}
+void CVrWeaponInteraction::Note(LPCSTR format, ...) const
+{
+    va_list args; va_start(args,format);
+    WeaponLog('*',m_profile.section,format,args);
+    va_end(args);
+}
+void CVrWeaponInteraction::Warn(LPCSTR format, ...) const
+{
+    va_list args; va_start(args,format);
+    WeaponLog('!',m_profile.section,format,args);
+    va_end(args);
+}
+
+void CVrWeaponInteraction::MeshAround(const Fvector& point, float up, float down, bool& above, bool& below) const
+{
+    // Under the bore line: not the barrels or sights above it. Vertices lie
+    // only on surfaces, so this tells round the solid from beside it, not
+    // where its middle is.
+    const float top=m_profile.muzzle.square_magnitude()>EPS_S ? m_profile.muzzle.y-0.005f : point.y+up;
+    above=below=false;
+    for (const Fvector& p:m_model_data.cloud)
     {
-        if (_abs(p.z-point.z)>0.012f || _abs(p.x-point.x)>0.03f || p.y>top || _abs(p.y-point.y)>0.08f) continue;
-        if (p.y>point.y) above=std::min(above,p.y); else below=std::max(below,p.y);
+        if (_abs(p.z-point.z)>0.012f || _abs(p.x-point.x)>0.03f || p.y>top) continue;
+        const float rise=p.y-point.y;
+        if (rise>0.f) above=above || rise<=up;
+        else below=below || -rise<down;
+        if (above && below) return;
     }
-    if (above==flt_max) { inside=false; return false; }
-    inside=below>-flt_max && point.y-below<0.05f;
-    if (inside) { centre=0.5f*(above+below); return true; }
-    // Under the mesh: the solid just above, up to 6 cm thick.
-    float high=above;
-    for (const Fvector& p:m_cloud)
-        if (_abs(p.z-point.z)<=0.012f && _abs(p.x-point.x)<=0.03f && p.y<=top && p.y>=above && p.y<=above+0.06f)
-            high=std::max(high,p.y);
-    centre=0.5f*(above+high);
-    return true;
+}
+float CVrWeaponInteraction::CloudDistanceSq(const Fvector& point) const
+{
+    float nearest=flt_max;
+    for (const Fvector& p:m_model_data.cloud) nearest=std::min(nearest,p.distance_to_sqr(point));
+    return nearest;
+}
+bool CVrWeaponInteraction::AnimatedSupportHand() const
+{
+    return vr::AnimatedGrip() && !m_model_data.cloud.empty() && m_hands.palm_trusted && m_hands.authored[0].valid;
+}
+bool CVrWeaponInteraction::OnWeapon(const Fvector& point, bool* mesh) const
+{
+    bool above, below;
+    MeshAround(point,0.08f,0.05f,above,below);
+    if (mesh) *mesh=above || below;
+    return above && below;
+}
+bool CVrWeaponInteraction::FistClosesOn(const Fvector& centre) const
+{
+    // A fore-end or a vertical grip within 4 cm both ways. A barrel 5 cm
+    // over empty air (ahead of an SMG's magazine) or the receiver beside a
+    // vertical grip is not, though OnWeapon's mesh is.
+    bool above, below;
+    MeshAround(centre,0.04f,0.04f,above,below);
+    return above && below;
 }
 Fvector CVrWeaponInteraction::SupportSlide() const
 {
     Fvector none; none.set(0.f,0.f,0.f);
-    if (!m_supporting || m_support_cup || !m_authored[0].valid || RearSupport() || m_cloud.empty()) return none;
+    if (!m_supporting || m_support_cup || !m_hands.authored[0].valid || RearSupport() || m_model_data.cloud.empty()) return none;
     if (m_slide_along==m_support_along) return m_slide;
     m_slide_along=m_support_along;
     m_slide=none;
@@ -205,36 +293,54 @@ Fvector CVrWeaponInteraction::SupportSlide() const
     Fvector dir; dir.sub(m_profile.muzzle,grip);
     if (dir.square_magnitude()<0.15f*0.15f) return m_slide;
     dir.normalize();
-    const Fvector& palm=m_authored[0].palm;
+    // The centre of the animation's fist, on the support hand's side (a
+    // left-handed hold mirrors it about the bore, as AuthoredHand draws it).
+    const Fvector palm=m_hand ? m_hands.authored[0].palm : AcrossBore(m_hands.authored[0].palm);
     const float target=grip.z+dir.z*m_support_along;
-    float dz=target-palm.z;
+    const float dz=target-palm.z;
     if (_abs(dz)<0.03f) return m_slide;
-    // Not off the end of the weapon: back toward the animation's place until
-    // there is mesh to hold.
-    float base=0.f; bool inside=false;
-    const bool based=SectionCentre(palm,base,inside);
-    for (int step=0;step<40 && _abs(dz)>=0.03f;++step)
+    // From the animation's place toward where the hand closed, 1 cm a step:
+    // the stretch the fist closes round (FistClosesOn) without a break, a
+    // gap allowed only before it (an animated hand on the magazine, which
+    // the mesh cloud leaves out). Past its end the hand was off the front
+    // of a vertical grip, in the air. The hand is about 8 cm wide: its
+    // centre stays 3 cm inside the stretch's end, or in the middle of one
+    // shorter than a hand (a vertical grip: it does not slide along it).
+    // Along the bore only: the palm is pressed onto the surface where it lands
+    // when drawn (player_hud_legs.cpp); a height from the nearest mesh points
+    // lifted it off the handguard or sank it in.
+    const float sign=dz>0.f ? 1.f : -1.f, want=_abs(dz), margin=0.03f;
+    float first=-1.f, last=-1.f;
+    for (int step=0;step<=45;++step)
     {
-        Fvector at=palm; at.z+=dz;
-        float centre=0.f;
-        if (SectionCentre(at,centre,inside))
-        {
-            m_slide.set(0.f,based && _abs(centre-base)<0.06f ? centre-base : 0.f,dz);
-            return m_slide;
-        }
-        dz-=dz>0.f ? 0.01f : -0.01f;
+        const float s=0.01f*float(step);
+        if (s>want+margin) break;
+        Fvector at=palm; at.z+=sign*s;
+        if (FistClosesOn(at)) { if (first<0.f) first=s; last=s; }
+        else if (first>=0.f) break;
     }
+    if (first<0.f) return m_slide;
+    const float slide=last-first<2.f*margin ? 0.5f*(first+last) : std::max(first,std::min(want,last-margin));
+    if (slide<0.03f) return m_slide;
+    m_slide.set(0.f,0.f,sign*slide);
     return m_slide;
 }
-bool CVrWeaponInteraction::ForendPoint(Fvector& point) const
+bool CVrWeaponInteraction::HandOnMesh(const Fmatrix& world, const Fvector& hand, float reach) const
 {
-    if (!m_profile.has_forend) return false;
+    if (m_model_data.cloud.empty()) return true;
+    const Fvector local=Local(world,hand);
+    const float limit=reach*reach;
+    for (const Fvector& p:m_model_data.cloud) if (p.distance_to_sqr(local)<=limit) return true;
+    return false;
+}
+std::optional<Fvector> CVrWeaponInteraction::ForendPoint() const
+{
+    if (!m_profile.forend_point) return std::nullopt;
     // The animation's left hand holds the weapon where its idle does; only
     // without it (a stock-wrist gun whose animated hand is far from the
     // measured grip, or animated grips off) is the mesh's fore-end used.
-    if (vr::AnimatedGrip() && !m_cloud.empty() && m_palm_trusted && m_authored[0].valid) return false;
-    point=m_profile.forend_point;
-    return true;
+    if (AnimatedSupportHand()) return std::nullopt;
+    return m_profile.forend_point;
 }
 bool CVrWeaponInteraction::Transform(Fmatrix& world) const
 {
@@ -252,6 +358,30 @@ bool CVrWeaponInteraction::CarriedPose(Fmatrix& world) const
 // taken by hand is shown there while its activation is on its way).
 bool CVrWeaponInteraction::HeldPose(Fmatrix& world) const
 {
+    DecayRecoil();
+    HeldPoseKey key;
+    key.frame=Device.dwFrame;
+    key.carried=m_carried; key.supporting=m_supporting; key.cup=m_support_cup; key.break_hand=m_break_hand;
+    key.open=BarrelsOpen(); key.pumping=m_pumping; key.pump=m_pump; key.hand=m_hand;
+    key.hold=m_support_hold.has_value();
+    if (key.hold) key.hold_at=*m_support_hold;
+    key.recoil[0]=m_recoil_pitch; key.recoil[1]=m_recoil_yaw; key.recoil[2]=m_recoil_back;
+    key.grip=GripLocal();
+    if (key==m_held_key)
+    {
+        world=m_held_pose;
+        return m_held_valid;
+    }
+    m_held_valid=ComputeHeldPose(m_held_pose);
+    world=m_held_pose;
+    // The first call may take the support hand's hold point: keyed after it.
+    key.hold=m_support_hold.has_value();
+    if (key.hold) key.hold_at=*m_support_hold;
+    m_held_key=key;
+    return m_held_valid;
+}
+bool CVrWeaponInteraction::ComputeHeldPose(Fmatrix& world) const
+{
     // Passed to the other hand: it keeps the weapon where it took it.
     if (m_carried) return CarriedPose(world);
     Fmatrix grip,aim;
@@ -267,20 +397,37 @@ bool CVrWeaponInteraction::HeldPose(Fmatrix& world) const
     }
     else if (m_supporting && !m_support_cup && !BarrelsOpen())
     {
-        // Fore-end hold: the weapon hand stays put and the weapon's own
-        // grip-to-fore-end line passes through the support hand. A cup grip
-        // below the weapon hand leaves the aim to the weapon hand.
+        // Fore-end hold: the weapon hand stays put and the line from the grip
+        // to where the support hand closed on the weapon passes through the
+        // support hand, so the gun keeps the angle it had when taken. Steered
+        // by a fixed point down the fore-end, a hand on the magazine well
+        // turned the gun down toward it. A cup grip below the weapon hand
+        // leaves the aim to the weapon hand.
         Fmatrix left;
         Fvector have;
-        Fvector forend;
-        have.sub(ForendPoint(forend) ? forend : m_profile.support_offset,GripLocal());
-        if (RearSupport()) have.sub(m_authored[0].palm,GripLocal());
-        if (have.square_magnitude()<0.01f) have.set(0.f,0.f,1.f);
-        if (vr::HandTransform(HandOf(0),false,left))
+        const bool left_valid=vr::HandTransform(HandOf(0),false,left);
+        if (!m_support_hold && left_valid)
+        {
+            // Its place on the weapon as the weapon hand alone holds it now.
+            Fvector from; from.sub(left.c,grip.c);
+            Fvector local; local.set(from.dotproduct(world.i),from.dotproduct(world.j),from.dotproduct(world.k));
+            m_support_hold=Fvector().add(local,GripLocal());
+        }
+        if (m_support_hold)
+        {
+            have.sub(*m_support_hold,GripLocal());
+            // The hand rides the fore-end back as it is pumped.
+            if (m_pumping) have.z-=m_pump;
+        }
+        else have.sub(ForendPoint().value_or(m_profile.support_offset),GripLocal());
+        // A hold within 4 cm of the grip gives no line to steer by: the weapon
+        // hand aims (the gun would swing to wherever the hands' few
+        // millimetres of tracking noise point).
+        if (left_valid && have.square_magnitude()>=0.0016f)
         {
             Fvector want; want.sub(left.c,grip.c);
             world.transform_dir(have);
-            if (want.square_magnitude()>0.01f && have.square_magnitude()>EPS_S)
+            if (want.square_magnitude()>0.0016f && have.square_magnitude()>EPS_S)
             {
                 want.normalize(); have.normalize();
                 Fvector axis; axis.crossproduct(have,want);
@@ -383,6 +530,12 @@ bool CVrWeaponInteraction::GenericTransform(Fmatrix& world) const
     if (m_carried) return CarriedPose(world);
     Fmatrix grip;
     if (!vr::HandTransform(HandOf(1),false,grip) || !vr::HandTransform(HandOf(1),true,world)) return false;
+    // A two-handed hold aims through the support controller itself, from
+    // either hand: the drawn support hand snaps onto the barrel line, so it
+    // cannot steer. Only the right hand steered: a left-held weapon ignored
+    // its support hand.
+    Fmatrix support;
+    const bool steered=m_supporting && !m_support_cup && vr::HandTransform(HandOf(0),false,support);
     Fmatrix hand, finger;
     // NPC weapon offsets are authored for the right hand bone; a left-held
     // world model uses the controller placement below instead.
@@ -394,11 +547,7 @@ bool CVrWeaponInteraction::GenericTransform(Fmatrix& world) const
         // weapons point along hand-to-finger; two-hand weapons, whose offset
         // assumes the left hand on the fore-end, point along the aim ray.
         Fvector D;
-        Fmatrix left;
-        // Aim through the support controller itself: the drawn support hand
-        // snaps onto the barrel line, so it cannot steer the weapon.
-        if (m_supporting && !m_support_cup && vr::HandTransform(HandOf(0),false,left))
-            D.sub(left.c,hand.c);
+        if (steered) D.sub(support.c,hand.c);
         else if (m_weapon.HandDependence()==hd1Hand) D.sub(finger.c,hand.c);
         else D=world.k;
         if (D.square_magnitude()>EPS_S)
@@ -416,7 +565,23 @@ bool CVrWeaponInteraction::GenericTransform(Fmatrix& world) const
             }
         }
     }
-    // No outfit arms: approximate the grip from the controller.
+    // No outfit arms, or held in the left hand (the NPC offset is authored
+    // for a right hand bone): placed from the controller, and steered by the
+    // support hand as above.
+    if (steered)
+    {
+        Fvector D; D.sub(support.c,grip.c);
+        if (D.square_magnitude()>EPS_S)
+        {
+            D.normalize();
+            Fvector R; R.crossproduct(world.j,D);
+            if (R.square_magnitude()>EPS_S)
+            {
+                R.normalize();
+                world.i=R; world.k=D; world.j.crossproduct(D,R).normalize_safe();
+            }
+        }
+    }
     Fvector offset; offset.set(0.f,-0.025f,0.08f);
     world.transform_dir(offset);
     world.c.add(grip.c,offset);
@@ -452,21 +617,39 @@ bool CVrWeaponInteraction::HandFrame(Fmatrix& frame) const
     frame.i.crossproduct(frame.j,frame.k);
     // A measured grip centre keeps the palm on the mesh's grip regardless of
     // where the controller point (grip_offset) was calibrated.
-    frame.c=m_profile.has_hand_grip_center ? Point(world,m_profile.hand_grip_center) : grip.c;
+    frame.c=m_profile.hand_grip_center ? Point(world,*m_profile.hand_grip_center) : grip.c;
     return true;
 }
 
 bool CVrWeaponInteraction::TriggerPoint(Fvector& world) const
 {
     Fmatrix weapon;
-    if (!m_profile.has_trigger_point || !Transform(weapon)) return false;
-    world=Point(weapon,m_profile.trigger_point);
+    const std::optional<Fvector>& trigger=m_profile.trigger_point ? m_profile.trigger_point : m_hands.hand_trigger;
+    if (!trigger || !Transform(weapon)) return false;
+    world=Point(weapon,*trigger);
     return true;
+}
+namespace
+{
+// Whether the player may fire now, as the desktop fire key is authorized
+// (CActor::IR_OnKeyboardPress, kWPN_FIRE): not talking, alive, no hold on
+// the player's input (a controller's: CControlledActor lets only the knife
+// fire, and guns are never in its slot), and no _G.CActor_Fire refusal.
+// Unprofiled weapons fire through that key already.
+bool ActorMayFire(CActor& actor)
+{
+    if (actor.Remote() || actor.IsTalking() || !actor.g_Alive() || actor.input_external_handler_installed())
+        return false;
+    ::luabind::functor<bool> fire;
+    return !ai().script_engine().functor("_G.CActor_Fire",fire) || fire();
+}
 }
 void CVrWeaponInteraction::PullTrigger()
 {
+    auto* actor=smart_cast<CActor*>(m_weapon.H_Parent());
+    if (!actor || !ActorMayFire(*actor)) return;
     // As the desktop fire key: in safe mode the first pull only leaves it.
-    if (auto* actor=smart_cast<CActor*>(m_weapon.H_Parent()); actor && actor->is_safemode())
+    if (actor->is_safemode())
     {
         actor->set_safemode(false);
         return;
@@ -477,57 +660,95 @@ void CVrWeaponInteraction::PullTrigger()
     m_weapon.FireStart();
 }
 
-void CVrWeaponInteraction::SwapHands()
+void CVrWeaponInteraction::SwapHands(Edges& next, bool support_grip)
 {
     // The weapon hand and the support hand trade roles. Velocities are
     // tracked per role, so they start afresh.
     m_hand=1-m_hand;
     m_have_hand[0]=m_have_hand[1]=false;
     m_hand_epoch=0;
+    // A held trigger belongs to the previous role until released and pulled
+    // again. A queued shot must not follow the weapon into the other hand.
+    const float trigger=vr::HandTrigger(HandOf(1));
+    m_fire_trigger.Block();
+    m_fire_trigger.Step(trigger);
+    m_fire_queued=0;
+    m_input.Reset();
+    m_input.Step(vr::GameplayInputEpoch(),true,vr::TriggerPulled(trigger) ||
+        (vr::HandButton(1) && !VrHeadGesture(1)) || vr::HandSecondaryButton(HandOf(1)));
     vr::HandHaptic(m_hand,0.15f);
+    // Seed the new roles once: a held trigger is not a fresh support action.
+    next.trigger=false; next.grip[0]=support_grip; next.grip[1]=true;
+    next.mag_trigger=vr::TriggerPulled(vr::HandTrigger(HandOf(0)));
 }
-bool CVrWeaponInteraction::HandOver()
+bool CVrWeaponInteraction::HandOver(Edges& next)
 {
-    // The weapon hand let go while the other hand holds the weapon: that hand
-    // now carries it where it is, and the free hand can work a bolt or slide
-    // and take the grip again (TakeBack).
-    Fmatrix world, support;
-    if (!AimTransform(world) || !vr::HandTransform(HandOf(0),false,support)) return false;
-    Fmatrix inverse; inverse.invert(support);
-    m_carry.mul_43(inverse,world);
+    // At the handle the receiving hand wields it; a fore-end hand keeps its
+    // carry hold, so letting go of the firing grip cannot fire from the barrel.
+    Fmatrix world, support, weapon_hand;
+    if (!AimTransform(world) || !vr::HandTransform(HandOf(0),false,support) ||
+        !vr::HandTransform(HandOf(1),false,weapon_hand)) return false;
+    const bool wield=vr::HandAtWeaponGrip(Pick(support.c),Pick(weapon_hand.c),Pick(world.k));
+    if (!wield)
+    {
+        Fmatrix inverse; inverse.invert(support);
+        m_carry.mul_43(inverse,world);
+    }
     // The hand keeps the hold it was drawn with: the weapon stays where it
     // is against the controller, so the drawn hand does not move.
-    m_carry_authored=m_supporting && !m_support_cup && !BarrelsOpen() && vr::AnimatedGrip() && m_hand==1 &&
-        m_authored[0].valid && m_palm_trusted && !m_hands_local.empty();
+    m_carry_authored=!wield && m_supporting && !m_support_cup && !BarrelsOpen() && vr::AnimatedGrip() && m_hand==1 &&
+        m_hands.authored[0].valid && m_hands.palm_trusted && !m_hands.hands_local.empty();
     m_carry_slide=m_carry_authored ? SupportSlide() : Fvector().set(0.f,0.f,0.f);
-    m_carried=true;
+    // Keep the fist on a retracted pump. Carrying freezes its stroke: the
+    // same hand still holds it, but the free hand must not drive the pump.
+    m_carry_pump=!wield && m_pumping;
+    if (m_carry_authored && m_carry_pump) m_carry_slide.z-=m_pump;
+    m_pumping=false;
+    m_carried=!wield;
     m_supporting=m_support_cup=m_break_hand=false;
-    SwapHands();
+    m_support_hold.reset();
+    SwapHands(next,false);
     return true;
 }
 
-void CVrWeaponInteraction::TakeBack()
+void CVrWeaponInteraction::TakeBack(Edges& next)
 {
     // The free hand closed on the grip again: it holds the weapon, and the
-    // hand that carried it stays where it is as the support hand.
+    // hand that carried it stays where it is as the support hand. The gun is
+    // steered by where that hand has it now (as carried), so it does not snap
+    // to the new weapon hand's aim.
+    Fmatrix carried, holding;
+    if (CarriedPose(carried) && vr::HandTransform(HandOf(1),false,holding)) m_support_hold=Local(carried,holding.c);
+    else m_support_hold.reset();
+    // HeldPose subtracts pump travel from this neutral support anchor.
+    // The hand kept the pump at its current stroke while carrying it.
+    m_pumping=m_carry_pump;
+    if (m_pumping && m_support_hold) m_support_hold->z+=m_pump;
     m_carried=false;
     m_supporting=true;
     m_support_cup=m_support_barrels=false;
-    SwapHands();
+    SwapHands(next,true);
     Fmatrix world, weapon_hand, support;
     if (AimTransform(world) && vr::HandTransform(HandOf(1),false,weapon_hand) &&
         vr::HandTransform(HandOf(0),false,support))
     {
         const Fvector muzzle=Point(world,MuzzleLocal());
         m_support_along=SupportAlong(weapon_hand.c,muzzle,support.c);
+        if (m_pumping)
+        {
+            m_pump_start=Local(world,support.c).z+m_pump;
+            m_support_along+=m_pump;
+        }
     }
     // The hand that carried it stays where it held the fore-end.
     if (m_carry_authored)
     {
         m_slide_along=m_support_along;
         m_slide=m_carry_slide;
+        if (m_pumping) m_slide.z+=m_pump;
     }
     m_carry_authored=false;
+    m_carry_pump=false;
 }
 
 bool CVrWeaponInteraction::CollisionBoxes(Fmatrix& world, const xr_vector<Fobb>*& boxes)
@@ -538,11 +759,11 @@ bool CVrWeaponInteraction::CollisionBoxes(Fmatrix& world, const xr_vector<Fobb>*
     // of the trigger, so it does not sweep one fat box.
     if (Transform(world))
     {
-        if (m_collision_boxes.empty() && !m_cloud.empty())
+        if (m_collision_boxes.empty() && !m_model_data.cloud.empty())
         {
-            const float split=m_profile.has_trigger_point ? m_profile.trigger_point.z+0.08f : flt_max;
+            const float split=m_profile.trigger_point ? m_profile.trigger_point->z+0.08f : flt_max;
             Fbox parts[2]; parts[0].invalidate(); parts[1].invalidate();
-            for (const Fvector& point:m_cloud) parts[point.z>split ? 1 : 0].modify(point);
+            for (const Fvector& point:m_model_data.cloud) parts[point.z>split ? 1 : 0].modify(point);
             for (Fbox& part:parts)
             {
                 if (!part.is_valid()) continue;
@@ -571,7 +792,12 @@ bool CVrWeaponInteraction::CollisionBoxes(Fmatrix& world, const xr_vector<Fobb>*
 
 bool CVrWeaponInteraction::Prepare()
 {
-    if (!g_player_hud || !Mode() || !EnsureVisual()) return false;
+    if (!g_player_hud || !Mode()) return false;
+    // Its HUD model's textures load on the renderer's worker first: made at
+    // once, a GAMMA model's stalled the frame up to 0.65 s. Asked again a
+    // second later, it is measured once they are in.
+    if (!m_visual && !VrPrewarmVisual(m_profile.visual,m_weapon.cNameSect().c_str())) return true;
+    if (!EnsureVisual()) return false;
     const bool ready=m_authored_sampled && m_authored_hands==g_player_hud->section_name();
     RefreshAuthoredHands();
     return !ready;
@@ -598,15 +824,18 @@ void CVrWeaponInteraction::PlayHandling(int sound, const Fvector& position)
     // section can name its own (snd_vr_mag_in, snd_vr_mag_out,
     // snd_vr_slide_back, snd_vr_slide_forward, snd_vr_pump_back,
     // snd_vr_pump_forward, snd_vr_break_open, snd_vr_break_close,
-    // snd_vr_shell_in, snd_vr_cover_open, snd_vr_cover_close, snd_vr_belt_in).
+    // snd_vr_shell_in, snd_vr_cover_open, snd_vr_cover_close, snd_vr_belt_in,
+    // snd_vr_fire_mode). The fire-mode click is the AK-74's selector, for
+    // weapons without a snd_switch_mode of their own.
     static LPCSTR const keys[SoundCount]={"mag_out","mag_in","slide_back","slide_forward",
         "pump_back","pump_forward","break_open","break_close","shell_in",
-        "cover_open","cover_close","belt_in"};
+        "cover_open","cover_close","belt_in","fire_mode"};
     static LPCSTR const rifle[SoundCount]={"vr\\rifle_mag_out","vr\\rifle_mag_in",
         "vr\\rifle_bolt_back","vr\\rifle_bolt_forward",
         "weapons\\winchester1300\\w1300_open","weapons\\winchester1300\\w1300_close",
         "weapons\\winchester1300\\w1300_open","weapons\\generic_close","weapons\\gen_grenload",
-        "weapons\\winchester1300\\w1300_open","weapons\\generic_close","vr\\rifle_mag_in"};
+        "weapons\\winchester1300\\w1300_open","weapons\\generic_close","vr\\rifle_mag_in",
+        "weapons\\ak74\\ak74_switch"};
     // A pistol's differ only in its magazine and slide.
     static LPCSTR const pistol[SoundBeltIn+1]={"vr\\pistol_mag_out","vr\\pistol_mag_in",
         "weapons\\winchester1300\\w1300_open","weapons\\pm\\pm_close",
@@ -617,14 +846,15 @@ void CVrWeaponInteraction::PlayHandling(int sound, const Fvector& position)
         m_handling_loaded[sound]=true;
         string64 key; xr_sprintf(key,"snd_vr_%s",keys[sound]);
         const shared_str& section=m_weapon.cNameSect();
-        LPCSTR fallback=PistolHandgun() && pistol[sound] ? pistol[sound] : rifle[sound];
+        LPCSTR fallback=PistolHandgun() && sound<=SoundBeltIn && pistol[sound] ? pistol[sound] : rifle[sound];
         LPCSTR name=pSettings->line_exist(section,key) ? pSettings->r_string(section,key) : fallback;
         // Stock sounds, if the VR clips (gamedata/sounds/vr) are not installed.
         static LPCSTR const stock[SoundCount]={"weapons\\gen_grenload","weapons\\generic_close",
             "weapons\\winchester1300\\w1300_open","weapons\\generic_close",
             "weapons\\winchester1300\\w1300_open","weapons\\winchester1300\\w1300_close",
             "weapons\\winchester1300\\w1300_open","weapons\\generic_close","weapons\\gen_grenload",
-            "weapons\\winchester1300\\w1300_open","weapons\\generic_close","weapons\\generic_close"};
+            "weapons\\winchester1300\\w1300_open","weapons\\generic_close","weapons\\generic_close",
+            "weapons\\generic_close"};
         string_path path;
         if (!name || !*name || !FS.exist(path,"$game_sounds$",name,".ogg"))
         {
@@ -638,16 +868,6 @@ void CVrWeaponInteraction::PlayHandling(int sound, const Fvector& position)
     if (m_handling[sound]._handle()) m_handling[sound].play_at_pos(m_weapon.H_Parent(),position);
 }
 
-struct CVrWeaponInteraction::SampledHands
-{
-    AuthoredHandRef authored[2];
-    xr_vector<Fmatrix> hands_local, maghand_local;
-    Fmatrix hand_in_item[2], maghand_in_root;
-    Fvector maghand_basis[3]{}, maghand_palm{}, handle_hand{}, aim_eye{}, aim_dir{0.f,0.f,1.f};
-    bool handle_hand_valid=false, palm_trusted=true, aim_valid=false;
-    shared_str visual;
-};
-
 xr_map<xr_string,std::shared_ptr<const CVrWeaponInteraction::SampledHands>>& CVrWeaponInteraction::SampledHandsCache()
 {
     static xr_map<xr_string,std::shared_ptr<const SampledHands>> cache;
@@ -658,7 +878,7 @@ void CVrWeaponInteraction::RefreshAuthoredHands()
 {
     // Measured first (MeasureGeometry): the hands are checked against the
     // weapon's mesh and grip.
-    if (!g_player_hud || !m_visual || m_cloud.empty()) return;
+    if (!g_player_hud || !m_visual || m_model_data.cloud.empty()) return;
     bool sampled=false;
     if (!m_authored_sampled || m_authored_hands!=g_player_hud->section_name())
     {
@@ -671,45 +891,34 @@ void CVrWeaponInteraction::RefreshAuthoredHands()
         const auto found=key.size() ? SampledHandsCache().find(key) : SampledHandsCache().end();
         if (found!=SampledHandsCache().end())
         {
-            const SampledHands& hands=*found->second;
             m_authored_sampled=true;
             m_authored_hands=g_player_hud->section_name();
-            m_authored[0]=hands.authored[0]; m_authored[1]=hands.authored[1];
-            m_hands_local=hands.hands_local; m_maghand_local=hands.maghand_local;
-            m_hand_in_item[0]=hands.hand_in_item[0]; m_hand_in_item[1]=hands.hand_in_item[1];
-            m_maghand_in_root=hands.maghand_in_root;
-            for (int i=0;i<3;++i) m_maghand_basis[i]=hands.maghand_basis[i];
-            m_maghand_palm=hands.maghand_palm;
-            m_handle_hand=hands.handle_hand; m_handle_hand_valid=hands.handle_hand_valid;
-            m_palm_trusted=hands.palm_trusted;
-            m_hands_visual_name=hands.visual;
-            m_aim_eye=hands.aim_eye; m_aim_dir=hands.aim_dir; m_aim_valid=hands.aim_valid;
-            Msg("* [VR weapon] %s: first-person hands %s as an earlier copy's",m_profile.section.c_str(),
+            m_hands=*found->second;
+            Note("first-person hands %s as an earlier copy's",
                 m_authored_hands.c_str());
+        }
+        else if (key.size() && LoadHandsFromDisk())
+        {
+            m_authored_sampled=true;
+            m_authored_hands=g_player_hud->section_name();
+            Note("first-person hands %s from the disk cache in %.1f ms",
+                m_authored_hands.c_str(),timer.GetElapsed_sec()*1000.f);
+            SampledHandsCache()[key]=std::make_shared<SampledHands>(m_hands);
         }
         else
         {
             SampleAuthoredHands();
-            Msg("* [VR weapon] %s: first-person hands %s sampled in %.1f ms",m_profile.section.c_str(),
+            if (key.size()) SaveHandsToDisk();
+            Note("first-person hands %s sampled in %.1f ms",
                 m_authored_hands.c_str(),timer.GetElapsed_sec()*1000.f);
+            VrNoteWork("sampling the first-person hands",m_weapon.cNameSect().c_str(),timer.GetElapsed_sec()*1000.f);
             if (key.size())
-            {
-                auto hands=std::make_shared<SampledHands>();
-                hands->authored[0]=m_authored[0]; hands->authored[1]=m_authored[1];
-                hands->hands_local=m_hands_local; hands->maghand_local=m_maghand_local;
-                hands->hand_in_item[0]=m_hand_in_item[0]; hands->hand_in_item[1]=m_hand_in_item[1];
-                hands->maghand_in_root=m_maghand_in_root;
-                for (int i=0;i<3;++i) hands->maghand_basis[i]=m_maghand_basis[i];
-                hands->maghand_palm=m_maghand_palm;
-                hands->handle_hand=m_handle_hand; hands->handle_hand_valid=m_handle_hand_valid;
-                hands->palm_trusted=m_palm_trusted;
-                hands->visual=m_hands_visual_name;
-                hands->aim_eye=m_aim_eye; hands->aim_dir=m_aim_dir; hands->aim_valid=m_aim_valid;
-                SampledHandsCache()[key]=hands;
-            }
+                SampledHandsCache()[key]=std::make_shared<SampledHands>(m_hands);
         }
         sampled=true;
     }
+    // A capture of the game's own hold, from an earlier session or build.
+    if (sampled && !m_hands.live) ApplyLiveHands();
     // The sight does not depend on the hands, only on the scope fitted (and
     // the hands' aiming line as its last fallback).
     const bool scope_now=m_weapon.IsScopeAttached();
@@ -719,6 +928,76 @@ void CVrWeaponInteraction::RefreshAuthoredHands()
         m_sight_scope=scope_now;
         MeasureSight();
     }
+}
+
+bool CVrWeaponInteraction::ExtractAuthoredHand(int side, IKinematics& model, const Fmatrix& to_drawn, Fvector* index_tip)
+{
+    const char s=side ? 'r' : 'l';
+    // Thumb, index and middle finger joints of the first-person hands.
+    string64 names[3][3];
+    for (int joint=0;joint<3;++joint)
+    {
+        const char* suffix[3]={"","1","2"};
+        xr_sprintf(names[0][joint],"%c_finger0%s",s,suffix[joint]);
+        xr_sprintf(names[1][joint],"bip01_%c_finger1%s",s,suffix[joint]);
+        xr_sprintf(names[2][joint],"bip01_%c_finger2%s",s,suffix[joint]);
+    }
+    xr_vector<Fmatrix> bind;
+    model.LL_GetBindTransform(bind);
+    u16 ids[3][3];
+    bool found=true;
+    for (int f=0;f<3;++f)
+        for (int j=0;j<3;++j)
+            found=(ids[f][j]=model.LL_BoneID(names[f][j]))!=BI_NONE && found;
+    string16 hand_name; xr_sprintf(hand_name,"%c_hand",s);
+    const u16 hand=model.LL_BoneID(hand_name);
+    if (!found || hand==BI_NONE || ids[0][0]>=bind.size()) return false;
+    const auto at=[&](u16 id) { Fvector p; to_drawn.transform_tiny(p,model.LL_GetTransform(id).c); return p; };
+    AuthoredHandRef& ref=m_hands.authored[side];
+    const Fvector wrist=at(hand), index=at(ids[1][0]), middle=at(ids[2][0]);
+    ref.knuckles.add(index,middle).mul(0.5f);
+    Fvector knuckles; knuckles.sub(ref.knuckles,wrist);
+    Fvector index_side; index_side.sub(index,middle);
+    knuckles.normalize_safe();
+    index_side.mad(knuckles,-index_side.dotproduct(knuckles)).normalize_safe();
+    ref.basis[0]=knuckles; ref.basis[1]=index_side;
+    ref.basis[2].crossproduct(knuckles,index_side);
+    // The handle centre in the fist: behind the knuckles toward the wrist and
+    // in from the palm (basis[2] is the palm normal of a right hand, the back
+    // of a left one).
+    ref.palm=ref.knuckles;
+    ref.palm.mad(knuckles,-0.045f).mad(ref.basis[2],side ? 0.025f : -0.025f);
+    for (int f=0;f<3;++f)
+        for (int j=0;j<3;++j)
+        {
+            Fvector& dir=ref.finger[f][j];
+            if (j<2) dir.sub(at(ids[f][j+1]),at(ids[f][j]));
+            else
+            {
+                // The last segment has no child joint: it continues the
+                // bone's own bind direction from its parent.
+                Fmatrix bind_rotation=bind[ids[f][2]]; bind_rotation.c.set(0,0,0);
+                Fmatrix bind_inverse; bind_inverse.invert(bind_rotation);
+                Fvector local, along;
+                along.sub(bind[ids[f][2]].c,bind[ids[f][1]].c);
+                bind_inverse.transform_dir(local,along);
+                Fmatrix posed=model.LL_GetTransform(ids[f][2]);
+                posed.transform_dir(along,local);
+                to_drawn.transform_dir(dir,along);
+            }
+            dir.normalize_safe();
+        }
+    // A hand the animation keeps off the weapon (a one-handed idle) gives no
+    // reference for it.
+    ref.valid=CloudDistanceSq(ref.knuckles)<0.12f*0.12f;
+    // The weapon hand's index fingertip: a little past its last joint, along
+    // it, where the pad meets the trigger.
+    if (index_tip)
+    {
+        *index_tip=at(ids[1][2]);
+        index_tip->mad(ref.finger[1][2],0.012f);
+    }
+    return true;
 }
 
 void CVrWeaponInteraction::SampleAuthoredHands()
@@ -733,9 +1012,9 @@ void CVrWeaponInteraction::SampleAuthoredHands()
     const shared_str& hands=g_player_hud->section_name();
     m_authored_sampled=true;
     m_authored_hands=hands;
-    m_authored[0].valid=m_authored[1].valid=false;
-    m_aim_valid=false;
-    m_palm_trusted=true;
+    // Everything from scratch, the live capture's flag too: kept from another
+    // outfit's hands, it stopped this one being captured.
+    m_hands=SampledHands{};
     const shared_str& section=m_weapon.HudSection();
     if (!hands.size() || !section.size() || !pSettings->section_exist(section) ||
         !pSettings->line_exist(hands,"visual") || !pSettings->line_exist(section,"item_position") ||
@@ -754,10 +1033,25 @@ void CVrWeaponInteraction::SampleAuthoredHands()
     auto* animated=visual ? visual->dcast_PKinematicsAnimated() : nullptr;
     auto* model=visual ? visual->dcast_PKinematics() : nullptr;
     const u16 anchor=model ? model->LL_BoneID(anchors[anchor_index]) : BI_NONE;
+    // The weapon's own copy, made once for the idle and both reload sweeps
+    // below (each plays its motion on it from the start).
+    IRenderVisual* item_copy=nullptr;
+    const auto weapon_copy=[&]() -> IRenderVisual*
+    {
+        if (!item_copy) item_copy=::Render->model_Create(m_profile.visual.c_str());
+        return item_copy;
+    };
+    // A reload swept to its end, not for a fixed 8 s: most are 2-4 s.
+    const auto sweep_frames=[](float length) { return length>0.f ? std::min(480,int(length*60.f)+2) : 480; };
     Fmatrix to_item, offset; to_item.identity(); offset.identity();
+    Fvector right_index_tip{};
+    bool right_index=false;
+    // From the weapon as its idle animates it onto the weapon as drawn: its
+    // receiver as sampled with the hands (below), as the live capture maps it.
+    Fmatrix hands_to_drawn; hands_to_drawn.identity();
     if (animated && model && anchor!=BI_NONE)
     {
-        PlayOnAllParts(*animated,idle->m_animations[0].mid);
+        PlayHandsMotion(*animated,idle->m_animations[0].mid);
         EvaluateBones(*animated,*model,0.f);
         xr_vector<Fmatrix> bind;
         model->LL_GetBindTransform(bind);
@@ -767,115 +1061,55 @@ void CVrWeaponInteraction::SampleAuthoredHands()
         offset.translate_over(pSettings->r_fvector3(section,"item_position"));
         Fmatrix item; item.mul_43(model->LL_GetTransform(anchor),offset);
         to_item.invert(item);
-        // A model built off its origin (the Mosin, 15 cm aside and 29 ahead)
-        // is held as a whole away from where it is drawn: the first pass
-        // finds the hand, and the hold moves onto the measured grip.
-        for (int pass=0;pass<2;++pass)
+        // The weapon as the game animates it under these hands, on the same
+        // frame (player_hud plays both: the hud line's item motion, else the
+        // hands' name, else "idle"). The hand rides its receiver (the
+        // trigger's parent chain), which VR draws at its bind place, so its
+        // place there is exact whatever the idle does to the rest of the
+        // model. Sampled apart (AutoProfile's idle, its nearest-mesh carrier
+        // bone), the hands missed the gun on 463 GAMMA models (a Vector's
+        // index finger 24 cm from its trigger).
+        Fmatrix receiver_frame; receiver_frame.identity();
+        bool receiver_valid=false;
         {
-        bool right_found=false;
-        for (int side=0;side<2;++side)
-        {
-            const char s=side ? 'r' : 'l';
-            // Thumb, index and middle finger joints of the first-person hands.
-            string64 names[3][3];
-            for (int joint=0;joint<3;++joint)
+            IRenderVisual* item_visual=weapon_copy();
+            auto* item_animated=item_visual ? item_visual->dcast_PKinematicsAnimated() : nullptr;
+            auto* item_model=item_visual ? item_visual->dcast_PKinematics() : nullptr;
+            if (item_animated && item_model)
             {
-                const char* suffix[3]={"","1","2"};
-                xr_sprintf(names[0][joint],"%c_finger0%s",s,suffix[joint]);
-                xr_sprintf(names[1][joint],"bip01_%c_finger1%s",s,suffix[joint]);
-                xr_sprintf(names[2][joint],"bip01_%c_finger2%s",s,suffix[joint]);
-            }
-            u16 ids[3][3];
-            bool found=true;
-            for (int f=0;f<3;++f)
-                for (int j=0;j<3;++j)
-                    found=(ids[f][j]=model->LL_BoneID(names[f][j]))!=BI_NONE && found;
-            string16 hand_name; xr_sprintf(hand_name,"%c_hand",s);
-            const u16 hand=model->LL_BoneID(hand_name);
-            if (!found || hand==BI_NONE || ids[0][0]>=bind.size()) continue;
-            const auto at=[&](u16 id) { Fvector p; to_item.transform_tiny(p,model->LL_GetTransform(id).c); return p; };
-            AuthoredHandRef& ref=m_authored[side];
-            const Fvector wrist=at(hand), index=at(ids[1][0]), middle=at(ids[2][0]);
-            ref.knuckles.add(index,middle).mul(0.5f);
-            Fvector knuckles; knuckles.sub(ref.knuckles,wrist);
-            Fvector index_side; index_side.sub(index,middle);
-            knuckles.normalize_safe();
-            index_side.mad(knuckles,-index_side.dotproduct(knuckles)).normalize_safe();
-            ref.basis[0]=knuckles; ref.basis[1]=index_side;
-            ref.basis[2].crossproduct(knuckles,index_side);
-            // The handle centre in the fist: behind the knuckles toward the
-            // wrist and in from the palm (basis[2] is the palm normal of a
-            // right hand, the back of a left one).
-            ref.palm=ref.knuckles;
-            ref.palm.mad(knuckles,-0.045f).mad(ref.basis[2],side ? 0.025f : -0.025f);
-            for (int f=0;f<3;++f)
-                for (int j=0;j<3;++j)
+                const shared_str item_name=idle->m_base_name!=idle->m_additional_name ? idle->m_additional_name :
+                    idle->m_animations[0].name;
+                MotionID item_motion=item_animated->ID_Cycle_Safe(item_name);
+                if (!item_motion.valid()) item_motion=item_animated->ID_Cycle_Safe("idle");
+                xr_vector<Fmatrix> item_bind;
+                item_model->LL_GetBindTransform(item_bind);
+                const u16 receiver=ReceiverBone(*item_model);
+                if (item_motion.valid() && receiver<item_bind.size())
                 {
-                    Fvector& dir=ref.finger[f][j];
-                    if (j<2) dir.sub(at(ids[f][j+1]),at(ids[f][j]));
-                    else
-                    {
-                        // The last segment has no child joint: it continues
-                        // the bone's own bind direction from its parent.
-                        Fmatrix bind_rotation=bind[ids[f][2]]; bind_rotation.c.set(0,0,0);
-                        Fmatrix bind_inverse; bind_inverse.invert(bind_rotation);
-                        Fvector local, along;
-                        along.sub(bind[ids[f][2]].c,bind[ids[f][1]].c);
-                        bind_inverse.transform_dir(local,along);
-                        Fmatrix posed=model->LL_GetTransform(ids[f][2]);
-                        posed.transform_dir(along,local);
-                        to_item.transform_dir(dir,along);
-                    }
-                    dir.normalize_safe();
+                    PlayOnAllParts(*item_animated,item_motion);
+                    EvaluateBones(*item_animated,*item_model,0.f);
+                    receiver_frame.mul_43(item_bind[receiver],Fmatrix().invert(item_model->LL_GetTransform(receiver)));
+                    receiver_valid=true;
                 }
-            // A hand the animation keeps off the weapon (a one-handed idle)
-            // gives no reference for it.
-            float nearest=flt_max;
-            for (const Fvector& point:m_cloud) nearest=std::min(nearest,point.distance_to_sqr(ref.knuckles));
-            ref.valid=nearest<0.12f*0.12f;
-            right_found=right_found || side==1;
-        }
-        if (pass || !right_found) break;
-        Fvector measured=m_profile.has_hand_grip_center ? m_profile.hand_grip_center : m_profile.grip_offset;
-        Fvector shift; shift.sub(measured,m_authored[1].palm);
-        if (shift.magnitude()<0.12f || shift.magnitude()>0.6f) break;
-        // The measured grip is the mean of the mesh under the trigger: on a
-        // stock's wrist (the Mosin's) that is its underside, and the hands
-        // sat 4-5 cm below it. The hold goes to the middle of the wrist.
-        {
-            // The wrist's whole height at the grip: its lowest point up to
-            // 1.5 cm under the bore line (the receiver sits above).
-            const float top=m_profile.muzzle.square_magnitude()>EPS_S ? m_profile.muzzle.y-0.015f : measured.y+0.06f;
-            float low=flt_max, high=-flt_max;
-            for (const Fvector& p:m_cloud)
-                if (_abs(p.z-measured.z)<0.012f && _abs(p.x-measured.x)<0.02f && p.y<top && p.y>top-0.15f)
-                { low=std::min(low,p.y); high=std::max(high,p.y); }
-            const float centre=0.5f*(low+high);
-            if (low<high && high-low>=0.015f && _abs(centre-measured.y)<0.06f)
-            {
-                Msg("* [VR weapon] %s: grip height %.3f moved to the middle of the weapon there, %.3f",
-                    m_profile.section.c_str(),measured.y,centre);
-                measured.y=centre;
-                shift.sub(measured,m_authored[1].palm);
             }
         }
-        // Diagnostic (L85A2: both hands 25-40 cm off after this move): is the
-        // animated hand already round the weapon's mesh before it, and is the
-        // measured grip under the bore?
-        float on_mesh=flt_max;
-        for (const Fvector& point:m_cloud) on_mesh=std::min(on_mesh,point.distance_to_sqr(m_authored[1].palm));
-        to_item.c.add(shift);
-        Msg("* [VR weapon] %s: animated hold moved (%.3f %.3f %.3f) onto the grip; before, its palm was %.0f mm "
-            "from the mesh; grip %.0f mm under the fire point, trigger at (%.3f %.3f %.3f)",
-            m_profile.section.c_str(),shift.x,shift.y,shift.z,_sqrt(on_mesh)*1000.f,
-            (m_profile.muzzle.y-measured.y)*1000.f,m_profile.trigger_point.x,m_profile.trigger_point.y,
-            m_profile.trigger_point.z);
-        }
+        // Riding the receiver, as the live capture maps the game's own hands;
+        // without it (no motion for the weapon), as sampled.
+        if (receiver_valid) hands_to_drawn=receiver_frame;
+        m_hands.carry=receiver_valid ? 3 : 0;
+        to_item.mulA_43(hands_to_drawn);
+        // The hold is never moved as a whole onto the measured grip: on 384
+        // GAMMA models that moved it 15-59 cm, sideways too (the weapon
+        // floating off the hand). A hand that does not hold the weapon is
+        // left untrusted below, and the measured grip and the arm IK hold it.
+        for (int side=0;side<2;++side)
+            if (ExtractAuthoredHand(side,*model,to_item,side ? &right_index_tip : nullptr) && side)
+                right_index=true;
     }
     // Keep every bone's local pose and each hand's place on the weapon: the
     // arms model uses the same skeleton (see player_legs_controller).
-    m_hands_local.clear(); m_maghand_local.clear();
-    m_hands_visual_name=pSettings->r_string(hands,"visual");
+    m_hands.hands_local.clear(); m_hands.maghand_local.clear();
+    m_hands.visual=pSettings->r_string(hands,"visual");
     const auto locals=[&](xr_vector<Fmatrix>& out)
     {
         const u16 count=model->LL_BoneCount();
@@ -891,13 +1125,13 @@ void CVrWeaponInteraction::SampleAuthoredHands()
             }
         }
     };
-    if (animated && model && anchor!=BI_NONE && (m_authored[0].valid || m_authored[1].valid))
+    if (animated && model && anchor!=BI_NONE && (m_hands.authored[0].valid || m_hands.authored[1].valid))
     {
-        locals(m_hands_local);
+        locals(m_hands.hands_local);
         for (int side=0;side<2;++side)
         {
             const u16 hand=model->LL_BoneID(side ? "r_hand" : "l_hand");
-            if (hand!=BI_NONE) m_hand_in_item[side].mul_43(to_item,model->LL_GetTransform(hand));
+            if (hand!=BI_NONE) m_hands.hand_in_item[side].mul_43(to_item,model->LL_GetTransform(hand));
         }
         // The sight line: where the flat-screen camera is when aiming down
         // the sights, in weapon space. player_hud places the weapon at
@@ -906,7 +1140,7 @@ void CVrWeaponInteraction::SampleAuthoredHands()
         player_hud_motion* aim=motions->find_motion("anm_idle_aim");
         if (aim && !aim->m_animations.empty())
         {
-            PlayOnAllParts(*animated,aim->m_animations[0].mid);
+            PlayHandsMotion(*animated,aim->m_animations[0].mid);
             EvaluateBones(*animated,*model,0.f);
         }
         if (attachable_hud_item* hud=m_weapon.HudItemData())
@@ -924,12 +1158,13 @@ void CVrWeaponInteraction::SampleAuthoredHands()
             Fmatrix in_hands; in_hands.mul_43(attach,item_aim);
             Fmatrix in_camera; in_camera.mul_43(aim_offset,in_hands);
             Fmatrix camera; camera.invert(in_camera);
+            camera.mulA_43(hands_to_drawn);
             Fvector direction=camera.k; direction.normalize_safe();
             if (direction.z>0.9f)
             {
-                m_aim_eye=camera.c;
-                m_aim_dir=direction;
-                m_aim_valid=true;
+                m_hands.aim_eye=camera.c;
+                m_hands.aim_dir=direction;
+                m_hands.aim_valid=true;
             }
         }
         // The magazine hold: play the reload on the hands and the weapon
@@ -941,7 +1176,7 @@ void CVrWeaponInteraction::SampleAuthoredHands()
         if (m_profile.detachable && m_profile.mag_bone.size() && reload && !reload->m_animations.empty() &&
             left!=BI_NONE)
         {
-            IRenderVisual* item_visual=::Render->model_Create(m_profile.visual.c_str());
+            IRenderVisual* item_visual=weapon_copy();
             auto* item_animated=item_visual ? item_visual->dcast_PKinematicsAnimated() : nullptr;
             auto* item_model=item_visual ? item_visual->dcast_PKinematics() : nullptr;
             const u16 mag=item_model ? item_model->LL_BoneID(m_profile.mag_bone.c_str()) : BI_NONE;
@@ -972,8 +1207,10 @@ void CVrWeaponInteraction::SampleAuthoredHands()
                         if (_abs(size.y-own_size.y)<=0.5f*own_size.y) carried.push_back(id);
                     }
                 }
-                PlayOnAllParts(*animated,reload->m_animations[0].mid);
+                float reload_length=0.f;
+                PlayHandsMotion(*animated,reload->m_animations[0].mid,&reload_length);
                 PlayOnAllParts(*item_animated,item_motion);
+                const int reload_frames=sweep_frames(reload_length);
                 float best=flt_max;
                 // Hands that name their fingers otherwise have no hold frame.
                 const u16 index_bone=model->LL_BoneID("bip01_l_finger1"), middle_bone=model->LL_BoneID("bip01_l_finger2");
@@ -984,14 +1221,14 @@ void CVrWeaponInteraction::SampleAuthoredHands()
                 // it (an RPK's, a VSK-94's): held so, it floated off the fingers.
                 xr_vector<Fvector> last_palm(carried.size()), last_root(carried.size());
                 xr_vector<u8> have_last(carried.size(),0);
-                for (int frame=0;frame<480 && index_bone!=BI_NONE && middle_bone!=BI_NONE;++frame)
+                for (int frame=0;frame<reload_frames && index_bone!=BI_NONE && middle_bone!=BI_NONE;++frame)
                 {
                     const float dt=frame ? 1.f/60.f : 0.f;
                     EvaluateBones(*animated,*model,dt);
                     EvaluateBones(*item_animated,*item_model,dt);
                     Fmatrix item_now; item_now.mul_43(model->LL_GetTransform(anchor),offset);
                     const Fmatrix& hand_now=model->LL_GetTransform(left);
-                    // The palm, as m_maghand_palm below, in the hands' space.
+                    // The palm, as m_hands.maghand_palm below, in the hands' space.
                     Fvector palm;
                     {
                         const Fvector& index=model->LL_GetTransform(index_bone).c;
@@ -1030,8 +1267,8 @@ void CVrWeaponInteraction::SampleAuthoredHands()
                     if (error>=best) continue;
                     best=error;
                     Fmatrix to_root; to_root.invert(root);
-                    m_maghand_in_root.mul_43(to_root,hand_now);
-                    locals(m_maghand_local);
+                    m_hands.maghand_in_root.mul_43(to_root,hand_now);
+                    locals(m_hands.maghand_local);
                     // The hand's anatomical frame and palm, in hand-bone space.
                     Fmatrix to_hand; to_hand.invert(hand_now);
                     Fvector index, middle;
@@ -1041,31 +1278,30 @@ void CVrWeaponInteraction::SampleAuthoredHands()
                     Fvector forward=knuckles; forward.normalize_safe();
                     Fvector side; side.sub(index,middle);
                     side.mad(forward,-side.dotproduct(forward)).normalize_safe();
-                    m_maghand_basis[0]=forward; m_maghand_basis[1]=side;
-                    m_maghand_basis[2].crossproduct(forward,side);
-                    m_maghand_palm=knuckles;
-                    m_maghand_palm.mad(forward,-0.045f).mad(m_maghand_basis[2],-0.025f);
+                    m_hands.maghand_basis[0]=forward; m_hands.maghand_basis[1]=side;
+                    m_hands.maghand_basis[2].crossproduct(forward,side);
+                    m_hands.maghand_palm=knuckles;
+                    m_hands.maghand_palm.mad(forward,-0.045f).mad(m_hands.maghand_basis[2],-0.025f);
                 }
-                if (best==flt_max) m_maghand_local.clear();
+                if (best==flt_max) m_hands.maghand_local.clear();
             }
-            if (item_visual) ::Render->model_Delete(item_visual);
         }
     }
     // Where the reload's left hand is when it has the cycling part (or a
     // separate charging handle) furthest back: it is on the handle there.
-    m_handle_hand_valid=false;
+    m_hands.handle_hand_valid=false;
     const shared_str& worked=m_profile.handle_bone.size() ? m_profile.handle_bone : m_profile.cycle_bone;
-    if (animated && model && anchor!=BI_NONE && motions && worked.size() && model->LL_BoneID("l_hand")!=BI_NONE)
+    // Not for a handgun: its slide is taken by its rear serrations.
+    if (!Handgun() && animated && model && anchor!=BI_NONE && motions && worked.size() &&
+        model->LL_BoneID("l_hand")!=BI_NONE)
     {
         player_hud_motion* empty=motions->find_motion("anm_reload_empty");
         if (!empty || empty->m_animations.empty()) empty=motions->find_motion("anm_reload");
-        IRenderVisual* item_visual=empty && !empty->m_animations.empty() ? ::Render->model_Create(m_profile.visual.c_str()) : nullptr;
+        IRenderVisual* item_visual=empty && !empty->m_animations.empty() ? weapon_copy() : nullptr;
         auto* item_animated=item_visual ? item_visual->dcast_PKinematicsAnimated() : nullptr;
         auto* item_model=item_visual ? item_visual->dcast_PKinematics() : nullptr;
         const u16 part=item_model ? item_model->LL_BoneID(worked.c_str()) : BI_NONE;
-        const u16 trigger=item_model ? FindTrigger(*item_model) : BI_NONE;
-        const u16 receiver=trigger!=BI_NONE && item_model->LL_GetData(trigger).GetParentID()<item_model->LL_BoneCount() ?
-            item_model->LL_GetData(trigger).GetParentID() : u16(0);
+        const u16 receiver=item_model ? ReceiverBone(*item_model) : u16(0);
         const shared_str item_name=empty && empty->m_base_name!=empty->m_additional_name ?
             empty->m_additional_name : (empty ? empty->m_animations[0].name : shared_str());
         const MotionID item_motion=item_animated ? item_animated->ID_Cycle_Safe(item_name) : MotionID();
@@ -1075,10 +1311,11 @@ void CVrWeaponInteraction::SampleAuthoredHands()
             item_model->LL_GetBindTransform(item_bind);
             const u16 left=model->LL_BoneID("l_hand");
             const u16 index=model->LL_BoneID("bip01_l_finger1"), middle=model->LL_BoneID("bip01_l_finger2");
-            PlayOnAllParts(*animated,empty->m_animations[0].mid);
+            float empty_length=0.f;
+            PlayHandsMotion(*animated,empty->m_animations[0].mid,&empty_length);
             PlayOnAllParts(*item_animated,item_motion);
             float furthest=0.02f;
-            for (int frame=0;frame<480;++frame)
+            for (int frame=0,frames=sweep_frames(empty_length);frame<frames;++frame)
             {
                 const float dt=frame ? 1.f/60.f : 0.f;
                 EvaluateBones(*animated,*model,dt);
@@ -1098,48 +1335,258 @@ void CVrWeaponInteraction::SampleAuthoredHands()
                 Fvector in_item; to_item.transform_tiny(in_item,palm);
                 // Into the receiver's rest frame (the reload may tilt it).
                 Fmatrix rel; rel.invert(item_model->LL_GetTransform(receiver)); rel.mulA_43(item_bind[receiver]);
-                rel.transform_tiny(m_handle_hand,in_item);
+                rel.transform_tiny(m_hands.handle_hand,in_item);
                 // Back where the handle rests: the hand is followed back by
                 // the slide as it is pulled.
-                m_handle_hand.z+=back;
-                m_handle_hand_valid=true;
+                m_hands.handle_hand.z+=back;
+                m_hands.handle_hand_valid=true;
             }
         }
-        if (item_visual) ::Render->model_Delete(item_visual);
-        if (m_handle_hand_valid)
+        // Only a place on the part itself: within 3.5 cm of its mesh (a
+        // pistol, never sampled, is taken by its rear serrations: the CZ 52's
+        // and CZ 75's reload hands were 3 cm aside and 5 cm under the slide).
+        float off_part=flt_max;
+        Fvector on_part=m_hands.handle_hand;
+        if (m_hands.handle_hand_valid && item_model && part!=BI_NONE)
+        {
+            xr_vector<Fvector> points;
+            PointCollector collector(points);
+            EnumSubtreeVertices(*item_model,part,collector);
+            for (const Fvector& p:points)
+                if (const float d=p.distance_to(m_hands.handle_hand); d<off_part) { off_part=d; on_part=p; }
+        }
+        // A hand beside the handle (a FAMAS's, on top under the carry handle,
+        // the palm 7 cm aside of it) takes it at the part's nearest point:
+        // dropped, the bullpup's long bolt was taken at its rear, behind the
+        // trigger.
+        if (m_hands.handle_hand_valid && off_part>0.035f && off_part<=0.08f)
+        {
+            Msg("* [VR weapon] %s: the reload's hand at (%.3f %.3f %.3f) is %.0f mm beside the %s; taken at its nearest point",
+                m_weapon.cNameSect().c_str(),m_hands.handle_hand.x,m_hands.handle_hand.y,m_hands.handle_hand.z,
+                off_part*1000.f,worked.c_str());
+            m_hands.handle_hand=on_part;
+            off_part=0.f;
+        }
+        if (m_hands.handle_hand_valid && off_part>0.035f)
+        {
+            Msg("* [VR weapon] %s: the reload's hand at (%.3f %.3f %.3f) is off the part; the %s is taken at its mesh's point",
+                m_weapon.cNameSect().c_str(),m_hands.handle_hand.x,m_hands.handle_hand.y,m_hands.handle_hand.z,worked.c_str());
+            m_hands.handle_hand_valid=false;
+        }
+        if (m_hands.handle_hand_valid)
             Msg("* [VR weapon] %s: the reload's hand takes the %s at (%.3f %.3f %.3f); the mesh's point is (%.3f %.3f %.3f)",
-                m_weapon.cNameSect().c_str(),worked.c_str(),m_handle_hand.x,m_handle_hand.y,m_handle_hand.z,
+                m_weapon.cNameSect().c_str(),worked.c_str(),m_hands.handle_hand.x,m_hands.handle_hand.y,m_hands.handle_hand.z,
                 m_profile.cycle_grab.x,m_profile.cycle_grab.y,m_profile.cycle_grab.z);
     }
+    if (item_copy) ::Render->model_Delete(item_copy);
     if (visual) ::Render->model_Delete(visual);
+    JudgeAuthoredHand(right_index,right_index_tip);
+    Msg("* [VR weapon] %s: magazine hold from the reload animation: %s",m_weapon.cNameSect().c_str(),
+        m_hands.maghand_local.empty() ? "no" : "yes");
+    Msg("* [VR weapon] %s: first-person grip %s%s", m_weapon.cNameSect().c_str(),
+        m_hands.authored[1].valid ? "right" : "-", m_hands.authored[0].valid ? " left" : "");
+}
+
+void CVrWeaponInteraction::JudgeAuthoredHand(bool right_index, const Fvector& right_index_tip)
+{
     // The animated weapon hand against the measured grip, or the estimate
     // from the trigger: far apart, the measured grip holds the weapon and the
     // arms are posed by IK (GripLocal, AuthoredBones, AuthoredHand).
-    if (m_authored[1].valid)
+    m_hands.index_trigger=-1.f;
+    m_hands.hand_trigger.reset();
+    if (m_hands.authored[1].valid)
     {
-        const Fvector& measured=m_profile.has_hand_grip_center ? m_profile.hand_grip_center : m_profile.grip_offset;
-        m_palm_trusted=m_authored[1].palm.distance_to(measured)<=0.08f;
+        const Fvector measured=m_profile.hand_grip_center.value_or(m_profile.grip_offset);
+        m_hands.palm_trusted=m_hands.authored[1].palm.distance_to(measured)<=0.08f;
         // An animated palm inside the weapon's solid (round a stock's wrist)
         // holds it, however far the measured grip (the mean of the mesh under
         // the trigger, a stock-wrist gun's underside) is: the BM-16's,
         // Remington 700's and M79's hands were 5-10 cm under their stocks.
-        float centre=0.f; bool inside=false;
-        if (!m_palm_trusted && m_authored[1].palm.distance_to(measured)<=0.15f &&
-            SectionCentre(m_authored[1].palm,centre,inside) && inside)
+        if (!m_hands.palm_trusted && m_hands.authored[1].palm.distance_to(measured)<=0.15f && OnWeapon(m_hands.authored[1].palm))
         {
-            m_palm_trusted=true;
-            Msg("* [VR weapon] %s: the animation's hand is round the weapon (middle %.3f): it holds it",
-                m_profile.section.c_str(),centre);
+            m_hands.palm_trusted=true;
+            Note("the animation's hand is round the weapon: it holds it");
         }
-        Msg("* [VR weapon] %s: hand from the animation (%.3f %.3f %.3f), grip measured (%.3f %.3f %.3f)%s",
-            m_profile.section.c_str(),m_authored[1].palm.x,m_authored[1].palm.y,m_authored[1].palm.z,
+        // Its index finger on the trigger: the hand holds the weapon as it is
+        // fired, however far the mesh's grip estimate is (a Bizon's, a
+        // Kiparis's, a FAL's measured grip was 10-27 cm off the hand).
+        if (right_index && m_profile.trigger_point)
+        {
+            m_hands.index_trigger=right_index_tip.distance_to(*m_profile.trigger_point);
+            if (!m_hands.palm_trusted && m_hands.index_trigger<=0.04f)
+            {
+                m_hands.palm_trusted=true;
+                Note("the animation's index finger is on the trigger (%.0f mm): its hand holds it, %.0f mm from the "
+                    "measured grip",m_hands.index_trigger*1000.f,m_hands.authored[1].palm.distance_to(measured)*1000.f);
+            }
+        }
+        // No trigger found on the model (a SIG 552's): a hand on the mesh
+        // holds it, and its index fingertip is where the trigger is.
+        else if (right_index && !m_profile.trigger_point &&
+            CloudDistanceSq(m_hands.authored[1].knuckles)<0.025f*0.025f)
+        {
+            m_hands.palm_trusted=true;
+            m_hands.hand_trigger=right_index_tip;
+            Note("no trigger found on the model: the animation's hand holds it, its index finger marks the trigger "
+                "(%.3f %.3f %.3f)",right_index_tip.x,right_index_tip.y,right_index_tip.z);
+        }
+        Note("hand from the animation (%.3f %.3f %.3f), grip measured (%.3f %.3f %.3f)%s",
+            m_hands.authored[1].palm.x,m_hands.authored[1].palm.y,m_hands.authored[1].palm.z,
             measured.x,measured.y,measured.z,
-            m_palm_trusted ? "" : "; too far apart, the measured grip is used");
+            m_hands.palm_trusted ? "" : "; too far apart, the measured grip is used");
     }
-    Msg("* [VR weapon] %s: magazine hold from the reload animation: %s",m_weapon.cNameSect().c_str(),
-        m_maghand_local.empty() ? "no" : "yes");
-    Msg("* [VR weapon] %s: first-person grip %s%s", m_weapon.cNameSect().c_str(),
-        m_authored[1].valid ? "right" : "-", m_authored[0].valid ? " left" : "");
+}
+
+void CVrWeaponInteraction::CaptureLiveHands()
+{
+    if (m_hands.live || !g_player_hud || !m_visual || m_model_data.cloud.empty() || !vr::AnimatedGrip()) return;
+    // The game's hands as the desktop shows them: the weapon alone in them
+    // (a detector in the other hand plays its motion on fewer partitions),
+    // idle, no scripted hand motion, the same hands model the hold is for.
+    attachable_hud_item* item=m_weapon.IsAttachedToHUD() ? m_weapon.HudItemData() : nullptr;
+    const bool steady=item && item->m_model && m_weapon.GetState()==CHUDState::eIdle &&
+        !g_player_hud->attached_item(1) && g_player_hud->script_anim_part==u8(-1) &&
+        g_player_hud->m_model && g_player_hud->m_model_2 && m_authored_sampled &&
+        m_authored_hands==g_player_hud->section_name();
+    if (!steady) { m_live_idle_since=0; m_live_still=0; return; }
+    if (!m_live_idle_since) { m_live_idle_since=Device.dwTimeGlobal; m_live_still=0; return; }
+    IKinematics& item_model=*item->m_model;
+    IKinematics* right=g_player_hud->m_model->dcast_PKinematics();
+    IKinematics* left=g_player_hud->m_model_2->dcast_PKinematics();
+    if (!right || !left) return;
+    // The receiver (the trigger's parent chain, drawn by VR at its bind
+    // place) as the game animates it now, onto that bind place. Found once:
+    // the game's copy is the same model file as VR's.
+    const u16 count=item_model.LL_BoneCount();
+    if (m_live_receiver>=count)
+    {
+        xr_vector<Fmatrix> item_bind;
+        item_model.LL_GetBindTransform(item_bind);
+        const u16 receiver=ReceiverBone(item_model);
+        if (receiver>=item_bind.size()) return;
+        m_live_receiver=receiver;
+        m_live_receiver_bind=item_bind[receiver];
+    }
+    const u16 receiver=m_live_receiver;
+    Fmatrix receiver_fix; receiver_fix.mul_43(m_live_receiver_bind,Fmatrix().invert(item_model.LL_GetTransform(receiver)));
+    // Hands model space -> world (player_hud's transforms) -> the weapon's
+    // own space -> as VR draws it.
+    Fmatrix to_weapon; to_weapon.invert(item->m_item_transform);
+    const auto to_drawn_from=[&](const Fmatrix& hands_world)
+    {
+        Fmatrix in_weapon; in_weapon.mul_43(to_weapon,hands_world);
+        Fmatrix drawn; drawn.mul_43(receiver_fix,in_weapon);
+        return drawn;
+    };
+    const Fmatrix to_right=to_drawn_from(g_player_hud->m_transform);
+    const Fmatrix to_left=to_drawn_from(g_player_hud->m_transform_2);
+    // Taken once the game's hand holds still on the weapon (the idle's blend
+    // in is over; during it the hand slides on the gun more than 1.5 mm a
+    // frame): two frames in a row within 1.5 mm and half a degree; at 0.4 s
+    // whatever it shows.
+    {
+        const u16 hand=right ? right->LL_BoneID("r_hand") : u16(BI_NONE);
+        if (hand==BI_NONE) return;
+        Fmatrix now; now.mul_43(to_right,right->LL_GetTransform(hand));
+        const bool still=now.c.distance_to(m_live_last.c)<=0.0015f && now.k.dotproduct(m_live_last.k)>=_cos(deg2rad(0.5f)) &&
+            now.j.dotproduct(m_live_last.j)>=_cos(deg2rad(0.5f));
+        m_live_last=now;
+        m_live_still=still ? m_live_still+1 : 0;
+        const u32 idle_ms=Device.dwTimeGlobal-m_live_idle_since;
+        if (m_live_still<2 && idle_ms<400) return;
+    }
+    const SampledHands sampled=m_hands;
+    Fvector tip{};
+    const bool has_right=ExtractAuthoredHand(1,*right,to_right,&tip);
+    const bool has_left=ExtractAuthoredHand(0,*left,to_left,nullptr);
+    if (!has_right)
+    {
+        m_hands=sampled;
+        m_hands.live=true;
+        return;
+    }
+    // A passing pose (sprinting, the weapon lowered, the support hand off a
+    // gun the idle holds in two hands) is not the hold: tried again later.
+    if (CloudDistanceSq(m_hands.authored[1].knuckles)>0.05f*0.05f ||
+        (sampled.authored[0].valid && !m_hands.authored[0].valid))
+    {
+        m_hands=sampled;
+        m_live_idle_since=Device.dwTimeGlobal;
+        m_live_still=0;
+        // A weapon whose idle never holds it so keeps the sampled hold.
+        if (++m_live_rejected>=20)
+        {
+            m_hands.live=true;
+            Warn("the game's own hands never held it steadily on the gun (20 tries); the sampled hold is kept");
+        }
+        return;
+    }
+    const u16 right_hand=right->LL_BoneID("r_hand"), left_hand=left->LL_BoneID("l_hand");
+    if (right_hand!=BI_NONE) m_hands.hand_in_item[1].mul_43(to_right,right->LL_GetTransform(right_hand));
+    if (has_left && left_hand!=BI_NONE) m_hands.hand_in_item[0].mul_43(to_left,left->LL_GetTransform(left_hand));
+    // Every bone's local pose, for the exact-bones arms: the right arm from
+    // the right arms model, the left arm (under l_clavicle) from the left.
+    {
+        const u16 bones=right->LL_BoneCount();
+        const u16 left_arm=right->LL_BoneID("l_clavicle");
+        const bool same_skeleton=left->LL_BoneCount()==bones;
+        const auto local=[](IKinematics& model, u16 id)
+        {
+            Fmatrix out=model.LL_GetTransform(id);
+            const u16 parent=model.LL_GetData(id).GetParentID();
+            if (parent<model.LL_BoneCount()) out.mulA_43(Fmatrix().invert(model.LL_GetTransform(parent)));
+            return out;
+        };
+        m_hands.hands_local.resize(bones);
+        for (u16 id=0;id<bones;++id)
+            m_hands.hands_local[id]=same_skeleton && left_arm!=BI_NONE && Descends(*right,id,left_arm) ?
+                local(*left,id) : local(*right,id);
+    }
+    // How far the sampled hold was from the game's own.
+    const float moved=sampled.hand_in_item[1].c.distance_to(m_hands.hand_in_item[1].c);
+    const float turned=rad2deg(acosf(clampr(sampled.authored[1].basis[0].dotproduct(m_hands.authored[1].basis[0]),-1.f,1.f)));
+    const float moved_left=has_left && sampled.authored[0].valid ?
+        sampled.hand_in_item[0].c.distance_to(m_hands.hand_in_item[0].c) : -1.f;
+    JudgeAuthoredHand(true,tip);
+    // Its index finger 3-12 cm off the trigger (GAMMA's Thompson M1A1: 62
+    // mm, the grip 6 cm low and 4 cm forward in the hand): the animation was
+    // made for another model. The hand is moved onto the trigger, if it is
+    // still on the weapon's mesh there.
+    // Only along the gun's centre plane (up and along the bore), and only
+    // 4.5 cm or more off: the finger wraps the trigger, its estimated tip
+    // beside and ahead of the trigger's middle (a UDP-9's 26 mm aside and
+    // 30 mm ahead on a right hold, moved aside onto the grip's side).
+    Fvector shift; shift.sub(m_profile.trigger_point ? *m_profile.trigger_point : tip,tip);
+    shift.x=0.f;
+    if (m_profile.trigger_point && shift.magnitude()>0.045f && m_hands.index_trigger<=0.12f)
+    {
+        Fvector knuckles=m_hands.authored[1].knuckles; knuckles.add(shift);
+        if (CloudDistanceSq(knuckles)<=0.03f*0.03f)
+        {
+            Note("the game's hand has its index finger %.0f mm from the trigger: moved onto it (%.3f %.3f %.3f)",
+                m_hands.index_trigger*1000.f,shift.x,shift.y,shift.z);
+            m_hands.hand_in_item[1].c.add(shift);
+            m_hands.authored[1].knuckles=knuckles;
+            m_hands.authored[1].palm.add(shift);
+            m_hands.index_trigger=0.f;
+        }
+    }
+    // The game holds the weapon so: the hand is on it by definition.
+    m_hands.palm_trusted=true;
+    m_hands.live=true;
+    Note("hold taken from the game's own hands after %u ms idle: the sampled weapon hand was %.0f mm and %.0f deg off "
+        "it, the support hand %.0f mm; index fingertip %.0f mm from the trigger",Device.dwTimeGlobal-m_live_idle_since,
+        moved*1000.f,turned,moved_left*1000.f,m_hands.index_trigger*1000.f);
+    // The support hand's slide along the fore-end is worked out again.
+    m_slide_along=-1.f;
+    m_support_hold.reset();
+    if (m_profile.derived)
+    {
+        const xr_string key=MeasuredKey().append("|").append(g_player_hud->section_name().c_str());
+        SampledHandsCache()[key]=std::make_shared<SampledHands>(m_hands);
+        SaveHandsToDisk();
+    }
+    SaveLiveHands();
 }
 
 namespace vrwi
@@ -1201,9 +1648,9 @@ void CVrWeaponInteraction::MeasureOptics(IKinematics& model)
     // and the scope parts' mesh (wpn_scope bones, left out of the grip
     // cloud). VR leaves the glass meshes out of the picture (they are
     // drawn for the flat-screen camera) and draws its own lens and dot.
-    m_glass.clear(); m_lens_meshes.clear(); m_glass_dot=m_glass_soft=false;
-    m_optic_cloud.clear();
-    CloudCollector collector(m_optic_cloud);
+    m_model_data.glass.clear(); m_model_data.lens_meshes.clear(); m_model_data.glass_dot=m_model_data.glass_soft=false;
+    m_model_data.optic_cloud.clear();
+    CloudCollector collector(m_model_data.optic_cloud);
     xr_vector<u16> fittings;
     for (u16 id=0;id<model.LL_BoneCount();++id)
     {
@@ -1225,26 +1672,26 @@ void CVrWeaponInteraction::MeasureOptics(IKinematics& model)
     }
     // A scope modelled on such a bone alone (its tube on wpn_scope_mount) is
     // all fitting: it is the scope then, and none of it is hidden.
-    const bool fitted=m_optic_cloud.empty() && fittings.size();
+    const bool fitted=m_model_data.optic_cloud.empty() && fittings.size();
     if (fitted)
         for (u16 id:fittings) model.EnumBoneVertices(collector,id);
     // Caps and covers on the scope, and 3DSS's lens-hide bone (its glass
     // over the eyepiece, hidden by native aiming).
-    for (shared_str& name:m_scope_hidden) name="";
+    for (shared_str& name:m_model_data.scope_hidden) name="";
     int hidden=0;
     for (u16 id=0;id<model.LL_BoneCount() && hidden<2 && !fitted;++id)
     {
         LPCSTR name=model.LL_BoneName_dbg(id);
         if (NameHas(name,"scope") && (NameWord(name,"cover") || NameWord(name,"cap")))
-            m_scope_hidden[hidden++]=name;
+            m_model_data.scope_hidden[hidden++]=name;
     }
     const shared_str& own=m_weapon.cNameSect();
     if (pSettings->line_exist(own,"lewd_lens_hide_bone"))
     {
         LPCSTR bone=pSettings->r_string(own,"lewd_lens_hide_bone");
-        if (bone && *bone && model.LL_BoneID(bone)!=BI_NONE) m_scope_hidden[2]=bone;
+        if (bone && *bone && model.LL_BoneID(bone)!=BI_NONE) m_model_data.scope_hidden[2]=bone;
     }
-    m_mesh_shaders="";
+    m_model_data.mesh_shaders="";
     IRenderVisual* visual=model.dcast_RenderVisual();
     xr_vector<IRenderVisual*>* children=visual ? visual->get_children() : nullptr;
     if (!children) return;
@@ -1265,14 +1712,14 @@ void CVrWeaponInteraction::MeasureOptics(IKinematics& model)
             // An ordinary mesh with a lens texture: the glass of a scope
             // built into the model (wpn_fn2000_lens). Only used for a
             // weapon the config or glass already makes a scope.
-            if (texture && strstr(texture,"lens")) m_lens_meshes.push_back(child->getVisData().box);
+            if (texture && strstr(texture,"lens")) m_model_data.lens_meshes.push_back(child->getVisData().box);
             continue;
         }
-        m_glass.push_back(child->getVisData().box);
-        m_glass_dot=m_glass_dot || dot;
-        m_glass_soft=m_glass_soft || soft;
+        m_model_data.glass.push_back(child->getVisData().box);
+        m_model_data.glass_dot=m_model_data.glass_dot || dot;
+        m_model_data.glass_soft=m_model_data.glass_soft || soft;
     }
-    m_mesh_shaders=shaders;
+    m_model_data.mesh_shaders=shaders;
 }
 
 void CVrWeaponInteraction::MeasureSight()
@@ -1282,7 +1729,7 @@ void CVrWeaponInteraction::MeasureSight()
     // wpn_p90_eot), usually with scope_status 0; integrated sights (AUG)
     // only set a zoom. The place comes from the model: its glass meshes,
     // else the rear of its scope part. Sights look along the bore (+z).
-    // The flat-screen aiming line (m_aim_eye/m_aim_dir from
+    // The flat-screen aiming line (m_hands.aim_eye/m_hands.aim_dir from
     // SampleAuthoredHands) is only a fallback: it is the HUD camera, not
     // where an eye would be. Measured again on a scope change, from scratch.
     m_sight=SightInfo();
@@ -1316,23 +1763,23 @@ void CVrWeaponInteraction::MeasureSight()
     // The glass: all of it, and the rearmost mesh (a scope's eyepiece).
     Fbox glass; glass.invalidate();
     const Fbox* rear_glass=nullptr;
-    for (const Fbox& box:m_glass)
+    for (const Fbox& box:m_model_data.glass)
     {
         glass.merge(box);
         if (!rear_glass || box.min.z<rear_glass->min.z) rear_glass=&box;
     }
     const float span=rear_glass ? glass.max.z-glass.min.z : 0.f;
     Fvector cup; float cup_radius=0.f, part_front=0.f;
-    const bool part=ScopeEyepiece(m_optic_cloud,cup,cup_radius,part_front);
+    const bool part=ScopeEyepiece(m_model_data.optic_cloud,cup,cup_radius,part_front);
     // The zoom factor is the zoomed field of view (x0.75 in the camera):
     // under 60 degrees, or a 3D lens, is a magnified scope. Glass along
     // 5 cm or more is a scope tube, and a soft black lens a scope's exit
     // pupil (the G36's has no zoom in its config); a red dot otherwise.
     const bool zoomed=lens || (zoom>0.f && zoom<60.f);
-    const bool scope=rear_glass ? span>=0.05f || m_glass_soft || (zoomed && !m_glass_dot) : zoomed;
+    const bool scope=rear_glass ? span>=0.05f || m_model_data.glass_soft || (zoomed && !m_model_data.glass_dot) : zoomed;
     // A scope built into the model: its lens-textured glass, the rearmost.
     const Fbox* lens_mesh=nullptr;
-    for (const Fbox& box:m_lens_meshes)
+    for (const Fbox& box:m_model_data.lens_meshes)
         if (!lens_mesh || box.min.z<lens_mesh->min.z) lens_mesh=&box;
     if (scope)
     {
@@ -1395,10 +1842,10 @@ void CVrWeaponInteraction::MeasureSight()
         front=part_front;
         source="scope part";
     }
-    else if (m_aim_valid)
+    else if (m_hands.aim_valid)
     {
-        m_sight.dir=m_aim_dir;
-        m_sight.window=m_aim_eye; m_sight.window.mad(m_sight.dir,m_sight.rear);
+        m_sight.dir=m_hands.aim_dir;
+        m_sight.window=m_hands.aim_eye; m_sight.window.mad(m_sight.dir,m_sight.rear);
         m_sight.radius=scope ? 0.016f : 0.015f;
         source="flat-screen aiming line";
         // A scope built into the model with no glass, lens or scope part
@@ -1407,33 +1854,33 @@ void CVrWeaponInteraction::MeasureSight()
         // so the window 7 cm ahead of it floated ~15 cm short of the scope.
         // The tube's rear end is the eyepiece: the upper half of the mesh
         // within 3 cm of the line (not a mount or cheek piece below it).
-        if (scope && !m_cloud.empty())
+        if (scope && !m_model_data.cloud.empty())
         {
             float back=flt_max, front_z=-flt_max;
             unsigned used=0;
-            for (const Fvector& p:m_cloud)
+            for (const Fvector& p:m_model_data.cloud)
             {
-                Fvector v; v.sub(p,m_aim_eye);
-                const float t=v.dotproduct(m_aim_dir);
+                Fvector v; v.sub(p,m_hands.aim_eye);
+                const float t=v.dotproduct(m_hands.aim_dir);
                 if (t<0.03f || t>0.6f) continue;
-                Fvector off=v; off.mad(m_aim_dir,-t);
+                Fvector off=v; off.mad(m_hands.aim_dir,-t);
                 if (off.magnitude()>0.03f || off.y<-0.005f) continue;
                 back=std::min(back,p.z); front_z=std::max(front_z,p.z);
                 ++used;
             }
-            if (used>=40 && front_z-back>=0.06f && _abs(m_aim_dir.z)>0.5f)
+            if (used>=40 && front_z-back>=0.06f && _abs(m_hands.aim_dir.z)>0.5f)
             {
                 float radius=0.f;
-                for (const Fvector& p:m_cloud)
+                for (const Fvector& p:m_model_data.cloud)
                 {
                     if (p.z<back || p.z>back+0.01f) continue;
-                    Fvector v; v.sub(p,m_aim_eye);
-                    const float t=v.dotproduct(m_aim_dir);
-                    Fvector off=v; off.mad(m_aim_dir,-t);
+                    Fvector v; v.sub(p,m_hands.aim_eye);
+                    const float t=v.dotproduct(m_hands.aim_dir);
+                    Fvector off=v; off.mad(m_hands.aim_dir,-t);
                     if (off.magnitude()<=0.03f && off.y>=-0.005f) radius=std::max(radius,off.magnitude());
                 }
-                m_sight.window=m_aim_eye;
-                m_sight.window.mad(m_aim_dir,(back-m_aim_eye.z)/m_aim_dir.z);
+                m_sight.window=m_hands.aim_eye;
+                m_sight.window.mad(m_hands.aim_dir,(back-m_hands.aim_eye.z)/m_hands.aim_dir.z);
                 m_sight.radius=clampr(radius*0.8f,0.008f,0.025f);
                 front=front_z;
                 source="scope tube round the flat-screen aiming line";
@@ -1446,7 +1893,7 @@ void CVrWeaponInteraction::MeasureSight()
     // How far the weapon reaches along the line (the scope's camera sits
     // past it), from the nominal eye.
     float reach=front>-flt_max ? front-m_sight.eye.z : 0.f;
-    for (const Fvector& point:m_cloud)
+    for (const Fvector& point:m_model_data.cloud)
     {
         Fvector to; to.sub(point,m_sight.eye);
         const float along=to.dotproduct(m_sight.dir);
@@ -1459,7 +1906,7 @@ void CVrWeaponInteraction::MeasureSight()
         zoom,m_sight.magnification,m_sight.radius*200.f,m_sight.window.x,m_sight.window.y,m_sight.window.z,source);
     if (!rear_glass && !part && !lens_mesh)
         Msg("* [VR weapon] %s: no sight glass or scope part found; mesh shaders: %s",section.c_str(),
-            m_mesh_shaders.size() ? m_mesh_shaders.c_str() : "none");
+            m_model_data.mesh_shaders.size() ? m_model_data.mesh_shaders.c_str() : "none");
 }
 
 bool CVrWeaponInteraction::EyeOnSight(const Fvector& eye, Fmatrix& world, Fvector& direction,
@@ -1600,25 +2047,25 @@ bool CVrWeaponInteraction::AuthoredBones(int side, VrHandBones& bones) const
     // under the stock, and jumped back when the weapon hand took the grip).
     if (m_carried && m_carry_authored && side==HandOf(1))
     {
-        if (!vr::AnimatedGrip() || !Mode() || !Transform(world) || m_hands_local.empty()) return false;
-        Fmatrix hand=m_hand_in_item[0];
+        if (!vr::AnimatedGrip() || !Mode() || !Transform(world) || m_hands.hands_local.empty()) return false;
+        Fmatrix hand=m_hands.hand_in_item[0];
         hand.c.add(m_carry_slide);
-        bones.visual=m_hands_visual_name;
+        bones.visual=m_hands.visual;
         bones.hand.mul_43(world,hand);
-        bones.locals=&m_hands_local;
+        bones.locals=&m_hands.hands_local;
         return true;
     }
-    if (!vr::AnimatedGrip() || !Mode() || m_hand!=1 || m_carried || !Transform(world) || m_cloud.empty())
+    if (!vr::AnimatedGrip() || !Mode() || m_hand!=1 || m_carried || !Transform(world) || m_model_data.cloud.empty())
         return false;
-    if (m_hands_local.empty()) return false;
+    if (m_hands.hands_local.empty()) return false;
     // An animated hand far from the grip is drawn by the arm IK instead.
-    if (!m_palm_trusted) return false;
-    bones.visual=m_hands_visual_name;
+    if (!m_hands.palm_trusted) return false;
+    bones.visual=m_hands.visual;
     if (side)
     {
-        if (!m_authored[1].valid) return false;
-        bones.hand.mul_43(world,m_hand_in_item[1]);
-        bones.locals=&m_hands_local;
+        if (!m_hands.authored[1].valid) return false;
+        bones.hand.mul_43(world,m_hands.hand_in_item[1]);
+        bones.locals=&m_hands.hands_local;
         return true;
     }
     // The left hand holds a magazine as the reload does, or the weapon as
@@ -1626,13 +2073,13 @@ bool CVrWeaponInteraction::AuthoredBones(int side, VrHandBones& bones) const
     // Not a magazine taken out of the weapon: the hand holds it where it
     // closed on it, and the animation's hold would jump 10-20 cm off it.
     Fmatrix root;
-    if (!m_maghand_local.empty() && !m_mag_grabbed && MagazineInHand(root))
+    if (!m_hands.maghand_local.empty() && !m_mag_grabbed && MagazineInHand(root))
     {
-        bones.hand.mul_43(root,m_maghand_in_root);
-        bones.locals=&m_maghand_local;
+        bones.hand.mul_43(root,m_hands.maghand_in_root);
+        bones.locals=&m_hands.maghand_local;
         return true;
     }
-    if (!m_supporting || !m_authored[0].valid) return false;
+    if (!m_supporting || !m_hands.authored[0].valid) return false;
     // The authored hand is on the fore-end: with the barrels open, only a
     // hand that holds them is drawn there, riding the hinge.
     if (BarrelsOpen() && !m_support_barrels) return false;
@@ -1641,19 +2088,21 @@ bool CVrWeaponInteraction::AuthoredBones(int side, VrHandBones& bones) const
         Fmatrix moved, barrels;
         HingeWorld(world,moved);
         barrels.mul_43(moved,world);
-        bones.hand.mul_43(barrels,m_hand_in_item[0]);
+        bones.hand.mul_43(barrels,m_hands.hand_in_item[0]);
     }
     else
     {
         // Where the real hand closed on the fore-end, not only where the
         // idle holds it: held further forward, the arm was stretched to the
         // animation's place.
-        Fmatrix hand=m_hand_in_item[0];
-        hand.c.add(SupportSlide());
+        Fmatrix hand=m_hands.hand_in_item[0];
+        const Fvector slide=SupportSlide();
+        hand.c.add(slide);
         bones.hand.mul_43(world,hand);
+        bones.slid=slide.square_magnitude()>EPS_S;
     }
     if (m_pumping) bones.hand.c.mad(world.k,-m_pump);
-    bones.locals=&m_hands_local;
+    bones.locals=&m_hands.hands_local;
     return true;
 }
 
@@ -1664,8 +2113,8 @@ bool CVrWeaponInteraction::AuthoredHand(int side, VrHandPose& pose) const
     Fmatrix world;
     const bool weapon_hand=side==m_hand;
     if (!vr::AnimatedGrip() || !Mode() || (!weapon_hand && !m_supporting) || !Transform(world) ||
-        m_cloud.empty()) return false;
-    if (!m_palm_trusted) return false;
+        m_model_data.cloud.empty()) return false;
+    if (!m_hands.palm_trusted) return false;
     if (!weapon_hand && m_pumping) world.c.mad(world.k,-m_pump);
     // The fore-end hand rides the hinged barrels; one on the receiver is
     // not drawn on them.
@@ -1679,13 +2128,18 @@ bool CVrWeaponInteraction::AuthoredHand(int side, VrHandPose& pose) const
     }
     // A weapon passed to the support hand stays held the way that hand held it.
     const int source=weapon_hand && !m_carried ? 1 : 0;
-    const AuthoredHandRef& ref=m_authored[source];
+    const AuthoredHandRef& ref=m_hands.authored[source];
     if (!ref.valid) return false;
     const bool mirror=side!=source;
     const auto direction=[&](Fvector v) { if (mirror) v.x=-v.x; world.transform_dir(v); return v; };
-    Fvector knuckles=ref.knuckles;
-    if (mirror) knuckles.x=2.f*(m_profile.has_trigger_point ? m_profile.trigger_point.x : 0.f)-knuckles.x;
-    if (!weapon_hand && !BarrelsOpen()) knuckles.add(SupportSlide());
+    Fvector knuckles=mirror ? AcrossBore(ref.knuckles) : ref.knuckles;
+    pose.visual=m_hands.visual;
+    if (!weapon_hand && !BarrelsOpen())
+    {
+        const Fvector slide=SupportSlide();
+        knuckles.add(slide);
+        pose.slid=slide.square_magnitude()>EPS_S;
+    }
     pose.knuckles=Point(world,knuckles);
     pose.basis[0]=direction(ref.basis[0]);
     pose.basis[1]=direction(ref.basis[1]);
@@ -1697,9 +2151,9 @@ bool CVrWeaponInteraction::AuthoredHand(int side, VrHandPose& pose) const
 
 bool CVrWeaponInteraction::RearSupport() const
 {
-    if (!vr::AnimatedGrip() || m_cloud.empty()) return false;
-    if (!m_authored[0].valid || !m_authored[1].valid) return false;
-    return m_authored[0].palm.z<m_authored[1].palm.z-0.08f;
+    if (!vr::AnimatedGrip() || m_model_data.cloud.empty()) return false;
+    if (!m_hands.authored[0].valid || !m_hands.authored[1].valid) return false;
+    return m_hands.authored[0].palm.z<m_hands.authored[1].palm.z-0.08f;
 }
 float CVrWeaponInteraction::SupportAlong(const Fvector& grip, const Fvector& muzzle,
     const Fvector& support)
@@ -1715,22 +2169,26 @@ int CVrWeaponInteraction::SupportNear(const Fvector& grip, const Fvector& muzzle
     // Any weapon can be held in two hands, with no per-weapon data: the
     // support hand closing at the grip cups the weapon hand (2); anywhere on
     // the barrel line ahead of it, it takes the fore-end (1).
-    if (support.distance_to(grip)<0.12f) return 2;
     Fvector axis; axis.sub(muzzle,grip);
     float length=axis.magnitude();
     if (length<0.15f) { axis=forward; length=0.6f; }
     else axis.div(length);
     Fvector to; to.sub(support,grip);
     const float along=to.dotproduct(axis);
-    // A weapon held from behind (an RPG-7's rear grip) takes the support
-    // hand up to 50 cm behind the weapon hand instead of ahead of it.
-    if (RearSupport())
-    {
-        if (along>-0.08f || along<-0.5f) return 0;
-        to.mad(axis,-along);
-        return to.magnitude()<0.12f ? 1 : 0;
-    }
-    if (along<0.1f || along>length+0.05f) return 0;
+    // A long gun held at or ahead of its grip (the magazine well, a compact
+    // SMG's magazine just ahead of the trigger guard) is held two-handed and
+    // steered by both; within 12 cm (and under 4 cm ahead, a Kiparis's) that
+    // was taken for a cup and the gun stayed one-handed. A handgun, or a hand
+    // behind a long gun's grip, cups it.
+    const bool handgun=Handgun(), rear=RearSupport();
+    if (support.distance_to(grip)<0.12f && (handgun || along<0.f)) return 2;
+    // On the barrel line, within 12 cm of it: a long gun's from its grip, a
+    // handgun's from 10 cm ahead of it, to 5 cm past the muzzle. A weapon
+    // held from behind (an RPG-7's rear grip) takes the support hand 8 to
+    // 50 cm behind the weapon hand instead of ahead of it.
+    const bool on_line=rear ? along<=-0.08f && along>=-0.5f :
+        along>=(handgun ? 0.1f : 0.f) && along<=length+0.05f;
+    if (!on_line) return 0;
     to.mad(axis,-along);
     return to.magnitude()<0.12f ? 1 : 0;
 }
@@ -1795,7 +2253,7 @@ bool CVrWeaponInteraction::RuleAllows(const vr::GateList& gates, LPCSTR what)
                 gate.kind==vr::GatePartOpen ? "open" : "closed");
             need=part;
         }
-        Msg("* [VR weapon] %s: %s needs %s",m_profile.section.c_str(),what,need);
+        Note("%s needs %s",what,need);
         vr::HandHaptic(HandOf(0),0.05f);
     }
     return false;
@@ -1834,7 +2292,7 @@ bool CVrWeaponInteraction::UpdateParts(const Fmatrix& world, bool left_valid, co
         if (events&vr::PartOpened) { PlayHandling(SoundCoverOpen,at); vr::HandHaptic(hand,0.2f); }
         if (events&vr::PartClosed) { PlayHandling(SoundCoverClose,at); vr::HandHaptic(hand,0.3f); }
         if (events&(vr::PartOpened|vr::PartClosed))
-            Msg("* [VR weapon] %s: %s %s",m_profile.section.c_str(),m_profile.part_names[i].c_str(),
+            Note("%s %s",m_profile.part_names[i].c_str(),
                 events&vr::PartOpened ? "open" : "closed");
         if (state.hand==hand) { holding=true; in.grip_edge=false; }
     }
@@ -1849,7 +2307,7 @@ bool CVrWeaponInteraction::UpdateParts(const Fmatrix& world, bool left_valid, co
         {
             PlayHandling(SoundBeltIn,tray);
             vr::HandHaptic(hand,0.25f);
-            Msg("* [VR weapon] %s: belt on the feed tray",m_profile.section.c_str());
+            Note("belt on the feed tray");
         }
         if (m_belt.hand==hand) holding=true;
     }
@@ -1871,12 +2329,10 @@ bool CVrWeaponInteraction::PoseParts(IKinematics& model, xr_vector<Fmatrix>& pos
         Fvector pivot; pivot.set(def.pivot.x,def.pivot.y,def.pivot.z);
         Fvector turned; motion.transform_dir(turned,pivot);
         motion.c.set(at.x,at.y,at.z).sub(turned);
-        for (u16 id=0;id<count && id<poses.size();++id)
-            if (Descends(model,id,bone))
-            {
-                Fmatrix pose; pose.mul_43(motion,poses[id]);
-                poses[id]=pose;
-            }
+        ForSubtree(model,bone,[&](u16 id)
+        {
+            if (id<poses.size()) poses[id]=Fmatrix().mul_43(motion,poses[id]);
+        });
         moved=true;
     };
     for (int i=0;i<m_profile.part_count;++i)
@@ -1939,8 +2395,8 @@ void CVrWeaponInteraction::MeasurePartMotion(IKinematics& model)
         {
             // Rules naming a missing part could never pass and would stop
             // the weapon firing: without its parts, it has no rules either.
-            Msg("! [VR weapon] %s: part %s: bone %s missing; moving parts and reload rules disabled",
-                m_profile.section.c_str(),m_profile.part_names[i].c_str(),m_profile.part_bones[i].c_str());
+            Warn("part %s: bone %s missing; moving parts and reload rules disabled",
+                m_profile.part_names[i].c_str(),m_profile.part_bones[i].c_str());
             m_profile.part_count=0;
             m_profile.rules=vr::ReloadRules{};
             m_profile.belt.used=false;
@@ -2007,13 +2463,13 @@ void CVrWeaponInteraction::MeasurePartMotion(IKinematics& model)
             if (angle<0.f) { def.axis=(axis*-1.f); angle=-angle; }
             def.max=clampr(angle,deg2rad(20.f),deg2rad(120.f));
             def.open_at=0.8f*def.max;
-            Msg("* [VR weapon] %s: part %s: hinge axis (%.2f %.2f %.2f) pivot (%.3f %.3f %.3f) open %.0f deg, from %s",
-                m_profile.section.c_str(),m_profile.part_names[i].c_str(),def.axis.x,def.axis.y,def.axis.z,
+            Note("part %s: hinge axis (%.2f %.2f %.2f) pivot (%.3f %.3f %.3f) open %.0f deg, from %s",
+                m_profile.part_names[i].c_str(),def.axis.x,def.axis.y,def.axis.z,
                 def.pivot.x,def.pivot.y,def.pivot.z,rad2deg(def.max),source);
         }
         else
-            Msg("* [VR weapon] %s: part %s: no motion in the reload animation; hinge about +X at its bone, %.0f deg",
-                m_profile.section.c_str(),m_profile.part_names[i].c_str(),rad2deg(def.max));
+            Note("part %s: no motion in the reload animation; hinge about +X at its bone, %.0f deg",
+                m_profile.part_names[i].c_str(),rad2deg(def.max));
     }
 }
 Fvector CVrWeaponInteraction::ChamberWorld(const Fmatrix& world, int chamber) const
@@ -2022,18 +2478,75 @@ Fvector CVrWeaponInteraction::ChamberWorld(const Fmatrix& world, int chamber) co
     Fvector local; hinge.transform_tiny(local,m_profile.shell_center[chamber]);
     return Point(world,local);
 }
+struct CVrWeaponInteraction::HeldRound
+{
+    vr::ContactField field;
+    Fvector centre{};
+};
 bool CVrWeaponInteraction::ShellHandPose(Fmatrix& pose) const
 {
-    // Hold the shell in the left fingertips, oriented like the pistol grip,
-    // with its centre slightly above the controller grip point.
+    // In the closed fist, nose forward (where the hand points, for pushing
+    // it into a port): its middle at the controller's handle centre, which
+    // the fingers wrap (GripField closes them on its surface). Held 2 cm
+    // above the handle with nothing to close on, the round floated over an
+    // empty fist.
     Fmatrix grip;
     if (!vr::HandTransform(HandOf(0),false,grip) || !vr::HandTransform(HandOf(0),true,pose)) return false;
     pose.c.set(0,0,0);
-    Fvector centre=m_profile.shell_center[1];
-    pose.transform_dir(centre);
-    pose.c.mad(grip.c,pose.j,0.02f);
-    pose.c.sub(centre);
+    Fvector centre; pose.transform_dir(centre,RoundCentre());
+    pose.c.sub(grip.c,centre);
     return true;
+}
+Fvector CVrWeaponInteraction::RoundCentre() const
+{
+    return m_round ? m_round->centre : m_profile.shell_center[1];
+}
+void CVrWeaponInteraction::MeasureHeldRound(IRenderVisual* visual, const shared_str& name, LPCSTR bone)
+{
+    if (!visual || !name.size()) return;
+    xr_string key=name.c_str();
+    key.append("|").append(bone ? bone : "");
+    if (m_round && m_round_key==key) return;
+    static xr_map<xr_string,std::shared_ptr<const HeldRound>> cache;
+    m_round_key=key;
+    if (auto found=cache.find(key); found!=cache.end()) { m_round=found->second; return; }
+    std::vector<vr::Tri> tris;
+    if (IKinematics* model=visual->dcast_PKinematics())
+    {
+        TriangleCollector collector(tris);
+        if (bone && *bone) ForSubtree(*model,model->LL_BoneID(bone),[&](u16 id) { model->EnumBoneVertices(collector,id); });
+        else for (u16 id=0;id<model->LL_BoneCount();++id) model->EnumBoneVertices(collector,id);
+    }
+    Fbox box; box.invalidate();
+    for (const vr::Tri& t:tris) { box.modify(F(t.a)); box.modify(F(t.b)); box.modify(F(t.c)); }
+    // A model without a skeleton (a static cartridge): its bounds as a box.
+    if (tris.empty() && visual->getVisData().box.is_valid())
+    {
+        box=visual->getVisData().box;
+        Fvector p[8];
+        for (int n=0;n<8;++n)
+            p[n].set(n&1 ? box.max.x : box.min.x,n&2 ? box.max.y : box.min.y,n&4 ? box.max.z : box.min.z);
+        static const int faces[6][4]={{0,1,3,2},{4,6,7,5},{0,4,5,1},{2,3,7,6},{0,2,6,4},{1,5,7,3}};
+        for (const auto& f:faces)
+        {
+            tris.push_back({V(p[f[0]]),V(p[f[1]]),V(p[f[2]])});
+            tris.push_back({V(p[f[0]]),V(p[f[2]]),V(p[f[3]])});
+        }
+    }
+    auto round=std::make_shared<HeldRound>();
+    Fvector size; size.set(0.f,0.f,0.f);
+    if (!tris.empty())
+    {
+        box.getcenter(round->centre);
+        size.sub(box.max,box.min);
+        round->field.Build(tris,0.0025f,0.012f);
+    }
+    else round->centre=m_profile.shell_center[1];
+    if (vr::ContactDebug()>0)
+        Note("held round %s%s%s: %u triangles, %.0f x %.0f x %.0f mm, middle (%.3f %.3f %.3f)",name.c_str(),
+            bone && *bone ? ", bone " : "",bone && *bone ? bone : "",unsigned(tris.size()),
+            size.x*1000.f,size.y*1000.f,size.z*1000.f,round->centre.x,round->centre.y,round->centre.z);
+    m_round=cache[key]=round;
 }
 void CVrWeaponInteraction::SyncChambers()
 {
@@ -2102,7 +2615,7 @@ void CVrWeaponInteraction::DropCase(const Fmatrix& world, const Fvector& velocit
     static xr_set<xr_string> logged;
     const bool own_case=m_profile.case_bone.size()!=0;
     if (logged.insert(m_profile.section.c_str()).second)
-        Msg("* [VR weapon] %s: spent case %s",m_profile.section.c_str(),
+        Note("spent case %s",
             own_case ? "thrown as the model's own case" :
             m_weapon.m_sShellParticles.size() ? "shown by shell particles" : "not shown (no case mesh, no particles)");
     if (!own_case)
@@ -2127,7 +2640,7 @@ void CVrWeaponInteraction::DropCase(const Fmatrix& world, const Fvector& velocit
     prop.shell=CreateBoxShell(m_profile.case_center,half,0.03f,start,thrown,m_hand_angular[1]);
     if (!prop.shell)
     {
-        Msg("! [VR weapon] %s: the spent case's physics shell was not created",m_profile.section.c_str());
+        Warn("the spent case's physics shell was not created");
         m_weapon.OnShellDrop(Point(world,m_profile.case_center),velocity);
         return;
     }
@@ -2158,7 +2671,9 @@ bool CVrWeaponInteraction::FireDependencies(firedeps& deps) const
     if (Transform(world))
     {
         deps.vLastFP=Point(world,m_profile.muzzle);
-        deps.vLastFP2=deps.vLastFPSilencer=deps.vLastFP;
+        // The HUD's own silencer and launcher points, where it gives them.
+        deps.vLastFP2=m_profile.has_muzzle2 ? Point(world,m_profile.muzzle2) : deps.vLastFP;
+        deps.vLastFPSilencer=m_profile.has_muzzle_silencer ? Point(world,m_profile.muzzle_silencer) : deps.vLastFP;
         deps.vLastSP=Point(world,m_profile.shell_point);
         // Along the bore: zeroing waits for a hands-on sight adjustment.
         direction=world.k;
@@ -2196,7 +2711,7 @@ bool CVrWeaponInteraction::ValidateModel(IKinematics& model)
     const auto optional=[&](shared_str& name, LPCSTR what)
     {
         if (!name.size() || model.LL_BoneID(name.c_str())!=BI_NONE) return;
-        Msg("! [VR weapon] %s: missing %s bone %s; left as the model shows it",m_profile.section.c_str(),
+        Warn("missing %s bone %s; left as the model shows it",
             what,name.c_str());
         name="";
     };
@@ -2210,20 +2725,17 @@ bool CVrWeaponInteraction::ValidateModel(IKinematics& model)
     // its mesh does not move.
     for (int part=0;part<m_profile.part_count;++part)
         if (m_profile.part_bones[part].size() && model.LL_BoneID(m_profile.part_bones[part].c_str())==BI_NONE)
-            Msg("! [VR weapon] %s: missing part bone %s; the part is worked but not drawn moving",
-                m_profile.section.c_str(),m_profile.part_bones[part].c_str());
+            Warn("missing part bone %s; the part is worked but not drawn moving",m_profile.part_bones[part].c_str());
     if (!m_profile.detachable && !m_profile.cycle_travel && !m_profile.break_action) return true;
     if (m_profile.detachable && model.LL_BoneID(m_profile.mag_bone.c_str())==BI_NONE)
     {
-        Msg("! [VR weapon] %s: missing magazine bone %s; physical magazine disabled",
-            m_profile.section.c_str(),m_profile.mag_bone.c_str());
+        Warn("missing magazine bone %s; physical magazine disabled",m_profile.mag_bone.c_str());
         m_profile.detachable=false;
     }
     if (m_profile.cycle_travel && m_profile.cycle_bone.size() &&
         model.LL_BoneID(m_profile.cycle_bone.c_str())==BI_NONE)
     {
-        Msg("! [VR weapon] %s: missing cycling bone %s; cycling disabled",
-            m_profile.section.c_str(),m_profile.cycle_bone.c_str());
+        Warn("missing cycling bone %s; cycling disabled",m_profile.cycle_bone.c_str());
         m_profile.cycle_travel=0;
         m_profile.detachable=false;
         m_profile.chamber=false;
@@ -2231,8 +2743,7 @@ bool CVrWeaponInteraction::ValidateModel(IKinematics& model)
     for (const auto& name:m_profile.mag_extra_bones)
         if (name.size() && model.LL_BoneID(name.c_str())==BI_NONE)
         {
-            Msg("! [VR weapon] %s: missing magazine part %s; physical magazine disabled",
-                m_profile.section.c_str(),name.c_str());
+            Warn("missing magazine part %s; physical magazine disabled",name.c_str());
             m_profile.detachable=false;
         }
     xr_vector<Fmatrix> bind;
@@ -2253,39 +2764,18 @@ bool CVrWeaponInteraction::ValidateModel(IKinematics& model)
         if (hinge!=BI_NONE && hinge<bind.size()) m_profile.hinge_point=bind[hinge].c;
         if (hinge==BI_NONE || !shells || m_profile.hinge_angle<=0.f)
         {
-            Msg("! [VR weapon] %s: break-action bones missing; interactive loading disabled",
-                m_profile.section.c_str());
+            Warn("break-action bones missing; interactive loading disabled");
             m_profile.break_action=false;
-        }
-    }
-    if (m_profile.check_mag_bind && m_profile.detachable)
-    {
-        const u16 id=model.LL_BoneID(m_profile.mag_bone.c_str());
-        if (id==BI_NONE || id>=bind.size() ||
-            !Near(bind[id].c,m_profile.expected_mag_bind,m_profile.bind_tolerance))
-        {
-            Msg("! [VR weapon] %s: magazine bind differs from audited asset; native HUD retained",
-                m_profile.section.c_str());
-            return false;
-        }
-    }
-    if (m_profile.check_cycle_bind && m_profile.cycle_travel)
-    {
-        const u16 id=model.LL_BoneID(m_profile.cycle_bone.c_str());
-        if (id==BI_NONE || id>=bind.size() ||
-            !Near(bind[id].c,m_profile.expected_cycle_bind,m_profile.bind_tolerance))
-        {
-            Msg("! [VR weapon] %s: cycling bind differs from audited asset; native HUD retained",
-                m_profile.section.c_str());
-            return false;
         }
     }
     return true;
 }
 
 void CVrWeaponInteraction::Pose(IKinematics& model, xr_vector<Fmatrix>& poses,
-    bool magazine_only, bool rounds)
+    bool magazine_only, bool rounds, PoseCache* storage)
 {
+    PoseCache local;
+    auto& cache=storage ? *storage : local;
     const bool modular=m_weapon.VrModularAttachments();
     const bool scope=!modular && m_weapon.get_ScopeStatus()!=ALife::eAddonDisabled &&
         (!m_weapon.ScopeAttachable() || m_weapon.IsScopeAttached());
@@ -2294,11 +2784,11 @@ void CVrWeaponInteraction::Pose(IKinematics& model, xr_vector<Fmatrix>& poses,
     const bool launcher=m_weapon.get_GrenadeLauncherStatus()!=ALife::eAddonDisabled &&
         (!m_weapon.GrenadeLauncherAttachable() || m_weapon.IsGrenadeLauncherAttached());
     model.Callback(CollapseHiddenBones,nullptr);
-    const bool pump=!m_profile.cycle_bone.size() && m_profile.pump_bone.size();
-    vr::ApplyWeaponPose(model,poses,BonePose,bctCustom,
+    const bool pump=PumpGun();
+    if (!vr::ApplyWeaponPose(model,poses,BonePose,bctCustom,
         pump ? m_profile.pump_bone.c_str() : m_profile.cycle_bone.c_str(),
-        pump ? m_pump : (m_profile.cycle_from_reload ? m_handle_slide :
-            std::max(m_mechanism.slide,m_cycle_visual_slide)),m_profile.rounds_bone.c_str(),
+        pump ? m_pump : (m_profile.cycle_from_reload ? m_handle_slide : m_profile.open_bolt_static ?
+            -m_cycle_visual_slide : std::max(m_mechanism.slide,m_cycle_visual_slide)),m_profile.rounds_bone.c_str(),
         {m_profile.mag_bone.c_str(),m_profile.rounds_bone.c_str()},magazine_only,
         m_mechanism.inserted>=0 || !m_profile.detachable,rounds,nullptr,
         {scope ? nullptr : "wpn_scope",silencer ? nullptr : "wpn_silencer",
@@ -2310,9 +2800,10 @@ void CVrWeaponInteraction::Pose(IKinematics& model, xr_vector<Fmatrix>& poses,
                 m_profile.shell_bones[1].c_str() : nullptr,
             m_profile.hidden_parts[0].c_str(),m_profile.hidden_parts[1].c_str(),
             m_profile.hidden_parts[2].c_str(),BeltHidden() ? m_profile.belt_free_bone.c_str() : nullptr,
-            m_scope_hidden[0].c_str(),m_scope_hidden[1].c_str(),m_scope_hidden[2].c_str()},
+            m_model_data.scope_hidden[0].c_str(),m_model_data.scope_hidden[1].c_str(),m_model_data.scope_hidden[2].c_str()},
         {m_profile.mag_extra_bones[0].c_str(),m_profile.mag_extra_bones[1].c_str()},
-        pump ? nullptr : m_profile.handle_bone.c_str(),m_handle_slide,m_profile.reload_magazines,false);
+        pump ? nullptr : m_profile.handle_bone.c_str(),m_handle_slide,m_profile.reload_magazines,false,
+        &cache,magazine_only ? Device.dwFrame : ~0u)) return;
     // Magazine contents laid out as the idle shows them (belt links); a
     // seated magazine's then follow the weapon's own animation (AnimateParts).
     // Only on a skeleton laid out as the weapon's (not a dedicated asset).
@@ -2324,7 +2815,7 @@ void CVrWeaponInteraction::Pose(IKinematics& model, xr_vector<Fmatrix>& poses,
     // What the native first-person model hides now (a fired rocket or
     // launcher grenade, a round or shell its reload took away) is hidden on
     // this copy too: it kept showing them, as it never sees native changes.
-    if (!magazine_only) CopyNativeVisibility(model);
+    if (!magazine_only) CopyNativeVisibility(model,cache.counted);
     // The case a hand-worked action shows in its chamber leaves when the
     // hand opens it (DropCase throws it); kept, it sat still in an open
     // GAMMA TOZ-106.
@@ -2357,7 +2848,7 @@ void CVrWeaponInteraction::Pose(IKinematics& model, xr_vector<Fmatrix>& poses,
     vr::CollapseHiddenSkinning(model);
 }
 
-bool CVrWeaponInteraction::CopyNativeVisibility(IKinematics& model) const
+bool CVrWeaponInteraction::CopyNativeVisibility(IKinematics& model, std::vector<unsigned char>& counted) const
 {
     attachable_hud_item* item=m_weapon.IsAttachedToHUD() ? m_weapon.HudItemData() : nullptr;
     IKinematics* hud=item ? item->m_model : nullptr;
@@ -2373,7 +2864,7 @@ bool CVrWeaponInteraction::CopyNativeVisibility(IKinematics& model) const
     // Except the rounds the game hides by its ammunition count (bullet_bones:
     // a GAMMA belt shortening as it fires), while the magazine is in.
     const bool seated=!m_profile.detachable || (m_mechanism.inserted>=0 && !m_inserting);
-    xr_vector<u8> counted;
+    counted.clear();
     if (seated && m_weapon.bHasBulletsToHide)
     {
         counted.assign(count,0);
@@ -2456,7 +2947,7 @@ bool CVrWeaponInteraction::AnimateParts(IKinematics& model, xr_vector<Fmatrix>& 
     const u16 magazine=m_profile.detachable ? model.LL_BoneID(m_profile.mag_bone.c_str()) : BI_NONE;
     // A separate charging handle is VR's: it moves only when worked by hand
     // (ApplyWeaponPose), never with the native idle copied over it.
-    const u16 handle=m_profile.handle_bone.size() && !(!m_profile.cycle_bone.size() && m_profile.pump_bone.size()) ?
+    const u16 handle=m_profile.handle_bone.size() && !PumpGun() ?
         model.LL_BoneID(m_profile.handle_bone.c_str()) : BI_NONE;
     const bool seated=m_mechanism.inserted>=0 && !m_inserting &&
         (!m_profile.belt.used || m_belt.seated);
@@ -2466,35 +2957,35 @@ bool CVrWeaponInteraction::AnimateParts(IKinematics& model, xr_vector<Fmatrix>& 
         model.LL_BoneID(m_profile.belt_free_bone.c_str()) : BI_NONE;
     const bool belt_laid=belt_end!=BI_NONE && seated && m_belt.seated && m_belt.hand<0;
     const bool thrown=m_profile.thrown_mask.size()==count;
-    const bool states=m_profile.break_action && m_state_local[0].size()==count &&
-        m_state_local[1].size()==count && m_state_local[2].size()==count;
+    const bool states=m_profile.break_action && m_model_data.state_local[0].size()==count &&
+        m_model_data.state_local[1].size()==count && m_model_data.state_local[2].size()==count;
     // Until the barrels are first closed or fired, show what is loaded.
     const unsigned state=std::min(m_break_state_set ? m_break_state : unsigned(m_weapon.m_magazine.size()),2u);
     // The trigger the next shot uses: the second of a double gun once the
     // first barrel is spent.
-    const int pulled=m_profile.break_action && m_chambers[0]!=1 && m_trigger_bone[1]!=BI_NONE ? 1 : 0;
+    const int pulled=m_profile.break_action && m_chambers[0]!=1 && m_model_data.trigger_bone[1]!=BI_NONE ? 1 : 0;
     bool changed=false;
     for (u16 id:m_overlay_order)
     {
         const u16 parent=model.LL_GetData(id).GetParentID();
         if (parent>=count) continue;
         int trigger=-1;
-        for (int t=0;t<2;++t) if (id==m_trigger_bone[t] && m_trigger_valid[t]) trigger=t;
+        for (int t=0;t<2;++t) if (id==m_model_data.trigger_bone[t] && m_model_data.trigger_valid[t]) trigger=t;
         if (trigger>=0)
         {
             const float amount=trigger==pulled ? m_trigger_value : 0.f;
             Fquaternion rest, full, blend;
-            rest.set(m_bind_local[id]); full.set(m_trigger_pull[trigger]);
+            rest.set(m_model_data.bind_local[id]); full.set(m_model_data.trigger_pull[trigger]);
             blend.slerp(rest,full,amount);
             Fmatrix local; local.rotation(blend);
-            local.c.lerp(m_bind_local[id].c,m_trigger_pull[trigger].c,amount);
+            local.c.lerp(m_model_data.bind_local[id].c,m_model_data.trigger_pull[trigger].c,amount);
             poses[id].mul_43(poses[parent],local);
             changed=true;
             continue;
         }
-        if (states && m_state_part[id])
+        if (states && m_model_data.state_part[id])
         {
-            poses[id].mul_43(poses[parent],m_state_local[state][id]);
+            poses[id].mul_43(poses[parent],m_model_data.state_local[state][id]);
             changed=true;
             continue;
         }
@@ -2506,8 +2997,14 @@ bool CVrWeaponInteraction::AnimateParts(IKinematics& model, xr_vector<Fmatrix>& 
             // follower) move as the weapon's own animation moves them, as a
             // belt feeding on each shot; the magazine itself stays VR's.
             const bool inside_seated=(a==magazine && a!=id && seated) || (a==belt_end && belt_laid);
-            vr_driven=(m_overlay_owned[a] && !inside_seated) || a==cycle || a==pump || a==handle ||
-                (thrown && m_profile.thrown_mask[a]);
+            // An open bolt and its handle move as the game animates them,
+            // unless no animation does (open_bolt_static). A separate
+            // handle is VR's only while a hand works it; otherwise it
+            // follows the game's own shot (an RPD's handle rides its bolt).
+            const bool open_animated=m_profile.open_bolt && !m_profile.open_bolt_static;
+            const bool handle_worked=m_racking || m_handle_hooked || m_handle_slide>0.0005f;
+            vr_driven=(m_overlay_owned[a] && !inside_seated) || (a==cycle && !open_animated) || a==pump ||
+                (a==handle && !open_animated && handle_worked) || (thrown && m_profile.thrown_mask[a]);
         }
         if (vr_driven) continue;
         Fmatrix to_parent; to_parent.invert(hud->LL_GetTransform(parent));
@@ -2528,17 +3025,17 @@ void CVrWeaponInteraction::MeasureParts(IKinematics& model)
     xr_vector<Fmatrix> bind;
     model.LL_GetBindTransform(bind);
     if (bind.size()<count) return;
-    m_bind_local.assign(count,Fidentity);
+    m_model_data.bind_local.assign(count,Fidentity);
     for (u16 id=0;id<count;++id)
     {
         const u16 parent=model.LL_GetData(id).GetParentID();
-        if (parent>=count) { m_bind_local[id]=bind[id]; continue; }
+        if (parent>=count) { m_model_data.bind_local[id]=bind[id]; continue; }
         Fmatrix inverse; inverse.invert(bind[parent]);
-        m_bind_local[id].mul_43(inverse,bind[id]);
+        m_model_data.bind_local[id].mul_43(inverse,bind[id]);
     }
-    m_trigger_bone[0]=FindTrigger(model);
-    m_trigger_bone[1]=model.LL_BoneID("trigger2");
-    m_trigger_valid[0]=m_trigger_valid[1]=false;
+    m_model_data.trigger_bone[0]=FindTrigger(model);
+    m_model_data.trigger_bone[1]=model.LL_BoneID("trigger2");
+    m_model_data.trigger_valid[0]=m_model_data.trigger_valid[1]=false;
     m_break_state=unsigned(m_weapon.m_magazine.size());
     LPCSTR hud=m_weapon.HudSection().c_str();
     (void)hud;
@@ -2566,13 +3063,13 @@ void CVrWeaponInteraction::MeasureParts(IKinematics& model)
             {
                 for (int t=0;t<2;++t)
                 {
-                    const u16 id=m_trigger_bone[t];
+                    const u16 id=m_model_data.trigger_bone[t];
                     if (id>=count) continue;
                     const Fmatrix posed=local(*clip,frame,id);
-                    const Fmatrix& rest=m_bind_local[id];
+                    const Fmatrix& rest=m_model_data.bind_local[id];
                     const float turn=3.f-posed.i.dotproduct(rest.i)-posed.j.dotproduct(rest.j)-
                         posed.k.dotproduct(rest.k);
-                    if (turn>deviation[t]) { deviation[t]=turn; m_trigger_pull[t]=posed; m_trigger_valid[t]=true; }
+                    if (turn>deviation[t]) { deviation[t]=turn; m_model_data.trigger_pull[t]=posed; m_model_data.trigger_valid[t]=true; }
                 }
             }
         }
@@ -2585,28 +3082,28 @@ void CVrWeaponInteraction::MeasureParts(IKinematics& model)
                 const VrSampledClip* clip=clips.Frames(key,1);
                 sampled=clip!=nullptr;
                 if (!sampled) break;
-                m_state_local[loaded].resize(count);
-                for (u16 id=0;id<count;++id) m_state_local[loaded][id]=local(*clip,0,id);
+                m_model_data.state_local[loaded].resize(count);
+                for (u16 id=0;id<count;++id) m_model_data.state_local[loaded][id]=local(*clip,0,id);
             }
-            m_state_part.assign(count,0);
+            m_model_data.state_part.assign(count,0);
             const u16 hinge=model.LL_BoneID(m_profile.hinge_bone.c_str());
             int parts=0;
             for (u16 id=0;sampled && id<count;++id)
             {
                 if (model.LL_GetData(id).GetParentID()>=count || id==hinge ||
-                    id==m_trigger_bone[0] || id==m_trigger_bone[1]) continue;
-                for (unsigned a=0;a<3 && !m_state_part[id];++a)
-                    for (unsigned b=a+1;b<3 && !m_state_part[id];++b)
+                    id==m_model_data.trigger_bone[0] || id==m_model_data.trigger_bone[1]) continue;
+                for (unsigned a=0;a<3 && !m_model_data.state_part[id];++a)
+                    for (unsigned b=a+1;b<3 && !m_model_data.state_part[id];++b)
                     {
-                        const Fmatrix& p=m_state_local[a][id];
-                        const Fmatrix& q=m_state_local[b][id];
-                        m_state_part[id]=p.c.distance_to(q.c)>0.0005f ||
+                        const Fmatrix& p=m_model_data.state_local[a][id];
+                        const Fmatrix& q=m_model_data.state_local[b][id];
+                        m_model_data.state_part[id]=p.c.distance_to(q.c)>0.0005f ||
                             3.f-p.i.dotproduct(q.i)-p.j.dotproduct(q.j)-p.k.dotproduct(q.k)>0.0005f;
                     }
-                parts+=m_state_part[id];
+                parts+=m_model_data.state_part[id];
             }
-            if (!sampled) for (auto& states:m_state_local) states.clear();
-            Msg("* [VR weapon] %s: %d parts follow the loaded barrels",m_profile.section.c_str(),parts);
+            if (!sampled) for (auto& states:m_model_data.state_local) states.clear();
+            Note("%d parts follow the loaded barrels",parts);
         }
     }
 }
@@ -2621,8 +3118,8 @@ void CVrWeaponInteraction::MeasureLauncher(IKinematics& model)
     if (part.count) part.box.getcenter(m_profile.launcher_grab);
     else
     {
-        m_profile.launcher_grab=m_profile.has_trigger_point ? m_profile.trigger_point : m_profile.muzzle;
-        if (m_profile.has_trigger_point) m_profile.launcher_grab.add(Fvector().set(0.f,-0.03f,0.22f));
+        m_profile.launcher_grab=m_profile.trigger_point.value_or(m_profile.muzzle);
+        if (m_profile.trigger_point) m_profile.launcher_grab.add(Fvector().set(0.f,-0.03f,0.22f));
     }
 }
 
@@ -2630,21 +3127,389 @@ struct CVrWeaponInteraction::Measured
 {
     Profile profile;
     bool basic_magazine=false;
-    xr_vector<Fvector> cloud, optic_cloud;
-    xr_vector<Fbox> glass, lens_meshes;
-    bool glass_dot=false, glass_soft=false;
-    shared_str mesh_shaders, scope_hidden[3];
-    xr_vector<Fmatrix> bind_local, state_local[3];
-    xr_vector<u8> state_part;
-    u16 trigger_bone[2]{BI_NONE,BI_NONE};
-    bool trigger_valid[2]{};
-    Fmatrix trigger_pull[2];
+    ModelMeasurements model;
 };
 
 xr_map<xr_string,std::shared_ptr<const CVrWeaponInteraction::Measured>>& CVrWeaponInteraction::MeasuredCache()
 {
     static xr_map<xr_string,std::shared_ptr<const Measured>> cache;
     return cache;
+}
+
+namespace
+{
+// Whether a HUD model and every motion file it names exist, found as the
+// model pool and CKinematicsAnimated::Load find them ($level$, then
+// $game_meshes$). Both treat a missing one as fatal; a weapon section the
+// game never spawns (GAMMA keeps some, e.g. wpn_ak74u_ps01) may name one.
+// missing: the first file not found.
+bool HudModelLoadable(LPCSTR visual, xr_string& missing)
+{
+    string_path name, fn;
+    if (!strext(visual)) strconcat(sizeof(name),name,visual,".ogf");
+    else xr_strcpy(name,visual);
+    IReader* file=FS.exist(visual) ? FS.r_open(visual) :
+        FS.exist(fn,"$level$",name) || FS.exist(fn,"$game_meshes$",name) ? FS.r_open(fn) : nullptr;
+    if (!file) { missing=xr_string(name)+" is missing"; return false; }
+    // Its bone names, lower case as CKinematics loads them.
+    xr_set<xr_string> bones;
+    if (file->find_chunk(OGF_S_BONE_NAMES))
+    {
+        string256 bone, parent;
+        for (u32 k=0,count=file->r_u32();k<count && file->elapsed()>int(sizeof(Fobb));++k)
+        {
+            file->r_stringZ(bone,sizeof(bone));
+            file->r_stringZ(parent,sizeof(parent));
+            file->advance(sizeof(Fobb));
+            bones.insert(xr_string(_strlwr(bone)));
+        }
+    }
+    // A motion file naming a bone the model lacks is dropped by
+    // CKinematicsAnimated::Load, and a model left with none asserts there
+    // (GAMMA's wpn_svt40_sk1_hud). A wildcard set (anims\*.omf) loads
+    // whatever exists, as fitting.
+    bool found=true;
+    unsigned refs=0, fitting=0;
+    xr_string misfit;
+    const auto check=[&](LPCSTR ref)
+    {
+        if (!found || !*ref) return;
+        ++refs;
+        if (strstr(ref,"\\*.omf")) { ++fitting; return; }
+        string_path omf, path;
+        strconcat(sizeof(omf),omf,ref,".omf");
+        if (!FS.exist(path,"$level$",omf) && !FS.exist(path,"$game_meshes$",omf))
+        { found=false; missing=xr_string(omf)+" is missing"; return; }
+        IReader* motions=FS.r_open(path);
+        bool fits=motions!=nullptr;
+        if (motions && motions->find_chunk(OGF_S_SMPARAMS) && motions->elapsed()>=4)
+        {
+            motions->r_u16();
+            string256 bone;
+            for (u16 part=0,parts=motions->r_u16();fits && part<parts && motions->elapsed()>2;++part)
+            {
+                motions->r_stringZ(bone,sizeof(bone));
+                for (u16 b=0,count=motions->r_u16();fits && b<count && motions->elapsed()>4;++b)
+                {
+                    motions->r_stringZ(bone,sizeof(bone));
+                    motions->r_u32();
+                    if (!bones.count(bone)) { fits=false; misfit=xr_string(omf)+" names bone "+bone; }
+                }
+            }
+        }
+        if (motions) FS.r_close(motions);
+        if (fits) ++fitting;
+    };
+    string_path ref;
+    if (file->find_chunk(OGF_S_MOTION_REFS))
+    {
+        string_path items;
+        file->r_stringZ(items,sizeof(items));
+        for (int k=0,count=_GetItemCount(items);k<count;++k) check(_GetItem(items,k,ref));
+    }
+    else if (file->find_chunk(OGF_S_MOTION_REFS2))
+    {
+        for (u32 k=0,count=file->r_u32();k<count;++k) { file->r_stringZ(ref,sizeof(ref)); check(ref); }
+    }
+    FS.r_close(file);
+    if (found && refs && !fitting)
+    {
+        found=false;
+        missing="no motion file fits its bones ("+misfit+")";
+    }
+    return found;
+}
+// Whether every sound entry the weapon's loading reads has a value, read as
+// that loading reads it (line_exist, r_string: the first item of a key): a
+// snd_* line of its section, and of a layered sound section one names, its
+// snd_N_layer, snd_N_layer1, ... lines in turn until one is missing
+// (HUD_SOUND_COLLECTION_LAYERED, HUD_SOUND_ITEM). HUD_SOUND loading asserts
+// on an empty one. Walking a section's raw items instead also met keys a
+// patch left twice, an empty copy the game never reads, and skipped the
+// UMP-45's sights, Vz. 61, VSK-94 and more GAMMA really spawns.
+// bad: the first empty entry, as section.key.
+bool SoundEntriesFilled(LPCSTR section, xr_string& bad)
+{
+    const auto filled=[](LPCSTR in, LPCSTR key)
+    {
+        LPCSTR value=pSettings->r_string(in,key);
+        return value && _GetItemCount(value)>0;
+    };
+    xr_set<xr_string> keys;
+    for (const CInifile::Item& item:pSettings->r_section(section).Data)
+        if (!strncmp(item.first.c_str(),"snd_",4)) keys.insert(item.first.c_str());
+    for (const xr_string& key:keys)
+    {
+        if (!pSettings->line_exist(section,key.c_str())) continue;
+        if (!filled(section,key.c_str())) { bad=xr_string(section)+"."+key; return false; }
+        string256 named;
+        _GetItem(pSettings->r_string(section,key.c_str()),0,named);
+        if (!pSettings->section_exist(named)) continue;
+        string64 layer, line;
+        for (int k=1;;++k)
+        {
+            xr_sprintf(layer,"snd_%d_layer",k);
+            if (!pSettings->line_exist(named,layer)) break;
+            xr_strcpy(line,layer);
+            for (int n=1;pSettings->line_exist(named,line);++n)
+            {
+                if (!filled(named,line)) { bad=xr_string(named)+"."+line; return false; }
+                xr_sprintf(line,"%s%d",layer,n);
+            }
+        }
+    }
+    return true;
+}
+}
+bool VrHudModelLoadable(LPCSTR visual)
+{
+    xr_string missing;
+    return visual && *visual && HudModelLoadable(visual,missing);
+}
+void CVrWeaponInteraction::LogProfileSummary() const
+{
+    const auto v=[](const Fvector& p) { string64 s; xr_sprintf(s,"(%.4f %.4f %.4f)",p.x,p.y,p.z); return xr_string(s); };
+    const Profile& p=m_profile;
+    Note("profile: %s, two_handed %d, detachable_magazine %d, chamber %d, slide_stop %d; grip_offset %s, "
+        "support_offset %s, muzzle_offset %s, shell_offset %s; mag_bone %s, rounds_bone %s, mag_grip %s, "
+        "mag_base %s, mag_box_center %s, mag_box_half %s, extraction %.3f, guide_radius %.3f; cycle_bone %s, "
+        "cycle_grab %s, cycle_travel %.3f, grab_radius %.3f",p.derived ? "derived" : "not measured",
+        p.two_handed,p.detachable,p.chamber,p.slide_stop,v(p.grip_offset).c_str(),v(p.support_offset).c_str(),
+        v(p.muzzle).c_str(),v(p.shell_point).c_str(),p.mag_bone.c_str(),p.rounds_bone.c_str(),v(p.mag_grip).c_str(),
+        v(p.mag_base).c_str(),v(p.mag_box_center).c_str(),v(p.mag_box_half).c_str(),p.extraction,p.guide_radius,
+        p.cycle_bone.c_str(),v(p.cycle_grab).c_str(),p.cycle_travel,p.grab_radius);
+}
+void CVrWeaponInteraction::LogAlignment()
+{
+    // Where the first-person animation's hands hold the weapon, against its
+    // mesh, for tools\vr_align_report.py to compare across weapons: the hold
+    // VR draws (AuthoredHand, GripLocal) is this one. Weapon space, metres;
+    // side is across from the bore's centre plane.
+    if (m_model_data.cloud.empty()) return;
+    SampleAuthoredHands();
+    if (m_profile.derived) SaveHandsToDisk();
+    const float centre=BoreX();
+    const auto nearest=[&](const Fvector& at) { return _sqrt(CloudDistanceSq(at)); };
+    string2048 line;
+    xr_sprintf(line,"class=%s",Handgun() ? "handgun" : "long");
+    const auto add=[&](LPCSTR format, auto... values)
+    {
+        string256 item;
+        xr_sprintf(item,format,values...);
+        xr_strcat(line," ");
+        xr_strcat(line,item);
+    };
+    const Fvector grip=m_profile.hand_grip_center.value_or(m_profile.grip_offset);
+    add("grip=%.4f,%.4f,%.4f",grip.x,grip.y,grip.z);
+    const AuthoredHandRef& weapon=m_hands.authored[1];
+    if (weapon.valid)
+    {
+        bool mesh=false;
+        const bool round=OnWeapon(weapon.palm,&mesh);
+        add("palm=%.4f,%.4f,%.4f palm_grip=%.4f palm_side=%.4f palm_round=%d palm_mesh=%.4f trusted=%d",
+            weapon.palm.x,weapon.palm.y,weapon.palm.z,weapon.palm.distance_to(grip),weapon.palm.x-centre,
+            round,nearest(weapon.palm),m_hands.palm_trusted);
+        add("knuckles_dir=%.3f,%.3f,%.3f palm_normal=%.3f,%.3f,%.3f",weapon.basis[0].x,weapon.basis[0].y,
+            weapon.basis[0].z,weapon.basis[2].x,weapon.basis[2].y,weapon.basis[2].z);
+    }
+    else add("palm=none");
+    const AuthoredHandRef& support=m_hands.authored[0];
+    if (support.valid)
+        add("support=%.4f,%.4f,%.4f support_side=%.4f support_closes=%d support_mesh=%.4f rear=%d",
+            support.palm.x,support.palm.y,support.palm.z,support.palm.x-centre,FistClosesOn(support.palm),
+            nearest(support.palm),RearSupport());
+    else add("support=none");
+    if (m_profile.forend_point)
+        add("forend=%.4f,%.4f,%.4f",m_profile.forend_point->x,m_profile.forend_point->y,m_profile.forend_point->z);
+    // Where the hold comes from, as GripLocal and the arms choose it, and
+    // what moved it on the way: the frames the weapon is measured, sampled
+    // and drawn in should agree (vr_align_report.py flags where they don't).
+    {
+        const bool animated=vr::AnimatedGrip() && weapon.valid && m_hands.palm_trusted;
+        xr_string source=animated ? "anim" : m_profile.grip_from_mesh ? "mesh" :
+            m_profile.trigger_point ? "trigger_estimate" : "default";
+        if (animated && m_hands.carry==3) source+="_receiver";
+        if (animated && m_hands.live) source+="_live";
+        add("hold_src=%s grip_from_mesh=%d wrist_lift=%.4f",source.c_str(),m_profile.grip_from_mesh,
+            m_profile.grip_wrist_lift);
+        add("index_trigger=%.4f trigger_from_hand=%d has_trigger=%d",m_hands.index_trigger,m_hands.hand_trigger.has_value(),
+            m_profile.trigger_point.has_value());
+        LPCSTR support_source=!support.valid ? (m_profile.forend_point ? "forend" : "line") :
+            AnimatedSupportHand() ? "anim" : m_profile.forend_point ? "forend" : "line";
+        add("support_src=%s",Handgun() ? "cup" : support_source);
+    }
+    if (m_profile.detachable)
+    {
+        const Fvector& axis=m_profile.well_axis;
+        add("mag_side=%.4f well_side_deg=%.1f well_fore_deg=%.1f mag_hold=%d",m_profile.mag_box_center.x-centre,
+            rad2deg(atan2f(axis.x,axis.y)),rad2deg(atan2f(axis.z,axis.y)),!m_hands.maghand_local.empty());
+    }
+    Msg("* [VR align] %s: hud=%s %s",m_weapon.cNameSect().c_str(),m_weapon.HudSection().c_str(),line);
+}
+// What the dumped weapons leave that nothing holds: their HUD models and
+// motions (pooled until cleared) and the skinned vertex copies they shared,
+// which Memory.mem_compact cleans only in a debug memory manager build: a
+// GAMMA dump grew 1.2 MB a weapon and ran out of memory 2500 weapons in.
+// Never the string container: the loaded configs hold strings it does not
+// count, and cleaning it emptied sound entries and keys of weapons GAMMA
+// spawns (the UMP-45's sights, the AS Val), whose loading then asserted.
+static void ReleaseDumpMemory()
+{
+    ::Render->models_Clear(TRUE);
+    g_pMotionsContainer->clean(false);
+    g_pSharedMemoryContainer->clean();
+}
+void CVrWeaponInteraction::DeriveDump(LPCSTR args)
+{
+    if (!g_pGameLevel || !g_player_hud)
+    {
+        Msg("! [VR dump] needs a loaded level");
+        return;
+    }
+    // "resume", and the parts of names to dump. key: the words but resume,
+    // naming the dump a resume continues. "derived" (once: also derive the
+    // weapons with an audited profile) is what every dump does now.
+    bool resume=false;
+    xr_vector<xr_string> parts;
+    xr_string key;
+    string512 word;
+    for (int i=0,n=args ? _GetItemCount(args,' ') : 0;i<n;++i)
+    {
+        _GetItem(args,i,word,' ');
+        if (!*word) continue;
+        if (!xr_strcmp(word,"resume")) { resume=true; continue; }
+        if (key.size()) key+=' ';
+        key+=word;
+        if (xr_strcmp(word,"derived")) parts.push_back(word);
+    }
+    const auto wanted=[&](LPCSTR name)
+    {
+        if (parts.empty()) return true;
+        for (const xr_string& part:parts) if (strstr(name,part.c_str())) return true;
+        return false;
+    };
+    // In section order, so two dumps line up.
+    xr_vector<shared_str> sections;
+    for (const CInifile::Sect& sect:pSettings->sections())
+    {
+        LPCSTR name=sect.Name.c_str();
+        if (strncmp(name,"wpn_",4) || strstr(name,"_hud") || !wanted(name)) continue;
+        if (!pSettings->line_exist(name,"class") || !pSettings->line_exist(name,"hud")) continue;
+        LPCSTR hud=pSettings->r_string(name,"hud");
+        if (!pSettings->section_exist(hud) || !pSettings->line_exist(hud,"item_visual")) continue;
+        sections.push_back(sect.Name);
+    }
+    // The section about to be loaded, kept in a file: one whose own loading
+    // fails an engine assertion (a GAMMA section with an empty sound entry,
+    // never spawned by the game) ends the game, and "resume" goes on after
+    // it in a new one.
+    string_path progress;
+    FS.update_path(progress,"$app_data_root$","vr_derive_dump.txt");
+    size_t first=0;
+    if (resume)
+    {
+        // Its two lines, "args=..." and "section=...". IReader::r_string reads
+        // an empty line as "\r" (it takes a character before looking for the
+        // end): trimmed, and lines are never written empty.
+        xr_string last_key, last_section;
+        if (IReader* file=FS.exist(progress) ? FS.r_open(progress) : nullptr)
+        {
+            file->r_string(last_key);
+            if (!file->eof()) file->r_string(last_section);
+            FS.r_close(file);
+        }
+        const auto clean=[](xr_string& line, LPCSTR prefix)
+        {
+            _Trim(line);
+            if (!line.compare(0,xr_strlen(prefix),prefix)) line.erase(0,xr_strlen(prefix));
+        };
+        clean(last_key,"args=");
+        clean(last_section,"section=");
+        for (size_t n=0;n<sections.size();++n)
+            if (last_section==sections[n].c_str()) first=n+1;
+        if (last_key!=key || !first)
+        {
+            Msg("! [VR dump] nothing to resume for \"%s\"",key.c_str());
+            return;
+        }
+        Msg("* [VR dump] start: %u weapon sections (\"%s\"), resumed at %u",unsigned(sections.size()),key.c_str(),
+            unsigned(first));
+        Msg("* [VR dump] %s",last_section.c_str());
+        Msg("! [VR dump] %s: crashed the game when loaded; resumed after it",last_section.c_str());
+    }
+    else Msg("* [VR dump] start: %u weapon sections (\"%s\")",unsigned(sections.size()),key.c_str());
+    // Every one measured afresh, not taken from an earlier copy.
+    MeasuredCache().clear();
+    // Never drawn: their textures are only registered, not uploaded. Each
+    // model's uploaded to the GPU, and a GAMMA dump's video memory ran out
+    // ("device removed" loading a texture) a few hundred weapons in.
+    Device.m_pRender->DeferredLoad(TRUE);
+    unsigned measured=0, unsupported=0, missing_files=0;
+    for (size_t n=first;n<sections.size();++n)
+    {
+        LPCSTR name=sections[n].c_str();
+        Msg("* [VR dump] %s",name);
+        if (IWriter* file=FS.w_open(progress))
+        {
+            file->w_string((xr_string("args=")+key).c_str());
+            file->w_string((xr_string("section=")+name).c_str());
+            FS.w_close(file);
+        }
+        // A section the game never spawns may name files that do not exist.
+        xr_string missing;
+        if (!HudModelLoadable(pSettings->r_string(pSettings->r_string(name,"hud"),"item_visual"),missing))
+        {
+            Msg("! [VR dump] %s: skipped: %s",name,missing.c_str());
+            ++missing_files;
+            continue;
+        }
+        // Nor one whose loading would assert on an empty sound entry.
+        if (!SoundEntriesFilled(name,missing))
+        {
+            Msg("! [VR dump] %s: skipped: sound entry %s is empty",name,missing.c_str());
+            ++missing_files;
+            continue;
+        }
+        // As the level makes its objects: loaded, never spawned.
+        CObject* object=g_pGamePersistent->ObjectPool.create(name);
+        if (auto* weapon=smart_cast<CWeapon*>(object))
+        {
+            CVrWeaponInteraction probe(weapon);
+            probe.m_dump=true;
+            if (probe.m_supported && probe.EnsureVisual())
+            {
+                ++measured;
+                probe.LogProfileSummary();
+                probe.LogAlignment();
+            }
+            else ++unsupported;
+        }
+        g_pGamePersistent->ObjectPool.destroy(object);
+        // The HUD models and motions nothing holds any more, freed as a
+        // level change frees them: models_Clear(FALSE) only pooled them,
+        // and a GAMMA dump ran out of memory 1400 weapons in.
+        if (n%20==19) ReleaseDumpMemory();
+        if (n%100==99)
+        {
+            // The engine's memory and the renderer's textures: what grows.
+            u32 texture_bytes=0, textures=0, lightmap_bytes=0, lightmaps=0;
+            Device.m_pRender->ResourcesGetMemoryUsage(texture_bytes,textures,lightmap_bytes,lightmaps);
+            Msg("* [VR dump] %u of %u, %u MB in use, %u textures (%u MB)",unsigned(n+1),unsigned(sections.size()),
+                unsigned(Memory.mem_usage()>>20),textures,texture_bytes>>20);
+        }
+    }
+    ReleaseDumpMemory();
+    // As after a level load: textures created meanwhile and still in use
+    // are uploaded now.
+    Device.m_pRender->DeferredLoad(FALSE);
+    Device.m_pRender->ResourcesDeferredUpload();
+    FS.file_delete(progress);
+    Msg("* [VR dump] done: %u measured, %u not supported, %u skipped for missing files or empty entries",measured,
+        unsupported,missing_files);
+}
+void VrDeriveDump(LPCSTR filter)
+{
+    CVrWeaponInteraction::DeriveDump(filter);
 }
 
 xr_string CVrWeaponInteraction::MeasuredKey() const
@@ -2658,48 +3523,524 @@ xr_string CVrWeaponInteraction::MeasuredKey() const
     return key;
 }
 
+namespace
+{
+// ---- Disk cache of derived measurements (appdata\vr_cache) ----------------
+// Bump when the file layout changes. Derivation changes need no bump: the key
+// carries this build's link stamp, so a rebuilt xrGame measures again.
+constexpr u32 vr_cache_format=1;
+constexpr u32 vr_cache_magic=0x43445256; // "VRDC"
+enum : u32 { VrCacheMeasured=1, VrCacheHands=2, VrCacheLive=3 };
+
+u64 VrHash(const void* data, size_t size, u64 hash=0xcbf29ce484222325ull)
+{
+    const u8* bytes=static_cast<const u8*>(data);
+    for (size_t n=0;n<size;++n) { hash^=bytes[n]; hash*=0x100000001b3ull; }
+    return hash;
+}
+xr_string VrHex(u64 value)
+{
+    string32 text; xr_sprintf(text,"%016llx",value);
+    return text;
+}
+// This xrGame build: its link time stamp (with deterministic builds, a hash
+// of its code). Every rebuild measures again.
+extern "C" IMAGE_DOS_HEADER __ImageBase;
+LPCSTR VrBuildStamp()
+{
+    static string32 stamp="";
+    if (!*stamp)
+    {
+        const auto* nt=reinterpret_cast<const IMAGE_NT_HEADERS*>(
+            reinterpret_cast<const u8*>(&__ImageBase)+__ImageBase.e_lfanew);
+        xr_sprintf(stamp,"%08x",unsigned(nt->FileHeader.TimeDateStamp));
+    }
+    return stamp;
+}
+void VrFileStamp(xr_string& out, const CLocatorAPI::file* file, LPCSTR name)
+{
+    string128 item;
+    if (file) xr_sprintf(item,"%s:%u:%u:%u;",name,file->size_real,file->crc,file->modif);
+    else xr_sprintf(item,"%s:-;",name);
+    out+=item;
+}
+// A model file and the motion files it names (sizes, CRCs, dates), once per
+// session per model.
+const xr_string& VrModelStamp(LPCSTR visual)
+{
+    static xr_map<xr_string,xr_string> stamps;
+    const xr_string id=visual ? visual : "";
+    const auto found=stamps.find(id);
+    if (found!=stamps.end()) return found->second;
+    xr_string& stamp=stamps[id];
+    string_path name, fn;
+    if (!strext(id.c_str())) strconcat(sizeof(name),name,id.c_str(),".ogf");
+    else xr_strcpy(name,id.c_str());
+    const CLocatorAPI::file* model=FS.exist(fn,"$level$",name);
+    if (!model) model=FS.exist(fn,"$game_meshes$",name);
+    VrFileStamp(stamp,model,name);
+    IReader* file=model ? FS.r_open(fn) : nullptr;
+    if (!file) return stamp;
+    const auto motion=[&](LPCSTR ref)
+    {
+        if (!*ref) return;
+        if (strstr(ref,"\\*.omf")) { stamp+=ref; stamp+=";"; return; }
+        string_path omf, path;
+        strconcat(sizeof(omf),omf,ref,".omf");
+        const CLocatorAPI::file* found_file=FS.exist(path,"$level$",omf);
+        if (!found_file) found_file=FS.exist(path,"$game_meshes$",omf);
+        VrFileStamp(stamp,found_file,omf);
+    };
+    string_path ref;
+    if (file->find_chunk(OGF_S_MOTION_REFS))
+    {
+        string_path items;
+        file->r_stringZ(items,sizeof(items));
+        for (int k=0,count=_GetItemCount(items);k<count;++k) motion(_GetItem(items,k,ref));
+    }
+    else if (file->find_chunk(OGF_S_MOTION_REFS2))
+        for (u32 k=0,count=file->r_u32();k<count;++k) { file->r_stringZ(ref,sizeof(ref)); motion(ref); }
+    FS.r_close(file);
+    return stamp;
+}
+// Every line of a config section, hashed (once per session per section).
+xr_string VrSectionStamp(const shared_str& section)
+{
+    static xr_map<xr_string,xr_string> stamps;
+    const xr_string id=section.size() ? section.c_str() : "";
+    const auto found=stamps.find(id);
+    if (found!=stamps.end()) return found->second;
+    u64 hash=VrHash(id.data(),id.size());
+    if (section.size() && pSettings->section_exist(section))
+        for (const auto& item:pSettings->r_section(section).Data)
+        {
+            if (item.first.size()) hash=VrHash(item.first.c_str(),item.first.size(),hash);
+            hash=VrHash("=",1,hash);
+            if (item.second.size()) hash=VrHash(item.second.c_str(),item.second.size(),hash);
+            hash=VrHash("\n",1,hash);
+        }
+    return stamps[id]=VrHex(hash);
+}
+// The override file: its [vr_derivation] name lists steer derivation.
+const xr_string& VrConfigStamp()
+{
+    static xr_string stamp;
+    static bool done=false;
+    if (!done)
+    {
+        done=true;
+        string_path fn;
+        VrFileStamp(stamp,FS.exist(fn,"$game_config$","vr\\vr_weapon_mechanics.ltx"),"vr_weapon_mechanics.ltx");
+    }
+    return stamp;
+}
+// The cache folder; files from other builds are deleted on first use.
+const xr_string& VrCacheFolder()
+{
+    static xr_string folder;
+    if (folder.size()) return folder;
+    string_path path;
+    FS.update_path(path,"$app_data_root$","vr_cache\\");
+    folder=path;
+    CreateDirectoryA(folder.c_str(),nullptr);
+    WIN32_FIND_DATAA found;
+    const xr_string pattern=folder+"*.bin";
+    HANDLE search=FindFirstFileA(pattern.c_str(),&found);
+    if (search!=INVALID_HANDLE_VALUE)
+    {
+        unsigned removed=0;
+        do
+            // Captures of the game's own hold (live_) do not depend on the build.
+            if (strncmp(found.cFileName,VrBuildStamp(),xr_strlen(VrBuildStamp())) &&
+                strncmp(found.cFileName,"live_",5))
+            {
+                DeleteFileA((folder+found.cFileName).c_str());
+                ++removed;
+            }
+        while (FindNextFileA(search,&found));
+        FindClose(search);
+        if (removed) Msg("* [VR cache] %u entries of other builds removed",removed);
+    }
+    return folder;
+}
+xr_string VrCachePath(u32 kind, const xr_string& key)
+{
+    const xr_string hash=VrHex(VrHash(key.data(),key.size()));
+    if (kind==VrCacheLive) return VrCacheFolder()+"live_"+hash+".bin";
+    return VrCacheFolder()+VrBuildStamp()+(kind==VrCacheHands ? "_h_" : "_m_")+hash+".bin";
+}
+
+// One visitor per struct lists every field once, for both directions.
+struct VrDiskWriter
+{
+    xr_vector<u8> data;
+    void bytes(const void* p, size_t n) { const u8* b=static_cast<const u8*>(p); data.insert(data.end(),b,b+n); }
+    template<class T> std::enable_if_t<std::is_trivially_copyable<T>::value> operator()(const T& value)
+    { bytes(&value,sizeof(T)); }
+    void operator()(const shared_str& value)
+    {
+        const u32 size=u32(value.size());
+        bytes(&size,sizeof(size));
+        if (size) bytes(value.c_str(),size);
+    }
+    void operator()(const xr_string& value)
+    {
+        const u32 size=u32(value.size());
+        bytes(&size,sizeof(size));
+        if (size) bytes(value.data(),size);
+    }
+    template<class T, class Alloc> void operator()(const std::vector<T,Alloc>& value)
+    {
+        const u32 size=u32(value.size());
+        bytes(&size,sizeof(size));
+        for (const T& item:value) (*this)(item);
+    }
+    template<class T> void operator()(const std::optional<T>& value)
+    {
+        const u8 has=value ? 1 : 0;
+        bytes(&has,1);
+        if (has) (*this)(*value);
+    }
+    template<class T,size_t N> void operator()(const T (&value)[N]) { for (const T& item:value) (*this)(item); }
+    void operator()(const vr::ActionPath& path) { (*this)(path.grab); (*this)(path.rear); (*this)(path.arc); (*this)(path.length); }
+};
+struct VrDiskReader
+{
+    const u8* at=nullptr;
+    const u8* end=nullptr;
+    bool ok=true;
+    bool bytes(void* p, size_t n)
+    {
+        if (!ok || size_t(end-at)<n) { ok=false; return false; }
+        memcpy(p,at,n); at+=n;
+        return true;
+    }
+    template<class T> std::enable_if_t<std::is_trivially_copyable<T>::value> operator()(T& value) { bytes(&value,sizeof(T)); }
+    void operator()(shared_str& value)
+    {
+        u32 size=0;
+        if (!bytes(&size,sizeof(size)) || size_t(end-at)<size) { ok=false; return; }
+        value=size ? shared_str(xr_string(reinterpret_cast<const char*>(at),size).c_str()) : shared_str();
+        at+=size;
+    }
+    void operator()(xr_string& value)
+    {
+        u32 size=0;
+        if (!bytes(&size,sizeof(size)) || size_t(end-at)<size) { ok=false; return; }
+        value.assign(reinterpret_cast<const char*>(at),size);
+        at+=size;
+    }
+    template<class T, class Alloc> void operator()(std::vector<T,Alloc>& value)
+    {
+        u32 size=0;
+        // No more items than there are bytes left: a damaged file fails.
+        if (!bytes(&size,sizeof(size)) || size>size_t(end-at)) { ok=false; return; }
+        value.resize(size);
+        for (T& item:value) { (*this)(item); if (!ok) return; }
+    }
+    template<class T> void operator()(std::optional<T>& value)
+    {
+        u8 has=0;
+        if (!bytes(&has,1)) return;
+        if (!has) { value.reset(); return; }
+        T item{};
+        (*this)(item);
+        value=item;
+    }
+    template<class T,size_t N> void operator()(T (&value)[N]) { for (T& item:value) (*this)(item); }
+    void operator()(vr::ActionPath& path) { (*this)(path.grab); (*this)(path.rear); (*this)(path.arc); (*this)(path.length); }
+};
+
+// Every field, in declaration order. A field added to these structs must be
+// added here: the size checks below fail until it is.
+template<class A, class P> void VisitProfile(A& a, P& p)
+{
+    a(p.section); a(p.visual); a(p.mag_bone); a(p.cycle_bone); a(p.rounds_bone);
+    a(p.reload_magazines); a(p.reload_magazine_mask);
+    a(p.rest_local); a(p.rest_contents);
+    a(p.thrown_mask); a(p.case_bone); a(p.case_center); a(p.case_half);
+    a(p.handle_bone); a(p.bolt_travel);
+    a(p.cycle_from_reload); a(p.manual_cycle); a(p.open_bolt); a(p.open_bolt_static); a(p.shot_moves_magazine);
+    a(p.internal_rounds);
+    a(p.action_path); a(p.path_bones); a(p.path_poses);
+    a(p.dust_cover_bone); a(p.dust_cover_open); a(p.dust_cover_grab);
+    a(p.release_point);
+    a(p.evidence);
+    a(p.mag_extra_bones);
+    a(p.grip_offset); a(p.support_offset); a(p.mag_grip); a(p.mag_base); a(p.cycle_grab);
+    a(p.cycle_grab_mirror); a(p.forend_point);
+    a(p.muzzle); a(p.shell_point); a(p.muzzle_silencer); a(p.muzzle2);
+    a(p.has_muzzle_silencer); a(p.has_muzzle2);
+    a(p.launcher_grab);
+    a(p.mag_box_half); a(p.mag_box_center);
+    a(p.cycle_travel); a(p.extraction); a(p.grab_radius); a(p.guide_radius);
+    a(p.travel_limit); a(p.locks_on_empty);
+    a(p.hand_grip_angle); a(p.hand_grip_radius); a(p.hand_grip_center); a(p.trigger_point);
+    a(p.automatic); a(p.derived); a(p.break_action);
+    a(p.hinge_bone); a(p.shell_bones); a(p.loose_round_visual);
+    a(p.hinge_angle); a(p.hinge_point); a(p.shell_center); a(p.shell_box_half);
+    a(p.tube); a(p.loading_port); a(p.pump_grab); a(p.pump_bone); a(p.pump_travel);
+    a(p.hidden_parts);
+    a(p.well_axis); a(p.explicit_well_axis);
+    a(p.part_count); a(p.parts); a(p.part_names); a(p.part_bones); a(p.part_from_animation);
+    a(p.rules); a(p.belt); a(p.belt_free_bone);
+    a(p.belt_chain_ids); a(p.belt_link_of);
+    a(p.bore_height); a(p.grip_from_mesh); a(p.grip_wrist_lift);
+    a(p.two_handed); a(p.detachable); a(p.chamber); a(p.slide_stop);
+}
+template<class A, class M> void VisitModel(A& a, M& m)
+{
+    a(m.cloud); a(m.glass); a(m.lens_meshes); a(m.glass_dot); a(m.glass_soft);
+    a(m.optic_cloud); a(m.mesh_shaders); a(m.scope_hidden);
+    a(m.bind_local); a(m.state_local); a(m.state_part);
+    a(m.trigger_bone); a(m.trigger_valid); a(m.trigger_pull);
+}
+// What a capture of the game's own hold sets (CaptureLiveHands).
+template<class A, class H> void VisitLiveHands(A& a, H& h)
+{
+    a(h.authored); a(h.hand_in_item); a(h.hands_local); a(h.index_trigger); a(h.hand_trigger);
+}
+template<class A, class H> void VisitHands(A& a, H& h)
+{
+    a(h.authored); a(h.hands_local); a(h.maghand_local);
+    a(h.hand_in_item); a(h.maghand_in_root); a(h.maghand_basis); a(h.maghand_palm);
+    a(h.handle_hand); a(h.handle_hand_valid); a(h.palm_trusted); a(h.visual);
+    a(h.carry);
+    a(h.index_trigger); a(h.hand_trigger); a(h.live);
+    a(h.aim_eye); a(h.aim_dir); a(h.aim_valid);
+}
+
+bool VrCacheWrite(u32 kind, const xr_string& key, const VrDiskWriter& payload)
+{
+    VrDiskWriter file;
+    file(vr_cache_magic); file(vr_cache_format); file(kind); file(key);
+    file.bytes(payload.data.data(),payload.data.size());
+    file(vr_cache_magic);
+    // Written whole, then moved over the old one: never read half written.
+    const xr_string path=VrCachePath(kind,key), temporary=path+".tmp";
+    FILE* out=nullptr;
+    if (fopen_s(&out,temporary.c_str(),"wb") || !out) return false;
+    const bool written=fwrite(file.data.data(),1,file.data.size(),out)==file.data.size();
+    fclose(out);
+    if (!written || !MoveFileExA(temporary.c_str(),path.c_str(),MOVEFILE_REPLACE_EXISTING))
+    {
+        DeleteFileA(temporary.c_str());
+        return false;
+    }
+    return true;
+}
+// The entry for this key, its payload in `reader` (false: none or damaged).
+bool VrCacheRead(u32 kind, const xr_string& key, xr_vector<u8>& data, VrDiskReader& reader)
+{
+    FILE* in=nullptr;
+    if (fopen_s(&in,VrCachePath(kind,key).c_str(),"rb") || !in) return false;
+    fseek(in,0,SEEK_END);
+    const long size=ftell(in);
+    fseek(in,0,SEEK_SET);
+    data.resize(size>0 ? size_t(size) : 0);
+    const bool read=size>0 && fread(data.data(),1,data.size(),in)==data.size();
+    fclose(in);
+    if (!read) return false;
+    reader.at=data.data();
+    reader.end=data.data()+data.size();
+    u32 magic=0, format=0, stored_kind=0;
+    xr_string stored_key;
+    reader(magic); reader(format); reader(stored_kind); reader(stored_key);
+    // The full key, not only its hash, must match.
+    return reader.ok && magic==vr_cache_magic && format==vr_cache_format && stored_kind==kind && stored_key==key;
+}
+bool VrCacheEnd(VrDiskReader& reader)
+{
+    u32 magic=0;
+    reader(magic);
+    return reader.ok && magic==vr_cache_magic && reader.at==reader.end;
+}
+}
+
+xr_string CVrWeaponInteraction::DiskKey(bool hands) const
+{
+    xr_string key="vr_cache|";
+    key.append(VrBuildStamp()).append("|").append(MeasuredKey());
+    key.append("|weapon=").append(VrSectionStamp(m_weapon.cNameSect()));
+    key.append("|hud=").append(m_weapon.HudSection().c_str()).append(":").append(VrSectionStamp(m_weapon.HudSection()));
+    key.append("|model=").append(VrModelStamp(m_profile.visual.c_str()));
+    key.append("|config=").append(VrConfigStamp());
+    if (hands && g_player_hud)
+    {
+        const shared_str& section=g_player_hud->section_name();
+        key.append("|hands=").append(section.c_str()).append(":").append(VrSectionStamp(section));
+        if (pSettings->line_exist(section,"visual"))
+            key.append("|hands_model=").append(VrModelStamp(pSettings->r_string(section,"visual")));
+    }
+    return key;
+}
+
+bool CVrWeaponInteraction::LoadMeasuredFromDisk(const xr_string& memory_key)
+{
+    CTimer timer; timer.Start();
+    const xr_string key=DiskKey(false);
+    xr_vector<u8> data;
+    VrDiskReader reader;
+    if (!VrCacheRead(VrCacheMeasured,key,data,reader)) return false;
+    auto measured=std::make_shared<Measured>();
+    VisitProfile(reader,measured->profile);
+    reader(measured->basic_magazine);
+    VisitModel(reader,measured->model);
+    // The section and model it was keyed by: a match in all but these is
+    // not this weapon's.
+    if (!VrCacheEnd(reader) || measured->profile.section!=m_profile.section ||
+        measured->profile.visual!=m_profile.visual)
+    {
+        Warn("disk cache entry for it is damaged; measuring again");
+        return false;
+    }
+    MeasuredCache()[memory_key]=measured;
+    Note("measurements read from the disk cache in %.1f ms",timer.GetElapsed_sec()*1000.f);
+    return true;
+}
+void CVrWeaponInteraction::SaveMeasuredToDisk() const
+{
+#if defined(_WIN64) && _ITERATOR_DEBUG_LEVEL==0
+    // A field added to one of these must be added to its visitor
+    // (VisitProfile, VisitModel, VisitHands), then the size here updated.
+    static_assert(sizeof(Profile)==1520,"Profile changed: update VisitProfile");
+    static_assert(sizeof(ModelMeasurements)==392,"ModelMeasurements changed: update VisitModel");
+    static_assert(sizeof(SampledHands)==704,"SampledHands changed: update VisitHands");
+#endif
+    if (!m_profile.section.size() || !m_profile.visual.size()) return;
+    CTimer timer; timer.Start();
+    VrDiskWriter payload;
+    VisitProfile(payload,m_profile);
+    payload(m_basic_magazine);
+    VisitModel(payload,m_model_data);
+    if (VrCacheWrite(VrCacheMeasured,DiskKey(false),payload))
+        Note("measurements written to the disk cache (%u KB, %.1f ms)",unsigned(payload.data.size()>>10),
+            timer.GetElapsed_sec()*1000.f);
+}
+bool CVrWeaponInteraction::LoadHandsFromDisk()
+{
+    if (!g_player_hud) return false;
+    xr_vector<u8> data;
+    VrDiskReader reader;
+    if (!VrCacheRead(VrCacheHands,DiskKey(true),data,reader)) return false;
+    SampledHands hands;
+    VisitHands(reader,hands);
+    if (!VrCacheEnd(reader)) return false;
+    m_hands=hands;
+    return true;
+}
+namespace
+{
+// The lines of a section a hold in the hands depends on, hashed: for a
+// weapon's HUD section the idle the hands play (as the game shows it at
+// rest, not aimed, moving or sprinting), how the weapon hangs from them
+// (item_position/orientation, the attach bone, the left-hand lead); for a
+// hands section the anchor bones the weapon hangs from. GAMMA variants that
+// differ only in name, sights, sounds or stats share one capture.
+xr_string VrHoldStamp(const shared_str& section)
+{
+    u64 hash=VrHash("hold",4);
+    if (section.size() && pSettings->section_exist(section))
+        for (const auto& item:pSettings->r_section(section).Data)
+        {
+            LPCSTR key=item.first.c_str();
+            if (!key) continue;
+            const bool idle=!strncmp(key,"anm_idle",8) && !strstr(key,"aim") && !strstr(key,"moving") &&
+                !strstr(key,"sprint") && !strstr(key,"crouch") && !strstr(key,"bore");
+            const bool hangs=!strncmp(key,"item_position",13) || !strncmp(key,"item_orientation",16) ||
+                !xr_strcmp(key,"attach_place_idx") || !xr_strcmp(key,"lh_lead_gun") || !strncmp(key,"ancor_",6);
+            if (!idle && !hangs) continue;
+            hash=VrHash(key,xr_strlen(key),hash);
+            hash=VrHash("=",1,hash);
+            if (item.second.size()) hash=VrHash(item.second.c_str(),item.second.size(),hash);
+            hash=VrHash("\n",1,hash);
+        }
+    return VrHex(hash);
+}
+}
+xr_string CVrWeaponInteraction::LiveKey(bool by_section) const
+{
+    // Format 1: what VisitLiveHands stores, in hands model space mapped onto
+    // the weapon's receiver at its bind place. Keyed by what the hold
+    // depends on (VrHoldStamp, the model and its motions, the hands model);
+    // by_section: the key captures were first written under, by HUD and
+    // hands section names and every line of both.
+    xr_string key="vr_live|3";
+    if (by_section)
+        key.append("|hud=").append(m_weapon.HudSection().c_str()).append(":").append(VrSectionStamp(m_weapon.HudSection()));
+    else key.append("|hold=").append(VrHoldStamp(m_weapon.HudSection()));
+    key.append("|model=").append(VrModelStamp(m_profile.visual.c_str()));
+    if (g_player_hud)
+    {
+        const shared_str& section=g_player_hud->section_name();
+        if (by_section) key.append("|hands=").append(section.c_str()).append(":").append(VrSectionStamp(section));
+        else key.append("|hands=").append(VrHoldStamp(section));
+        if (pSettings->line_exist(section,"visual"))
+            key.append("|hands_model=").append(VrModelStamp(pSettings->r_string(section,"visual")));
+    }
+    return key;
+}
+bool CVrWeaponInteraction::ApplyLiveHands()
+{
+    if (m_hands.live || !g_player_hud || m_profile.visual.size()==0) return false;
+    xr_vector<u8> data;
+    VrDiskReader reader;
+    // One taken before captures were shared between variants is moved to
+    // the shared key.
+    bool moved=false;
+    if (!VrCacheRead(VrCacheLive,LiveKey(),data,reader))
+    {
+        if (!VrCacheRead(VrCacheLive,LiveKey(true),data,reader)) return false;
+        moved=true;
+    }
+    SampledHands hands=m_hands;
+    VisitLiveHands(reader,hands);
+    if (!VrCacheEnd(reader)) return false;
+    m_hands=hands;
+    m_hands.live=true;
+    m_hands.palm_trusted=true;
+    m_slide_along=-1.f;
+    m_support_hold.reset();
+    Note("hold as captured from the game's own hands earlier (disk cache)");
+    if (moved) SaveLiveHands();
+    return true;
+}
+void CVrWeaponInteraction::SaveLiveHands() const
+{
+    VrDiskWriter payload;
+    VisitLiveHands(payload,m_hands);
+    VrCacheWrite(VrCacheLive,LiveKey(),payload);
+}
+
+void CVrWeaponInteraction::SaveHandsToDisk() const
+{
+    if (!g_player_hud || !m_profile.section.size()) return;
+    VrDiskWriter payload;
+    VisitHands(payload,m_hands);
+    VrCacheWrite(VrCacheHands,DiskKey(true),payload);
+}
+
 void CVrWeaponInteraction::StoreMeasured(const xr_string& key) const
 {
     auto measured=std::make_shared<Measured>();
     measured->profile=m_profile;
     measured->basic_magazine=m_basic_magazine;
-    measured->cloud=m_cloud; measured->optic_cloud=m_optic_cloud;
-    measured->glass=m_glass; measured->lens_meshes=m_lens_meshes;
-    measured->glass_dot=m_glass_dot; measured->glass_soft=m_glass_soft;
-    measured->mesh_shaders=m_mesh_shaders;
-    for (int i=0;i<3;++i) { measured->scope_hidden[i]=m_scope_hidden[i]; measured->state_local[i]=m_state_local[i]; }
-    measured->bind_local=m_bind_local;
-    measured->state_part=m_state_part;
-    for (int i=0;i<2;++i)
-    {
-        measured->trigger_bone[i]=m_trigger_bone[i];
-        measured->trigger_valid[i]=m_trigger_valid[i];
-        measured->trigger_pull[i]=m_trigger_pull[i];
-    }
+    measured->model=m_model_data;
     MeasuredCache()[key]=measured;
 }
 
 bool CVrWeaponInteraction::RestoreMeasured(IKinematics& model, const xr_string& key)
 {
-    const auto found=MeasuredCache().find(key);
+    auto found=MeasuredCache().find(key);
+    // Not measured this session: as an earlier session measured it, if the
+    // disk cache has it for this very model, sections, hands and build.
+    if (found==MeasuredCache().end() && !m_dump && LoadMeasuredFromDisk(key)) found=MeasuredCache().find(key);
     if (found==MeasuredCache().end()) return false;
     const Measured& measured=*found->second;
     // Measured pristine, before any classification changed it.
     m_profile=measured.profile;
     m_basic_magazine=measured.basic_magazine;
-    m_cloud=measured.cloud; m_optic_cloud=measured.optic_cloud;
-    m_glass=measured.glass; m_lens_meshes=measured.lens_meshes;
-    m_glass_dot=measured.glass_dot; m_glass_soft=measured.glass_soft;
-    m_mesh_shaders=measured.mesh_shaders;
-    for (int i=0;i<3;++i) { m_scope_hidden[i]=measured.scope_hidden[i]; m_state_local[i]=measured.state_local[i]; }
-    m_bind_local=measured.bind_local;
-    m_state_part=measured.state_part;
-    for (int i=0;i<2;++i)
-    {
-        m_trigger_bone[i]=measured.trigger_bone[i];
-        m_trigger_valid[i]=measured.trigger_valid[i];
-        m_trigger_pull[i]=measured.trigger_pull[i];
-    }
+    m_model_data=measured.model;
     // This weapon's own loaded barrels (MeasureParts).
     m_break_state=unsigned(m_weapon.m_magazine.size());
     // The contact geometry has its own cache: this only takes it up.
@@ -2718,7 +4059,16 @@ VrClipSampler& CVrWeaponInteraction::Clips(std::unique_ptr<VrClipSampler>& local
 bool CVrWeaponInteraction::EnsureVisual()
 {
     if (m_visual) return true;
-    m_visual=::Render->model_Create(m_profile.visual.c_str());
+    {
+        // Prepared ahead (a hand reached for it): its textures may still be
+        // loading on the renderer's worker; the copy is made once they are.
+        VrPrewarmWait(m_profile.visual.c_str(),m_weapon.cNameSect().c_str());
+        CTimer load; load.Start();
+        const u32 textures_before=VrTextureBytes();
+        m_visual=::Render->model_Create(m_profile.visual.c_str());
+        VrNoteWorkLoaded("VR copy of the HUD model: load",m_weapon.cNameSect().c_str(),load.GetElapsed_sec()*1000.f,
+            textures_before);
+    }
     if (!m_visual) { m_supported=false; return false; }
     if (auto* skeleton=m_visual->dcast_PKinematics())
     {
@@ -2732,7 +4082,7 @@ bool CVrWeaponInteraction::EnsureVisual()
         const bool derived=m_profile.automatic || m_profile.derived;
         const xr_string key=derived ? MeasuredKey() : xr_string();
         if (derived && RestoreMeasured(*skeleton,key))
-            Msg("* [VR weapon] %s: measured as an earlier copy in %.1f ms",m_profile.section.c_str(),
+            Note("measured as an earlier copy in %.1f ms",
                 measure.GetElapsed_sec()*1000.f);
         else
         {
@@ -2740,13 +4090,23 @@ bool CVrWeaponInteraction::EnsureVisual()
             else CacheReloadMagazines(*skeleton);
             MeasureLauncher(*skeleton);
             if (!ValidateModel(*skeleton))
-            { ReleaseModels(); m_supported=false; return false; }
+            {
+                ReleaseModels();
+                m_supported=false;
+                return false;
+            }
             MeasureGeometry(*skeleton);
             MeasureParts(*skeleton);
             MeasurePartMotion(*skeleton);
-            Msg("* [VR weapon] %s: measured on first draw in %.1f ms",m_profile.section.c_str(),
+            Note("measured on first draw in %.1f ms",
                 measure.GetElapsed_sec()*1000.f);
-            if (derived) StoreMeasured(key);
+            VrNoteWork("measuring the HUD model",m_weapon.cNameSect().c_str(),measure.GetElapsed_sec()*1000.f);
+            // Not for DeriveDump: thousands of weapons' point clouds, used
+            // by nothing after it, ran the game out of memory.
+            if (derived && !m_dump) StoreMeasured(key);
+            // On disk, also from DeriveDump: it fills the cache for a pack.
+            // Not when it derives audited weapons as if they had no profile.
+            if (derived) SaveMeasuredToDisk();
         }
         // What the weapon is mechanically, each time it is measured (the
         // profile it sets is measured again with the model).
@@ -2758,44 +4118,42 @@ bool CVrWeaponInteraction::EnsureVisual()
             LPCSTR strategy=m_profile.part_count || m_profile.belt.used || !m_profile.rules.Empty() ?
                 "interactive procedure" : m_profile.detachable ? "physical magazine" :
                 (m_profile.break_action || m_profile.tube) ? "physical shells" : "native reload";
-            Msg("* [VR weapon] %s: reload strategy: %s (parts %d, belt %d)",m_profile.section.c_str(),
+            Note("reload strategy: %s (parts %d, belt %d)",
                 strategy,m_profile.part_count,m_profile.belt.used);
         }
     }
     else
     {
-        Msg("! [VR weapon] %s: model is not skeletal",m_profile.section.c_str());
+        Warn("model is not skeletal");
         ReleaseModels(); m_supported=false; return false;
     }
     return true;
 }
 
-xr_string CVrWeaponInteraction::MagazineVisualName(unsigned rounds) const
+xr_string CVrWeaponInteraction::MagazineVisualName(unsigned) const
 {
-    if (!m_profile.magazine_visual_prefix.size()) return m_profile.visual.c_str();
-    string_path name;
-    xr_sprintf(name,"%s%u.ogf",m_profile.magazine_visual_prefix.c_str(),
-        std::min(rounds,m_profile.magazine_visual_max_rounds));
-    return name;
+    // The weapon's own model, its magazine shown alone (one copy for any
+    // round count: the rounds are its bones).
+    return m_profile.visual.c_str();
 }
 
 bool CVrWeaponInteraction::EnsureMagazineVisual(unsigned rounds)
 {
-    const unsigned variant=m_profile.magazine_visual_prefix.size() ?
-        std::min(rounds,m_profile.magazine_visual_max_rounds) : 0;
+    const unsigned variant=0;
     if (m_mag_visual && m_mag_visual_count==variant) return true;
     ReleaseModel(m_mag_visual);
+    m_pose_cache[1].Reset();
     m_mag_visual_count=unsigned(-1);
     const xr_string name=MagazineVisualName(rounds);
     m_mag_visual=::Render->model_Create(name.c_str());
     if (!m_mag_visual || !m_mag_visual->dcast_PKinematics())
     {
-        Msg("! [VR weapon] %s: magazine visual %s unavailable",m_profile.section.c_str(),name.c_str());
+        Warn("magazine visual %s unavailable",name.c_str());
         ReleaseModel(m_mag_visual);
         return false;
     }
     m_mag_visual_count=variant;
-    Msg("* [VR weapon] %s: magazine mesh %s for %u rounds",m_profile.section.c_str(),name.c_str(),rounds);
+    Note("magazine mesh %s for %u rounds",name.c_str(),rounds);
     return true;
 }
 
@@ -2803,6 +4161,8 @@ unsigned CVrWeaponInteraction::PreviewRoundCount() const
 {
     if (m_weapon.unlimited_ammo()) return unsigned(std::max(0,m_weapon.iMagazineSize));
     if (!m_weapon.m_pInventory) return 0;
+    if (m_preview_frame==Device.dwFrame) return m_preview_result;
+    m_preview_frame=Device.dwFrame;
     // The pouch's rounds fill it (FillMagazine); any type when there are none.
     unsigned available=0, chosen=0;
     const shared_str pouch=m_weapon.m_ammoTypes.empty() ? shared_str() : m_weapon.m_ammoTypes[PouchAmmo()];
@@ -2814,11 +4174,18 @@ unsigned CVrWeaponInteraction::PreviewRoundCount() const
             available+=box->m_boxCurr;
             if (box->cNameSect()==pouch) chosen+=box->m_boxCurr;
         }
-    return std::min(chosen ? chosen : available,unsigned(std::max(0,m_weapon.iMagazineSize)));
+    return m_preview_result=std::min(chosen ? chosen : available,unsigned(std::max(0,m_weapon.iMagazineSize)));
 }
 
 bool CVrWeaponInteraction::Render()
 {
+    struct Timed
+    {
+        CTimer timer;
+        const CWeapon& weapon;
+        explicit Timed(const CWeapon& w) : weapon(w) { timer.Start(); }
+        ~Timed() { VrNoteWork("VR draw (posing included)",weapon.cNameSect().c_str(),timer.GetElapsed_sec()*1000.f); }
+    } timed(m_weapon);
     if (!Mode())
     {
         // An unprofiled weapon must not fall through to the flat desktop HUD
@@ -2844,6 +4211,7 @@ bool CVrWeaponInteraction::Render()
         Fmatrix world;
         if (!GenericTransform(world)) return false;
         vr::HideHandForFrame(HandOf(1));
+        NoteDrawn(HandOf(1) ? "in the right hand (world model)" : "in the left hand (world model)");
         ::Render->set_Transform(&world);
         ::Render->add_Visual(m_weapon.Visual());
         return true;
@@ -2851,6 +4219,8 @@ bool CVrWeaponInteraction::Render()
     Fmatrix world;
     if (!Transform(world)) return true;
     vr::HideHandForFrame(HandOf(1));
+    NoteDrawn(m_carried ? (HandOf(1) ? "carried by the right hand" : "carried by the left hand") :
+        HandOf(1) ? "in the right hand" : "in the left hand");
     if (m_mechanism.held>=0 || m_racking || m_supporting || m_shell_held)
         vr::HideHandForFrame(HandOf(0));
     if (!EnsureVisual()) return false;
@@ -2862,27 +4232,49 @@ bool CVrWeaponInteraction::Render()
     EnsurePosed(*model);
     ::Render->set_Transform(&world);
     ::Render->add_Visual(m_visual);
+    bool round_drawn=false;
     Fmatrix shell_pose;
     if (ShellLoading() && m_shell_held &&
-        (m_profile.shell_bones[1].size() || m_profile.loose_round_visual.size()) && ShellHandPose(shell_pose))
+        (m_profile.shell_bones[1].size() || m_profile.loose_round_visual.size()))
     {
         const bool loose=m_profile.loose_round_visual.size()!=0;
-        if (!m_shell_visual) m_shell_visual=::Render->model_Create(
-            loose ? m_profile.loose_round_visual.c_str() : m_profile.visual.c_str());
-        if (auto* shell=m_shell_visual ? m_shell_visual->dcast_PKinematics() : nullptr)
+        const shared_str visual=loose ? m_profile.loose_round_visual : m_profile.visual;
+        if (m_shell_visual_name!=visual)
         {
-            shell->Callback(CollapseHiddenBones,nullptr);
-            vr::ApplyWeaponPose(*shell,m_shell_poses,BonePose,bctCustom,nullptr,0.f,nullptr,
-                {m_profile.shell_bones[1].c_str()},!loose,true,true);
-            auto& vis=m_shell_visual->getVisData();
-            vis.box.min.sub(m_profile.shell_center[1],m_profile.shell_box_half);
-            vis.box.max.add(m_profile.shell_center[1],m_profile.shell_box_half);
-            vis.box.getsphere(vis.sphere.P,vis.sphere.R);
-            ::Render->set_Transform(&shell_pose);
-            ::Render->add_Visual(m_shell_visual);
+            ReleaseModel(m_shell_visual);
+            m_shell_pose_cache.Reset();
+            m_shell_visual_name=visual;
+        }
+        if (!m_shell_visual) m_shell_visual=::Render->model_Create(
+            visual.c_str());
+        // A changed profile must not hide every bone of a stale model.
+        auto* shell=m_shell_visual ? m_shell_visual->dcast_PKinematics() : nullptr;
+        const bool skinned=shell && (loose || shell->LL_BoneID(m_profile.shell_bones[1].c_str())<shell->LL_BoneCount());
+        // A dedicated cartridge need not have a skeleton.
+        if (skinned || (loose && m_shell_visual))
+        {
+            // Measured first: the hold puts its middle in the fist.
+            MeasureHeldRound(m_shell_visual,visual,loose ? nullptr : m_profile.shell_bones[1].c_str());
+            if (ShellHandPose(shell_pose))
+            {
+                if (skinned)
+                {
+                    shell->Callback(CollapseHiddenBones,nullptr);
+                    vr::ApplyWeaponPose(*shell,m_shell_poses,BonePose,bctCustom,nullptr,0.f,nullptr,
+                        {m_profile.shell_bones[1].c_str()},!loose,true,true,nullptr,{}, {},nullptr,0.f,{},true,
+                        &m_shell_pose_cache,Device.dwFrame);
+                    auto& vis=m_shell_visual->getVisData();
+                    vis.box.min.sub(RoundCentre(),m_profile.shell_box_half);
+                    vis.box.max.add(RoundCentre(),m_profile.shell_box_half);
+                    vis.box.getsphere(vis.sphere.P,vis.sphere.R);
+                }
+                ::Render->set_Transform(&shell_pose);
+                ::Render->add_Visual(m_shell_visual);
+                round_drawn=true;
+            }
         }
     }
-    else if (ShellLoading() && m_shell_held &&
+    if (!round_drawn && ShellLoading() && m_shell_held &&
         (m_pouch_visual || (m_weapon.m_ammoTypes.size() && [&]()
         {
             const shared_str& ammo=m_weapon.m_ammoTypes[PouchAmmo()];
@@ -2895,13 +4287,12 @@ bool CVrWeaponInteraction::Render()
         }())))
     {
         // No round in the weapon's model (a launcher's grenade): the
-        // ammunition's own model, in the support hand.
-        Fmatrix hand;
-        if (vr::HandTransform(HandOf(0),false,hand))
+        // ammunition's own model, in the fist as a round is (it was drawn
+        // 9 cm off the hand).
+        MeasureHeldRound(m_pouch_visual,m_pouch_section,nullptr);
+        if (ShellHandPose(shell_pose))
         {
-            Fmatrix pose=hand;
-            pose.c.mad(hand.k,0.09f);
-            ::Render->set_Transform(&pose);
+            ::Render->set_Transform(&shell_pose);
             ::Render->add_Visual(m_pouch_visual);
         }
     }
@@ -2919,7 +4310,7 @@ bool CVrWeaponInteraction::Render()
         // The extracted PM mesh retains the stock skeletal hierarchy. Apply
         // the same audited bind pose as the equipped pistol: using its default
         // animation pose offsets the loose magazine from the well.
-        Pose(*magazine,m_poses[1],true,mag_count>0);
+        Pose(*magazine,m_poses[1],true,mag_count>0,&m_pose_cache[1]);
         auto& vis=m_mag_visual->getVisData();
         vis.box.min.set(m_profile.mag_box_center.x-m_profile.mag_box_half.x,
             m_profile.mag_box_center.y-m_profile.mag_box_half.y,
@@ -2936,7 +4327,7 @@ bool CVrWeaponInteraction::Render()
         if (auto* magazine=m_eject_visual->dcast_PKinematics())
         {
             Fmatrix pose; pose.mul_43(world,ToMatrix(m_contact->path.At(m_eject_s)));
-            Pose(*magazine,m_eject_poses,true,!m_mechanism.magazines[m_ejecting].empty());
+            Pose(*magazine,m_eject_poses,true,!m_mechanism.magazines[m_ejecting].empty(),&m_eject_pose_cache);
             auto& vis=m_eject_visual->getVisData();
             vis.box.min.sub(m_profile.mag_box_center,m_profile.mag_box_half);
             vis.box.max.add(m_profile.mag_box_center,m_profile.mag_box_half);
@@ -2952,7 +4343,9 @@ Fmatrix CVrWeaponInteraction::HolsterPose(CActor& actor) const
     const Fmatrix body=VrTorsoFrame(actor);
     Fmatrix pose; pose.identity();
     pose.i=body.i; pose.j=body.k; pose.k.set(0,-1,0);
-    pose.c=HolsterPoint(actor);
+    float range=0.f;
+    pose.c.set(0,0,0);
+    SlotHolster(actor,pose.c,range);
     Fvector grip=m_profile.grip_offset;
     pose.transform_dir(grip);
     pose.c.sub(grip);
@@ -2965,8 +4358,11 @@ void CVrWeaponInteraction::RenderHolster()
     if (!actor || actor!=Level().CurrentControlEntity() || actor->inventory().ActiveItem()==&m_weapon) return;
     // Taken by a hand (from the floor or a holster) and not drawn yet: it is
     // already in that hand, never shown on the holster on its way there.
+    // Only while its own slot's draw is queued: a weapon in the backpack
+    // keeps the slot id it last had (CInventory::Ruck), or none, which
+    // matched whenever nothing was drawn, so a stale claim drew it in a hand.
     const bool to_hand=(actor->m_vr_pickup.wield_id==m_weapon.ID() && !actor->m_vr_pickup.wield_stow) ||
-        (m_hand_claimed && actor->inventory().GetNextActiveSlot()==m_weapon.CurrSlot());
+        (m_hand_claimed && InQueuedSlot(*actor));
     Fmatrix world;
     if (to_hand)
     {
@@ -2977,12 +4373,18 @@ void CVrWeaponInteraction::RenderHolster()
         RefreshAuthoredHands();
         if (!HeldPose(world)) return;
         vr::HideHandForFrame(HandOf(1));
+        NoteDrawn(HandOf(1) ? "in the right hand, on its way" : "in the left hand, on its way");
     }
     else
     {
         if ((m_weapon.CurrSlot()!=INV_SLOT_2 && m_weapon.CurrSlot()!=INV_SLOT_3) ||
-            actor->inventory().ItemFromSlot(m_weapon.CurrSlot())!=&m_weapon) return;
+            actor->inventory().ItemFromSlot(m_weapon.CurrSlot())!=&m_weapon)
+        {
+            NoteDrawn("not drawn (not in a weapon slot)");
+            return;
+        }
         world=HolsterPose(*actor);
+        NoteDrawn(HandOf(1) ? "on the right-hand holster" : "on the left-hand holster");
     }
     // A gun without an audited physical profile still gets a visible world
     // model in its slot; only the advanced magazine/slide posing needs one.
@@ -3006,19 +4408,22 @@ void CVrWeaponInteraction::EnsurePosed(IKinematics& model)
 {
     // Both eyes draw the same pose.
     if (m_posed_frame==Device.dwFrame && m_posed_inserted==m_mechanism.inserted) return;
-    Pose(model,m_poses[0],false,m_weapon.m_magazine.size()>unsigned(m_mechanism.chamber));
+    Pose(model,m_poses[0],false,m_weapon.m_magazine.size()>unsigned(m_mechanism.chamber),&m_pose_cache[0]);
     m_posed_frame=Device.dwFrame; m_posed_inserted=m_mechanism.inserted;
 }
 
 void CVrWeaponInteraction::ReleaseModels()
 {
     m_authored_sampled=false;
+    // Chosen again against the profile measured with the model.
+    m_cycle_grab_at.reset();
     // Measured again with the model (MeasureOptics gives its glass).
     m_sight_measured=false;
     m_overlay_order.clear();
-    m_bind_local.clear();
-    for (auto& states:m_state_local) states.clear();
+    m_model_data.bind_local.clear();
+    for (auto& states:m_model_data.state_local) states.clear();
     ReleaseModel(m_visual);
+    m_pose_cache[0].Reset();
     m_poses[0].clear();
     ReleaseTransientModels();
 }
@@ -3031,8 +4436,11 @@ void CVrWeaponInteraction::ReleaseTransientModels()
     ReleaseModel(m_mag_visual);
     ReleaseModel(m_eject_visual);
     ReleaseModel(m_shell_visual);
+    m_shell_visual_name=nullptr;
+    m_pose_cache[1].Reset(); m_eject_pose_cache.Reset(); m_shell_pose_cache.Reset();
     ReleaseModel(m_pouch_visual);
     m_pouch_section=nullptr;
+    m_round.reset(); m_round_key.clear();
     m_shell_poses.clear();
     m_mag_visual_count=unsigned(-1);
     m_poses[1].clear();
@@ -3053,41 +4461,57 @@ void CVrWeaponInteraction::Destroy()
     ReleaseProps(); ReleaseModels();
 }
 
-Fvector CVrWeaponInteraction::HolsterPoint(CActor& actor) const
+bool CVrWeaponInteraction::SlotHolster(CActor& actor, Fvector& point, float& range) const
 {
     // Long guns over the shoulder, handguns on the hip, on the side of the
     // hand that holds the weapon: the rig mirrors with the hand, and the
-    // ammunition pouch is on the free hand's hip (VrPouchPoint). A holstered
-    // weapon stays on the side it was put away and is drawn from there; one
-    // never held is on the dominant side. The side is not saved.
-    Fvector point;
-    float range=0.f;
-    VrSlotHolster(actor,m_weapon,m_weapon.CurrSlot()==INV_SLOT_3 ? INV_SLOT_3 : INV_SLOT_2,HandOf(1)==1,point,range);
-    return point;
+    // ammunition pouch is on the free hand's hip (VrPouchPoint). A long gun
+    // put away by hand stays on that shoulder (VrSlotShoulderRight).
+    const u16 slot=m_weapon.CurrSlot();
+    return (slot==INV_SLOT_2 || slot==INV_SLOT_3) && VrSlotHolster(actor,m_weapon,slot,HandOf(1)==1,point,range);
 }
-float CVrWeaponInteraction::HolsterReach(CActor& actor) const
+bool CVrWeaponInteraction::InQueuedSlot(CActor& actor) const
 {
-    Fvector point;
-    float range=0.f;
-    VrSlotHolster(actor,m_weapon,m_weapon.CurrSlot()==INV_SLOT_3 ? INV_SLOT_3 : INV_SLOT_2,HandOf(1)==1,point,range);
-    return range;
+    CInventory& inventory=actor.inventory();
+    const u16 slot=m_weapon.CurrSlot();
+    return slot!=NO_ACTIVE_SLOT && inventory.ItemFromSlot(slot)==&m_weapon &&
+        inventory.GetNextActiveSlot()==slot && inventory.GetActiveSlot()!=slot;
+}
+void CVrWeaponInteraction::UpdateHandClaim(CActor& actor)
+{
+    if (!m_hand_claimed) return;
+    const auto& pickup=actor.m_vr_pickup;
+    // Not the player's any more (dropped, given away): no claim either.
+    const bool active=m_weapon.H_Parent()==&actor && actor.inventory().ActiveItem()==&m_weapon;
+    const bool wield=pickup.wield_id==m_weapon.ID() && !pickup.wield_stow;
+    const bool owned=m_weapon.H_Parent()==&actor;
+    if (vr::ClaimHolds(active,owned && InQueuedSlot(actor),wield)) return;
+    m_hand_claimed=false;
+    if (vr::ContactDebug()>0)
+        Msg("* [VR hands] %s: no longer on its way into the %s hand (%s)",m_weapon.cNameSect().c_str(),
+            m_hand ? "right" : "left",m_weapon.CurrSlot()==NO_ACTIVE_SLOT ||
+            actor.inventory().ItemFromSlot(m_weapon.CurrSlot())!=&m_weapon ? "not in its slot" :
+            "another draw came first");
+}
+void CVrWeaponInteraction::NoteDrawn(const char* where)
+{
+    if (where==m_drawn_as) return;
+    m_drawn_as=where;
+    if (vr::ContactDebug()>0) Msg("* [VR hands] %s: drawn %s",m_weapon.cNameSect().c_str(),where);
 }
 bool CVrWeaponInteraction::HolsterGrabDistance(CActor& actor, const Fvector& hand,
     float& distance) const
 {
-    if (m_weapon.H_Parent()!=&actor ||
-        (m_weapon.CurrSlot()!=INV_SLOT_2 && m_weapon.CurrSlot()!=INV_SLOT_3)) return false;
-    distance=hand.distance_to(HolsterPoint(actor));
-    return distance<=HolsterReach(actor);
+    Fvector point;
+    float range=0.f;
+    if (m_weapon.H_Parent()!=&actor || !SlotHolster(actor,point,range)) return false;
+    distance=VrHolsterDistance(actor,point,hand);
+    return distance<=range;
 }
 bool CVrWeaponInteraction::HolsterPointFor(CActor& actor, Fvector& point, float& range) const
 {
     // A knife or binoculars held as a weapon goes back to its body slot.
-    if (VrBodySlotHolster(actor,m_weapon.CurrSlot(),point,range)) return true;
-    if (m_weapon.CurrSlot()!=INV_SLOT_2 && m_weapon.CurrSlot()!=INV_SLOT_3) return false;
-    point=HolsterPoint(actor);
-    range=HolsterReach(actor);
-    return true;
+    return VrBodySlotHolster(actor,m_weapon.CurrSlot(),point,range) || SlotHolster(actor,point,range);
 }
 bool CVrWeaponInteraction::HolsterDistance(CActor& actor, float& distance, float& range) const
 {
@@ -3095,7 +4519,7 @@ bool CVrWeaponInteraction::HolsterDistance(CActor& actor, float& distance, float
     Fvector point;
     range=0.f;
     if (!vr::HandTransform(HandOf(1),false,hand) || !HolsterPointFor(actor,point,range)) return false;
-    distance=hand.c.distance_to(point);
+    distance=VrHolsterDistance(actor,point,hand.c);
     return true;
 }
 bool CVrWeaponInteraction::WeaponReady() const
@@ -3103,6 +4527,11 @@ bool CVrWeaponInteraction::WeaponReady() const
     const u32 state=m_weapon.GetState();
     return (state==CWeapon::eIdle || state==CWeapon::eMisfire) &&
         m_weapon.GetNextState()==state && !m_weapon.IsPending();
+}
+bool CVrWeaponInteraction::NativeFirePending() const
+{
+    return vr::NativeFirePending(m_weapon.GetState()==CWeapon::eFire,
+        m_weapon.GetNextState()==CWeapon::eFire);
 }
 bool CVrWeaponInteraction::ReleaseWanted(CActor& actor, bool opened, bool open)
 {
@@ -3122,12 +4551,7 @@ bool CVrWeaponInteraction::ReleaseWanted(CActor& actor, bool opened, bool open)
 }
 void CVrWeaponInteraction::ResetHold()
 {
-    m_carried=false; m_holster={}; m_active_since=0; m_release_pending=false;
-}
-bool CVrWeaponInteraction::HandAtHolster(CActor& actor) const
-{
-    float distance=0.f, range=0.f;
-    return m_holster.armed && HolsterDistance(actor,distance,range) && distance<=range;
+    m_carried=m_carry_pump=false; m_holster={}; m_active_since=0; m_release_pending=false;
 }
 bool CVrWeaponInteraction::UpdateRelease(CActor& actor, bool wanted, bool gripped)
 {
@@ -3145,15 +4569,21 @@ bool CVrWeaponInteraction::UpdateRelease(CActor& actor, bool wanted, bool grippe
     if (gripped) m_release_pending=false;
     if (!m_release_pending) return false;
     m_weapon.FireEnd();
-    // Let go at once: at rest it is put away directly, otherwise through its
-    // own hide or drop, which ends a shot's or a draw's animation cleanly.
-    // Only the game's own reload or launcher switch is waited for. The
-    // destination was fixed when the hand opened.
+    // Put away directly at rest, otherwise through the weapon's hide/drop.
+    // Native reload, switching and firing (including animation) finish first;
+    // a launched rocket must consume its round before normalization/drop.
+    // The destination was fixed when the hand opened.
     const u32 state=m_weapon.GetState();
     const bool ready=WeaponReady();
     const bool native_busy=state==CWeapon::eReload || state==CWeapon::eSwitch ||
         m_weapon.GetNextState()==CWeapon::eReload;
-    if (!vr::ReleaseNow(ready,native_busy)) return false;
+    const bool fire_pending=NativeFirePending();
+    if (fire_pending) m_weapon.CWeapon::FireEnd();
+    if (!vr::ReleaseNow(ready,native_busy,fire_pending)) return false;
+    // It stays on the shoulder it was put away on (VrSlotShoulderRight).
+    if (m_release_holster)
+        m_holster_shoulder=VrSlotShoulderRight(actor,m_weapon,m_weapon.CurrSlot()==INV_SLOT_3 ? INV_SLOT_3 : INV_SLOT_2,
+            HandOf(1)==1) ? 1 : 0;
     VrReleaseHeldWeapon(actor,m_weapon,m_release_holster ? 1 : 0,ready);
     if (vr::ContactDebug()>0)
         Msg("* [VR release] %s: %s after %d ms (%s)",m_weapon.cNameSect().c_str(),
@@ -3202,11 +4632,14 @@ u8 CVrWeaponInteraction::PouchAmmo() const
 {
     const size_t count=m_weapon.m_ammoTypes.size();
     if (!count) return 0;
+    if (m_pouch_frame==Device.dwFrame && m_pouch_for==m_pouch_ammo) return m_pouch_result;
+    m_pouch_frame=Device.dwFrame;
+    m_pouch_for=m_pouch_ammo;
     if (m_pouch_ammo<count && (m_weapon.unlimited_ammo() || !m_weapon.m_pInventory ||
         m_weapon.m_pInventory->GetAny(m_weapon.m_ammoTypes[m_pouch_ammo].c_str())))
-        return m_pouch_ammo;
+        return m_pouch_result=m_pouch_ammo;
     const u8 next=m_weapon.m_set_next_ammoType_on_reload;
-    return u8(std::min<size_t>(next<count ? next : m_weapon.m_ammoType,count-1));
+    return m_pouch_result=u8(std::min<size_t>(next<count ? next : m_weapon.m_ammoType,count-1));
 }
 bool CVrWeaponInteraction::SwapPouchAmmo()
 {
@@ -3248,6 +4681,17 @@ bool CVrWeaponInteraction::GripField(int side, vr::ContactScene& scene, Fmatrix&
     scene.Clear();
     if (Transform(world))
     {
+        // A support hand holding a round (shell or cartridge) closes on it.
+        if (side==HandOf(0) && m_shell_held && ShellLoading())
+        {
+            Fmatrix pose;
+            if (!m_round || m_round->field.Empty() || !ShellHandPose(pose)) return false;
+            scene.Add(&m_round->field,ToFrame(Fmatrix().mul_43(Fmatrix().invert(world),pose)));
+            ceiling=flt_max;
+            object=&m_round->field;
+            kind=vr::GripKind::Magazine;
+            return true;
+        }
         if (!m_contact) return false;
         // A support hand holding a magazine closes on the magazine.
         if (side==HandOf(0) && m_mechanism.held>=0)
@@ -3260,6 +4704,9 @@ bool CVrWeaponInteraction::GripField(int side, vr::ContactScene& scene, Fmatrix&
             kind=vr::GripKind::Magazine;
             return true;
         }
+        // This frame's pose (the arms may be solved before the weapon is
+        // drawn): the moving parts' surfaces are placed from it.
+        if (IKinematics* model=m_visual ? m_visual->dcast_PKinematics() : nullptr) EnsurePosed(*model);
         MagazineScene(scene);
         ceiling=m_profile.bore_height;
         object=m_contact.get();
@@ -3268,24 +4715,13 @@ bool CVrWeaponInteraction::GripField(int side, vr::ContactScene& scene, Fmatrix&
         return scene.count>0;
     }
     // An unmeasured weapon is held as its world model; its surface is
-    // measured once per visual.
+    // measured once per visual, on a worker thread (WorldModelContact). The
+    // fingers take the plain hold curl until it is ready.
     if (!GenericTransform(world) || !m_weapon.Visual()) return false;
-    if (m_world_contact_visual!=m_weapon.Visual())
+    if (m_world_contact_visual!=m_weapon.Visual() || !m_world_contact)
     {
-        static xr_map<shared_str,std::shared_ptr<const VrWeaponContact>> cache;
         m_world_contact_visual=m_weapon.Visual();
-        const shared_str name=m_weapon.cNameVisual();
-        auto found=cache.find(name);
-        if (found!=cache.end()) m_world_contact=found->second;
-        else if (auto* model=m_weapon.Visual()->dcast_PKinematics())
-        {
-            auto contact=std::make_shared<VrWeaponContact>();
-            std::vector<vr::Tri> tris;
-            TriangleCollector collector(tris);
-            for (u16 id=0;id<model->LL_BoneCount();++id) model->EnumBoneVertices(collector,id);
-            contact->receiver.Build(tris,0.0025f,0.012f,4);
-            m_world_contact=cache[name]=contact;
-        }
+        m_world_contact=WorldModelContact(m_weapon.Visual(),m_weapon.cNameVisual());
     }
     if (!m_world_contact || m_world_contact->receiver.Empty()) return false;
     scene.Add(&m_world_contact->receiver,vr::Frame());
@@ -3308,7 +4744,7 @@ bool CVrWeaponInteraction::MagazineHandPose(int hand, Fmatrix& root, bool as_dra
     // held rigidly (a curved or raked magazine does not jump to a hold
     // point 10-20 cm off the fingers).
     if (m_mag_grabbed && !as_drawn && hand==HandOf(0)) { root.mul_43(grip,m_mag_in_hand); return true; }
-    if (vr::AnimatedGrip() && hand==0 && m_hand==1 && !m_maghand_local.empty())
+    if (vr::AnimatedGrip() && hand==0 && m_hand==1 && !m_hands.maghand_local.empty())
     {
         // The controller is the reload animation's left hand: its knuckles
         // face the controller's front (-Y), its index side up the handle
@@ -3324,21 +4760,36 @@ bool CVrWeaponInteraction::MagazineHandPose(int hand, Fmatrix& root, bool as_dra
         for (int a=0;a<3;++a)
         {
             axes[a]->set(0,0,0);
-            for (int b=0;b<3;++b) axes[a]->mad(frame[b],m_maghand_basis[b][a]);
+            for (int b=0;b<3;++b) axes[a]->mad(frame[b],m_hands.maghand_basis[b][a]);
         }
-        Fvector palm; held.transform_dir(palm,m_maghand_palm);
+        Fvector palm; held.transform_dir(palm,m_hands.maghand_palm);
         held.c.sub(grip.c,palm);
-        Fmatrix to_hand; to_hand.invert(m_maghand_in_root);
+        Fmatrix to_hand; to_hand.invert(m_hands.maghand_in_root);
         root.mul_43(held,to_hand);
+        // The wrist where the arm puts a free hand on this controller
+        // (vr_wrist_behind_grip, toward the forearm):
+        // placed by its estimated palm, the animation's hand sat 5-8 cm
+        // ahead of it and the arm jumped forward as the magazine was taken.
+        Fvector wrist_fix;
+        {
+            Fmatrix hand_now; hand_now.mul_43(root,m_hands.maghand_in_root);
+            const float along=Fvector().sub(hand_now.c,grip.c).dotproduct(frame[0]);
+            wrist_fix.mul(frame[0],clampr(-vr_wrist_behind_grip-along,-0.1f,0.1f));
+        }
         // The animation's hold is only used if the magazine is really in the
-        // fist: its nearest surface within 3.5 cm of the hand's grip centre.
-        // Some reloads carry a spare or swap parts (an AKS-74U's), and the
-        // sampled hold then left the magazine floating off the hand.
-        if (!m_contact || m_contact->magazine.samples.empty()) return true;
-        float nearest=flt_max;
-        for (const vr::V3& sample:m_contact->magazine.samples)
-            nearest=std::min(nearest,Point(root,F(sample)).distance_to_sqr(grip.c));
-        if (nearest<=0.035f*0.035f) return true;
+        // fist: its nearest surface within 3.5 cm of the hand's grip centre
+        // (before the wrist is aligned). Some reloads carry a spare or swap
+        // parts (an AKS-74U's), and the sampled hold then left the magazine
+        // floating off the hand.
+        bool in_fist=!m_contact || m_contact->magazine.samples.empty();
+        if (!in_fist)
+        {
+            float nearest=flt_max;
+            for (const vr::V3& sample:m_contact->magazine.samples)
+                nearest=std::min(nearest,Point(root,F(sample)).distance_to_sqr(grip.c));
+            in_fist=nearest<=0.035f*0.035f;
+        }
+        if (in_fist) { root.c.add(wrist_fix); return true; }
     }
     const Fvector& axis=m_profile.well_axis;
     Fvector front; front.set(0.f,0.f,1.f);
@@ -3356,7 +4807,9 @@ bool CVrWeaponInteraction::MagazineHandPose(int hand, Fmatrix& root, bool as_dra
     // Held by its body: the middle of its lowest 40% (a curved AK magazine's
     // base point, carried down its axis, lies off the magazine).
     Fvector body=m_profile.mag_base;
-    if (m_contact && !m_contact->magazine.samples.empty())
+    if (m_contact && m_hold_body_contact==m_contact.get() && m_hold_body_axis.similar(axis))
+        body=m_hold_body;
+    else if (m_contact && !m_contact->magazine.samples.empty())
     {
         float low=flt_max, high=-flt_max;
         for (const vr::V3& s:m_contact->magazine.samples)
@@ -3368,6 +4821,9 @@ bool CVrWeaponInteraction::MagazineHandPose(int hand, Fmatrix& root, bool as_dra
         for (const vr::V3& s:m_contact->magazine.samples)
             if (F(s).dotproduct(axis)<=low+0.4f*(high-low)) { sum.add(F(s)); ++used; }
         if (used) body=sum.div(float(used));
+        m_hold_body_contact=m_contact.get();
+        m_hold_body_axis=axis;
+        m_hold_body=body;
     }
     Fvector hold; root.transform_dir(hold,body);
     root.c.sub(grip.c,hold);
@@ -3380,11 +4836,30 @@ void CVrWeaponInteraction::MagazineScene(vr::ContactScene& scene) const
     scene.Clear();
     if (!m_contact) return;
     scene.Add(&m_contact->receiver,vr::Frame());
-    // The slide, bolt or pump where it is now (it moves back along -z).
-    const bool pump=!m_profile.cycle_bone.size() && m_profile.pump_bone.size();
+    // The slide, bolt or pump, and a handle that moves apart from it, where
+    // they are drawn: their bones' poses in the weapon's last pose (Pose),
+    // so a bolt lifted and turned (an action path) is held where it shows,
+    // not where a straight pull back would put it.
+    const auto drawn=[&](u16 bone, const Fmatrix& bind, vr::Frame& frame)
+    {
+        if (bone>=m_poses[0].size()) return false;
+        frame=ToFrame(Fmatrix().mul_43(m_poses[0][bone],Fmatrix().invert(bind)));
+        return true;
+    };
     vr::Frame moved;
-    moved.c=vr::V3(0.f,0.f,-(pump ? m_pump : std::max(m_mechanism.slide,m_cycle_visual_slide)));
+    if (!drawn(m_contact->cycle_bone,m_contact->cycle_bind,moved))
+    {
+        // Not posed yet: the stroke straight back along -z.
+        const bool pump=PumpGun();
+        moved.c=vr::V3(0.f,0.f,-(pump ? m_pump : std::max(m_mechanism.slide,m_cycle_visual_slide)));
+    }
     scene.Add(&m_contact->cycle,moved);
+    if (!m_contact->handle.Empty())
+    {
+        vr::Frame at;
+        drawn(m_contact->handle_bone,m_contact->handle_bind,at);
+        scene.Add(&m_contact->handle,at);
+    }
 }
 bool CVrWeaponInteraction::HeldMagazineKnown() const
 {
@@ -3484,7 +4959,8 @@ bool CVrWeaponInteraction::SupportHandOverride(Fmatrix& grip) const
             if (!vr::HandTransform(HandOf(0),false,support)) return false;
             // Where the hand closed on the barrel line; it stays there, the
             // palm cannot slide along the weapon while held.
-            float along=RearSupport() ? clampr(m_support_along,-0.5f,-0.08f) : clampr(m_support_along,0.12f,length);
+            float along=RearSupport() ? clampr(m_support_along,-0.5f,-0.08f) :
+                clampr(m_support_along,Handgun() ? 0.12f : 0.04f,length);
             // Riding the fore-end while it is pumped.
             if (m_pumping) along-=m_pump;
             grip.k=axis;
@@ -3492,11 +4968,10 @@ bool CVrWeaponInteraction::SupportHandOverride(Fmatrix& grip) const
             grip.c=hand.c;
             grip.c.mad(axis,along).mad(world.j,-0.035f);
             // Round the mesh's fore-end where the hand closed on it.
-            Fvector forend;
-            if (ForendPoint(forend))
+            if (const auto forend=ForendPoint())
             {
-                Fvector local; Fmatrix().invert(world).transform_tiny(local,Fvector().mad(hand.c,axis,along));
-                local.x=forend.x; local.y=forend.y;
+                Fvector local=Local(world,Fvector().mad(hand.c,axis,along));
+                local.x=forend->x; local.y=forend->y;
                 grip.c=Point(world,local);
             }
         }
@@ -3511,6 +4986,9 @@ bool CVrWeaponInteraction::SupportHandOverride(Fmatrix& grip) const
         }
         return true;
     }
+    // A hand holding a round is the controller itself, reported so its
+    // fingers close on the round (GripField) rather than into an empty fist.
+    if (m_shell_held && ShellLoading()) return vr::HandTransform(HandOf(0),false,grip);
     // A hand holding a magazine is the controller itself (the magazine
     // follows it exactly), reported so its fingers close on the magazine;
     // while the well has the magazine the hand rides it on the well's line.
@@ -3552,6 +5030,7 @@ void CVrWeaponInteraction::DropInserted(const Fmatrix& world)
         m_eject_speed=0.4f;
         m_eject_world=world;
         ReleaseModel(m_eject_visual);
+        m_eject_pose_cache.Reset();
         m_eject_visual=::Render->model_Create(MagazineVisualName(unsigned(m_mechanism.magazines[index].size())).c_str());
         return;
     }
@@ -3604,6 +5083,7 @@ void CVrWeaponInteraction::StepEject()
 void CVrWeaponInteraction::DropFromWell(int index, const Fmatrix& pose, const Fvector& velocity)
 {
     ReleaseModel(m_eject_visual);
+    m_eject_pose_cache.Reset();
     if (index<0 || index>1) return;
     CPhysicsShell* shell=CreateShell(index,pose,HandOf(1));
     if (shell)
@@ -3647,8 +5127,7 @@ void CVrWeaponInteraction::LeaveOnFloor(int index, CPhysicsShell* shell)
     if (!visual || !visual->dcast_PKinematics())
     {
         // Nothing to see or take back: its rounds stay the player's.
-        Msg("! [VR weapon] %s: magazine visual %s unavailable; %u rounds back to reserve",
-            m_profile.section.c_str(),MagazineVisualName(count).c_str(),count);
+        Warn("magazine visual %s unavailable; %u rounds back to reserve",MagazineVisualName(count).c_str(),count);
         ReleaseModel(visual);
         destroy_physics_shell(shell);
         ReturnCartridges(rounds);
@@ -3690,13 +5169,11 @@ void CVrWeaponInteraction::LeaveOnFloor(int index, CPhysicsShell* shell)
     vis.box.min.sub(magazine.box_center,magazine.box_half);
     vis.box.max.add(magazine.box_center,magazine.box_half);
     vis.box.getsphere(vis.sphere.P,vis.sphere.R);
-    Msg("* [VR weapon] %s: magazine left in the world with %u rounds (session only, %u s)",
-        m_profile.section.c_str(),count,floor_magazine_life/1000);
+    Note("magazine left in the world with %u rounds (session only, %u s)",count,floor_magazine_life/1000);
 }
 shared_str CVrWeaponInteraction::MagazineKind() const
 {
     if (!m_profile.detachable || m_basic_magazine) return nullptr;
-    if (m_profile.magazine_visual_prefix.size()) return m_profile.magazine_visual_prefix;
     string_path kind;
     xr_sprintf(kind,"%s|%s",m_profile.visual.c_str(),m_profile.mag_bone.c_str());
     return kind;
@@ -3711,6 +5188,12 @@ bool CVrWeaponInteraction::TakeFloorMagazine(const shared_str& kind, xr_vector<C
             return false;
     Fmatrix grip;
     if (!vr::HandTransform(HandOf(0),false,grip)) return false;
+    // Each round's ammunition index (m_LocalAmmoType) is the weapon's it came
+    // from; this one may list the same rounds in another order, or fewer.
+    // Kept, a seated magazine set (and saved) the wrong ammunition type.
+    for (CCartridge& round:rounds)
+        round.m_LocalAmmoType=u8(std::find(m_weapon.m_ammoTypes.begin(),m_weapon.m_ammoTypes.end(),round.m_ammoSect)-
+            m_weapon.m_ammoTypes.begin());
     xr_vector<CCartridge> displaced;
     if (!m_mechanism.TakeFromWorld(rounds,displaced)) return false;
     // The pouch magazine it takes the place of goes into the backpack.
@@ -3722,7 +5205,7 @@ bool CVrWeaponInteraction::TakeFloorMagazine(const shared_str& kind, xr_vector<C
     m_supporting=m_support_cup=false;
     m_pouch_preview=false;
     m_guide.active=false; m_inserting=false;
-    Msg("* [VR weapon] %s: magazine taken from the world (%u rounds)",m_profile.section.c_str(),
+    Note("magazine taken from the world (%u rounds)",
         unsigned(m_mechanism.magazines[m_mechanism.held].size()));
     return true;
 }
@@ -3756,7 +5239,8 @@ void CVrWeaponInteraction::RenderLooseMagazines()
         // A loose shell: the weapon's own HUD mesh showing only that part.
         model->Callback(CollapseHiddenBones,nullptr);
         vr::ApplyWeaponPose(*model,prop.poses,BonePose,bctCustom,nullptr,0.f,nullptr,
-            {prop.part.c_str()},true,true,true);
+            {prop.part.c_str()},true,true,true,nullptr,{}, {},nullptr,0.f,{},true,
+            &prop.pose_cache,Device.dwFrame);
         const int chamber=prop.part==m_profile.shell_bones[0] ? 0 : 1;
         const Fvector centre=prop.own_box ? prop.box_center : m_profile.shell_center[chamber];
         const Fvector half=prop.own_box ? prop.box_half : m_profile.shell_box_half;
@@ -3795,14 +5279,22 @@ void CVrWeaponInteraction::RenderBasicMagazines()
         // The other derived holds, to compare with the model: the trigger
         // (red), the weapon hand's grip centre (yellow), the support hand's
         // place (green) and the magazine's base (magenta).
-        if (m_profile.has_trigger_point)
-            vr::OverlayDraw().DrawCross(Point(world,m_profile.trigger_point),0.008f,0xffff3030);
-        if (m_profile.has_hand_grip_center)
-            vr::OverlayDraw().DrawCross(Point(world,m_profile.hand_grip_center),0.008f,0xffffff30);
+        if (m_profile.trigger_point)
+            vr::OverlayDraw().DrawCross(Point(world,*m_profile.trigger_point),0.008f,0xffff3030);
+        if (m_profile.hand_grip_center)
+            vr::OverlayDraw().DrawCross(Point(world,*m_profile.hand_grip_center),0.008f,0xffffff30);
         if (m_profile.two_handed)
             vr::OverlayDraw().DrawCross(Point(world,m_profile.support_offset),0.008f,0xff30ff30);
         if (m_profile.detachable)
             vr::OverlayDraw().DrawCross(Point(world,m_profile.mag_base),0.008f,0xffff40ff);
+        // The muzzle the flash comes from (orange), and the silencer's.
+        vr::OverlayDraw().DrawCross(Point(world,m_profile.muzzle),0.012f,0xffff9020);
+        if (m_profile.has_muzzle_silencer && m_weapon.IsSilencerAttached())
+            vr::OverlayDraw().DrawCross(Point(world,m_profile.muzzle_silencer),0.012f,0xffffd040);
+        // The middle of a round in the support hand (light blue).
+        Fmatrix round_pose;
+        if (m_shell_held && ShellHandPose(round_pose))
+            vr::OverlayDraw().DrawCross(Point(round_pose,RoundCentre()),0.008f,0xff80c0ff);
     }
     if (vr::ContactDebug()>=2 && in_hand && m_contact && m_contact->path.Valid() && Mode() && Transform(world))
     {
@@ -3980,11 +5472,16 @@ bool CVrWeaponInteraction::Cycling() const
 }
 bool CVrWeaponInteraction::PumpSelfLoading() const
 {
-    return m_profile.tube && m_profile.pump_bone.size() && !m_profile.cycle_bone.size() &&
+    return m_profile.tube && PumpGun() &&
         vr::HasAutomaticFireMode(m_weapon.GetCurrentFireMode());
 }
 bool CVrWeaponInteraction::CanFire() const
 {
+    // vr_contact_debug: a manual action allowed to fire, and why.
+    if (vr::ContactDebug()>0 && Mode() && m_profile.manual_cycle)
+        Note("fire asked: chamber gate %d (profile %d, initialized %d, chamber %d, cycling %d, slide %.3f), action %.2f",
+            !m_profile.chamber || m_mechanism.CanFire(),m_profile.chamber,m_mechanism.initialized,m_mechanism.chamber,
+            m_mechanism.cycling,m_mechanism.slide,m_action_u);
     return !Mode() || (m_input.Armed() && !m_holstered && !m_racking &&
         vr::GameplayActive() && (!m_profile.chamber || m_mechanism.CanFire()) &&
         (!m_profile.break_action || (!m_break_open && m_break_angle<0.01f)) &&
@@ -4004,16 +5501,18 @@ void CVrWeaponInteraction::PoseBeltFeed(IKinematics& model, xr_vector<Fmatrix>& 
     // to the next one's place, the end one a link further, and the belt
     // settles back as the fired round leaves it. The weapons' own shot
     // animations do not move the belt (PKM, RPD, M249).
-    if (m_belt_feed<=0.f || !m_profile.belt.used || !m_belt.seated || m_belt.hand>=0) return;
+    if (m_belt_feed<=0.f || !m_profile.belt.used || !m_belt.seated || m_belt.hand>=0 ||
+        m_profile.shot_moves_magazine) return;
     const u16 count=model.LL_BoneCount();
-    const size_t links=m_profile.belt_chain.size();
-    if (links<2 || poses.size()<count) return;
-    xr_vector<u16> ids(links);
-    for (size_t n=0;n<links;++n)
-        if ((ids[n]=model.LL_BoneID(m_profile.belt_chain[n].c_str()))>=count) return;
-    // A smooth push of half a link and back (no snap, no turn): each link
-    // slides toward the next one's place and returns as the shot ends.
-    const float u=0.5f*_sin(PI*(1.f-m_belt_feed));
+    const xr_vector<u16>& ids=m_profile.belt_chain_ids;
+    const size_t links=ids.size();
+    // Resolved on the weapon's own skeleton when the belt was found.
+    if (links<2 || poses.size()<count || m_profile.belt_link_of.size()!=count) return;
+    // A full link per shot, eased: each link slides onto the next one's
+    // place, where it looks as the belt at rest does, so the return as the
+    // step ends is not seen. A half-link push and back read as a jiggle.
+    const float t=1.f-m_belt_feed;
+    const float u=t*t*(3.f-2.f*t);
     xr_vector<Fmatrix> delta(links);
     for (size_t n=0;n<links;++n)
     {
@@ -4024,16 +5523,12 @@ void CVrWeaponInteraction::PoseBeltFeed(IKinematics& model, xr_vector<Fmatrix>& 
         delta[n].identity();
         delta[n].c.mul(step,u);
     }
-    // Each bone moves with the nearest link above it (the rounds on a
-    // GAMMA RPD's mesh-less joints).
+    // Each bone moves with the nearest link above it (belt_link_of).
     for (u16 id=0;id<count;++id)
-        for (u16 a=id; a<count; a=model.LL_GetData(a).GetParentID())
+        if (const s16 link=m_profile.belt_link_of[id]; link>=0)
         {
-            const auto at=std::find(ids.begin(),ids.end(),a);
-            if (at==ids.end()) continue;
-            Fmatrix moved; moved.mul_43(delta[size_t(at-ids.begin())],poses[id]);
+            Fmatrix moved; moved.mul_43(delta[size_t(link)],poses[id]);
             poses[id]=moved;
-            break;
         }
 }
 void CVrWeaponInteraction::CartridgeFired()
@@ -4047,7 +5542,7 @@ void CVrWeaponInteraction::CartridgeFired()
         return;
     }
     // A pump gun needs a manual stroke to eject the case and chamber again.
-    if (m_profile.tube && m_profile.pump_bone.size() && !m_profile.cycle_bone.size())
+    if (m_profile.tube && PumpGun())
     {
         // Set to its self-loading mode, the gun throws the case and
         // chambers the next shell by itself.
@@ -4069,12 +5564,17 @@ void CVrWeaponInteraction::CartridgeFired()
     }
     // The first movement of the bolt swings a dust cover open.
     m_dust_open=true;
+    // An open bolt no animation moves runs forward and back on the shot.
+    if (m_profile.open_bolt_static) m_cycle_visual_slide=m_profile.cycle_travel;
     // A bolt-action keeps its fired case until the hand works the bolt.
     if (m_profile.manual_cycle && m_mechanism.initialized)
     {
         m_mechanism.AfterShotManual();
+        if (vr::ContactDebug()>0) Note("manual action fired: the case stays in the chamber until the bolt is worked");
         return;
     }
+    if (m_profile.manual_cycle && vr::ContactDebug()>0)
+        Warn("manual action fired with its mechanism not set up (chamber gate inactive)");
     if (DeferShellDrop() && m_mechanism.initialized)
     {
         m_mechanism.AfterShot(m_weapon.m_magazine);
@@ -4087,10 +5587,13 @@ bool CVrWeaponInteraction::ReserveAvailable() const
 {
     if (m_weapon.unlimited_ammo()) return true;
     if (!m_weapon.m_pInventory) return false;
+    if (m_reserve_frame==Device.dwFrame) return m_reserve_result;
+    m_reserve_frame=Device.dwFrame;
+    m_reserve_result=false;
     for (auto* item:m_weapon.m_pInventory->m_all)
         if (auto* box=smart_cast<CWeaponAmmo*>(item); box && box->m_boxCurr)
             if (std::find(m_weapon.m_ammoTypes.begin(),m_weapon.m_ammoTypes.end(),box->cNameSect())!=m_weapon.m_ammoTypes.end())
-                return true;
+                return m_reserve_result=true;
     return false;
 }
 void CVrWeaponInteraction::FillMagazine(int index)
@@ -4160,7 +5663,7 @@ void CVrWeaponInteraction::Normalize(bool keep_measured)
     if (!m_weapon.m_magazine.empty()) m_weapon.m_ammoType=m_weapon.m_magazine.back().m_LocalAmmoType;
     m_weapon.iAmmoElapsed=int(m_weapon.m_magazine.size());
     m_parts_ready=false;
-    if (returned) Msg("* [VR weapon] %s: %u spare rounds normalized",m_profile.section.c_str(),returned);
+    if (returned) Note("%u spare rounds normalized",returned);
     // A save snapshot keeps the weapon's model and measurements: nothing they
     // come from changes, and releasing them re-measured every slot weapon on
     // the next frame (a hitch after each quick or auto save).
@@ -4182,6 +5685,16 @@ void CVrWeaponInteraction::Normalize(bool keep_measured)
 }
 void CVrWeaponInteraction::PrepareSave(bool keep_measured)
 {
+    // A reset while the weapon is in the hand chambers a round from the
+    // magazine on the next frame (Initialize): logged, it names what did it.
+    if (vr::ContactDebug()>0 && Mode() && m_mechanism.initialized)
+        Note("mechanism reset in the hand (%s): chamber %d, rounds %u",keep_measured ? "the weapon left the hand" :
+            "a native reload or save",m_mechanism.chamber,unsigned(m_weapon.m_magazine.size()));
+    // Leaving the player (a drop, from the hand or the inventory): no hand is
+    // drawing it, and it hangs on no shoulder; picked up again, its side
+    // comes from the hand that takes it. (m_in_hand stays: a gun let go is
+    // still drawn in that hand until the drop lands.)
+    if (keep_measured) { m_hand_claimed=false; m_holster_shoulder=-1; }
     Normalize(keep_measured);
     m_restore_empty_chamber=false;
 }
@@ -4298,7 +5811,7 @@ void CVrWeaponInteraction::InteractShells(CActor& actor, const Fmatrix& world,
             for (int c=0;c<2;++c)
                 if (m_chambers[c]==2) { EjectShell(c,world); m_chambers[c]=0; }
     }
-    else if (m_profile.pump_bone.size() && !m_profile.cycle_bone.size())
+    else if (PumpGun() && !m_carried)
     {
         // A native reload refilled the tube and cycled the action.
         if (m_weapon.m_magazine.size()>m_shell_rounds) m_pump_ready=true;
@@ -4310,6 +5823,7 @@ void CVrWeaponInteraction::InteractShells(CActor& actor, const Fmatrix& world,
         if (left_valid && left_grip && (!m_grip[0] || m_supporting) && !m_pumping && !PumpSelfLoading() &&
             Near(left.c,Point(world,m_profile.pump_grab),0.12f))
         {
+            if (!m_supporting) m_support_hold.reset();
             m_pumping=m_supporting=true;
             m_support_cup=false;
             m_pump_start=local.z+m_pump;
@@ -4339,6 +5853,26 @@ void CVrWeaponInteraction::InteractShells(CActor& actor, const Fmatrix& world,
                     velocity.mad(world.i,0.8f);
                     DropCase(world,velocity);
                     m_pump_spent=false;
+                }
+                // A live shell in the chamber (the stroke before was
+                // completed, nothing fired since) is extracted and thrown
+                // out of the port as a round, as racking a loaded slide or
+                // bolt does; the stroke forward chambers the next from the
+                // tube. It is the weapon's last round (back(): the one that
+                // fires next). Kept, every stroke left the round in.
+                else if (m_pump_ready && !m_weapon.m_magazine.empty())
+                {
+                    // The ejection port; without one on the model, the
+                    // loading port (both open onto the chamber).
+                    const float port_reach=m_profile.shell_point.magnitude();
+                    const Fvector port=Point(world,port_reach>EPS_L && port_reach<=1.5f ?
+                        m_profile.shell_point : m_profile.loading_port);
+                    m_weapon.SpawnAmmo(1,m_weapon.m_magazine.back().m_ammoSect.c_str(),0xffff,&port);
+                    m_weapon.m_magazine.pop_back();
+                    m_weapon.iAmmoElapsed=int(m_weapon.m_magazine.size());
+                    m_shell_rounds=unsigned(m_weapon.m_magazine.size());
+                    if (vr::ContactDebug()>0)
+                        Note("live shell ejected by the pump (%u left)",unsigned(m_weapon.m_magazine.size()));
                 }
                 m_pump_ready=false;
                 vr::HandHaptic(HandOf(0),0.15f);
@@ -4381,7 +5915,8 @@ void CVrWeaponInteraction::InteractShells(CActor& actor, const Fmatrix& world,
     if (!m_shell_held) { m_shell_rounds=unsigned(m_weapon.m_magazine.size()); return; }
     Fmatrix shell_pose;
     const bool posed=(m_profile.shell_bones[1].size() || m_profile.loose_round_visual.size()) && ShellHandPose(shell_pose);
-    const Fvector held=posed ? Point(shell_pose,m_profile.shell_center[1]) : left.c;
+    // The round's middle as drawn (in the fist).
+    const Fvector held=posed ? Point(shell_pose,RoundCentre()) : left.c;
     if (m_profile.break_action)
     {
         if (m_break_open && m_break_angle>=m_profile.hinge_angle*0.8f)
@@ -4479,17 +6014,73 @@ int CVrWeaponInteraction::DetectSupport(const Fvector& weapon_hand, const Fvecto
 {
     const int kind=SupportNear(weapon_hand,muzzle,axis,support);
     m_supporting=kind!=0;
+    m_support_hold.reset();
     m_support_cup=kind==2;
     m_support_along=SupportAlong(weapon_hand,muzzle,support);
     if (m_supporting) vr::HandHaptic(HandOf(0),0.12f);
+    if (vr::ContactDebug()>0)
+    {
+        Msg("* [VR support] %s: %s, %.0f mm along the bore from the weapon hand, %.0f mm from it",
+            m_weapon.cNameSect().c_str(),kind==2 ? "cups the grip" : kind==1 ? "holds the fore-end" : "not on the weapon",
+            m_support_along*1000.f,support.distance_to(weapon_hand)*1000.f);
+        if (kind==1) LogSupportHold(support);
+    }
     return kind;
 }
-bool CVrWeaponInteraction::HandOverOnRelease(CActor& actor, bool weapon_grip, bool support_grip)
+void CVrWeaponInteraction::LogSupportHold(const Fvector& support) const
 {
-    // The weapon hand opened while the support hand holds the weapon (and
-    // not at the holster, where opening puts it back): the support hand
-    // carries it.
-    return m_grip[1] && !weapon_grip && support_grip && m_supporting && !HandAtHolster(actor) && HandOver();
+    // Where the drawn fore-end hand is against where the real one closed, in
+    // weapon space (x right, y up, z to the muzzle), and how it is drawn:
+    // the animation's bones (right-handed), its hand mirrored (left-handed),
+    // or the arm IK (no trusted animated hand).
+    Fmatrix world;
+    if (!Transform(world)) return;
+    const Fvector real=Local(world,support);
+    const bool animated=AnimatedSupportHand();
+    LPCSTR path=!animated ? "arm IK" : m_hand==1 ? "animation bones" : "animation hand mirrored";
+    Fvector fist=real;
+    if (animated)
+    {
+        fist=m_hand ? m_hands.authored[0].palm : AcrossBore(m_hands.authored[0].palm);
+        fist.add(SupportSlide());
+    }
+    const float nearest=CloudDistanceSq(fist);
+    Note("support hand: %s; real (%.3f %.3f %.3f), fist centre (%.3f %.3f %.3f), %.0f mm apart, mesh %.0f mm "
+        "from the fist; bore x %.3f, slide %.0f mm, holds it %s",path,real.x,real.y,real.z,fist.x,fist.y,fist.z,
+        real.distance_to(fist)*1000.f,nearest<flt_max ? _sqrt(nearest)*1000.f : -1.f,BoreX(),SupportSlide().z*1000.f,
+        FistClosesOn(fist) ? "round" : "not round");
+}
+CVrWeaponInteraction::HandOverResult CVrWeaponInteraction::HandOverOnRelease(CActor& actor, Edges& next)
+{
+    // A supporting hold, including a pump fore-end, wins over the holster.
+    if (!m_grip[1] || next.grip[1] || !next.grip[0] || !m_supporting ||
+        m_racking || m_mechanism.held>=0 || m_shell_held || VrHandHoldsItem(actor,HandOf(0)))
+    {
+        m_release_waiting=false;
+        return HandOverResult::None;
+    }
+    // Stop continued firing without cancelling a committed native shot.
+    // An RPG launches before its later native shot consumes ammunition.
+    m_weapon.CWeapon::FireEnd();
+    m_fire_queued=0;
+    if (auto* weapon=m_weapon.cast_weapon_magazined())
+    {
+        weapon->m_pendingShot=false; // a reload's deferred fire has not started
+    }
+    if (NativeFirePending())
+    {
+        if (!m_release_waiting && vr::ContactDebug()>0)
+            Note("weapon hand opened during a native shot (state %u, next %u): the support hand takes it after",
+                m_weapon.GetState(),m_weapon.GetNextState());
+        m_release_waiting=true;
+        next.trigger=false;
+        next.grip[1]=true; // retry this release, or drop if support lets go
+        return HandOverResult::Wait;
+    }
+    m_release_waiting=false;
+    if (!HandOver(next)) return HandOverResult::None;
+    m_release_pending=false;
+    return HandOverResult::Done;
 }
 bool CVrWeaponInteraction::StepRelease(CActor& actor, bool grip)
 {
@@ -4511,14 +6102,26 @@ void CVrWeaponInteraction::InteractGeneric(CActor& actor)
         m_weapon.H_Parent()==&actor && VrControlsFree(actor) &&
         (m_weapon.CurrSlot()==INV_SLOT_2 || m_weapon.CurrSlot()==INV_SLOT_3) &&
         vr::HandTransform(HandOf(1),false,right);
-    const bool grip=tracked && vr::GripHeld(vr::HandSqueeze(HandOf(1)),m_grip[1]);
-    const bool left_grip=tracked && vr::GripHeld(vr::HandSqueeze(HandOf(0)),m_grip[0]);
+    // Share the frame's physical-hand grips with pickup and profiled weapons.
+    // m_grip still records the previous role-relative state for release edges.
+    const auto& pickup=actor.m_vr_pickup;
+    const bool grip=tracked && pickup.grip_held[HandOf(1)];
+    const bool left_grip=tracked && pickup.grip_held[HandOf(0)];
     const bool active=actor.inventory().ActiveItem()==&m_weapon;
+    // As on the physical path (Interact's input gate): after tracking, a
+    // menu or the headset's focus was lost (the input epoch changes), a
+    // trigger still held is no new pull; it works again once released.
+    // Without this, coming back with the trigger held fired the weapon (or
+    // its launcher).
+    const bool controls_held=vr::TriggerPulled(vr::HandTrigger(HandOf(1))) ||
+        vr::TriggerPulled(vr::HandTrigger(HandOf(0)));
+    const bool live=m_input.Step(vr::GameplayInputEpoch(),tracked,controls_held);
+    if (!live) m_fire_trigger.Block();
     // The support trigger on the barrel line goes back to the rifle (or
     // to the launcher on a weapon without physical handling). At the
     // pouch, in launcher mode, it loads a grenade by the game's reload,
     // which keeps the launcher's rocket and ammunition in step.
-    const bool support_trigger=tracked && active && grip && !m_carried &&
+    const bool support_trigger=live && tracked && active && grip && !m_carried &&
         m_weapon.IsGrenadeLauncherAttached() && vr::TriggerPulled(vr::HandTrigger(HandOf(0)));
     // The face buttons are not used here: they keep their last state.
     Edges next{m_trigger,{left_grip,grip},m_button,m_secondary,support_trigger};
@@ -4536,9 +6139,15 @@ void CVrWeaponInteraction::InteractGeneric(CActor& actor)
                 vr::HandHaptic(HandOf(0),0.15f);
             }
         }
-        else if (GenericTransform(weapon_pose) &&
-            SupportNear(right.c,Point(weapon_pose,MuzzleLocal()),weapon_pose.k,support_hand.c)==1)
-            m_launcher_toggle=true;
+        else if (GenericTransform(weapon_pose))
+        {
+            // On the barrel line 10 cm or more ahead of the grip: a hold at
+            // the magazine well (SupportNear's two-handed hold) is no toggle.
+            const Fvector muzzle=Point(weapon_pose,MuzzleLocal());
+            if (SupportNear(right.c,muzzle,weapon_pose.k,support_hand.c)==1 &&
+                SupportAlong(right.c,muzzle,support_hand.c)>=0.1f && support_hand.c.distance_to(right.c)>=0.12f)
+                m_launcher_toggle=true;
+        }
     }
     // Squeezing the support hand on the barrel line of a two-handed
     // weapon steadies it; releasing that grip returns to a one-handed hold.
@@ -4547,8 +6156,7 @@ void CVrWeaponInteraction::InteractGeneric(CActor& actor)
     else if (m_carried && !m_grip[0] && vr::HandTransform(HandOf(0),false,left_hand) &&
         GenericTransform(held) && Near(left_hand.c,held.c,0.12f))
     {
-        TakeBack();
-        next.grip[0]=next.grip[1]=true;
+        TakeBack(next);
         return;
     }
     else if (!m_carried && !m_grip[0] && vr::HandTransform(HandOf(0),false,left_hand) && GenericTransform(held))
@@ -4556,11 +6164,9 @@ void CVrWeaponInteraction::InteractGeneric(CActor& actor)
     if (!active) ResetHold();
     // Taken by a hand: as in the profiled path.
     else if (m_hand_claimed) { m_holster.gripped=true; m_hand_claimed=false; }
-    if (tracked && active && HandOverOnRelease(actor,grip,left_grip))
+    if (tracked && active && HandOverOnRelease(actor,next)!=HandOverResult::None)
     {
         if (m_trigger) actor.IR_OnKeyboardRelease(kWPN_FIRE);
-        m_release_pending=false;
-        next.trigger=false; next.grip[0]=false; next.grip[1]=true; next.mag_trigger=false;
         return;
     }
     if (tracked && active && StepRelease(actor,grip))
@@ -4570,7 +6176,7 @@ void CVrWeaponInteraction::InteractGeneric(CActor& actor)
     }
     if (!tracked) m_release_pending=false;
     // Each tap a pull (vr::FireTrigger), as on the profiled path.
-    const bool firing=m_fire_trigger.Step(tracked && active && grip && !m_carried ?
+    const bool firing=m_fire_trigger.Step(live && tracked && active && grip && !m_carried ?
         vr::HandTrigger(HandOf(1)) : 0.f);
     // Shotguns retain their native Action(kWPN_FIRE) state machine,
     // including the double-barrel and interrupted-reload behaviours.
@@ -4592,7 +6198,8 @@ vr::SupportAction CVrWeaponInteraction::ChooseSupport(CActor& actor, const Handl
     const auto offer=[&](vr::SupportAction action, float distance, float reach)
     { candidates[offered++]={action,distance,reach}; };
     // A slide or charging handle; the grip stays for holding the weapon.
-    if (m_mechanism.held<0 && m_profile.cycle_travel>0)
+    // Not an open bolt: it rests back, cocked, already.
+    if (m_mechanism.held<0 && m_profile.cycle_travel>0 && !m_profile.open_bolt)
         offer(vr::SupportAction::Rack,h.left.c.distance_to(h.cycle_point),m_profile.grab_radius);
     // A seated magazine: from a free hand, or one opened on it; a
     // hand still squeezing to steady the weapon pulls its trigger
@@ -4649,7 +6256,11 @@ void CVrWeaponInteraction::UpdateSupport(CActor& actor, const Handling& h)
                 inverse.invert(moved);
                 inverse.transform_tiny(support,h.left.c);
             }
-            const int kind=DetectSupport(h.right.c,muzzle,h.world.k,support);
+            // On the weapon itself: the barrel line alone (12 cm round it)
+            // took a hand beside a thin barrel or ahead of a front grip, in
+            // the air. The controller's centre sits inside the fist, a few cm
+            // off what it holds.
+            const int kind=HandOnMesh(h.world,support,0.06f) ? DetectSupport(h.right.c,muzzle,h.world.k,support) : 0;
             m_support_barrels=false;
             if (m_profile.break_action && kind==1)
             {
@@ -4789,6 +6400,7 @@ void CVrWeaponInteraction::WorkMagazine(Handling& h)
             TakeMagazineIntoHand(h.world,h.left,sliding,m_eject_s,h.held_root);
             m_ejecting=-1;
             ReleaseModel(m_eject_visual);
+            m_eject_pose_cache.Reset();
             vr::HandHaptic(HandOf(0),0.15f);
         }
     }
@@ -4839,10 +6451,24 @@ void CVrWeaponInteraction::WorkActionControls(CActor& actor, const Handling& h)
             m_mechanism.ReleaseSlide(m_weapon.m_magazine);
             PlayHandling(SoundSlideForward,h.cycle_point);
         }
+        else if (DualPump())
+        {
+            // Pump action from self-loading: what is chambered stays ready.
+            m_pump_mode=!m_pump_mode;
+            if (m_pump_mode) { m_pump_ready=!m_weapon.m_magazine.empty(); m_pump_spent=false; m_pump=0.f; }
+            PlayHandling(SoundFireMode,Point(h.world,m_profile.trigger_point ? *m_profile.trigger_point : GripLocal()));
+            Note("set to %s",m_pump_mode ? "pump action" : "self-loading");
+        }
         else
         {
+            // The game plays the weapon's own snd_switch_mode; one without
+            // it switched in silence: the selector clicks.
+            auto* magazined=m_weapon.cast_weapon_magazined();
+            const bool switches=magazined && magazined->HasFireModes() && !m_weapon.IsPending();
             actor.IR_OnKeyboardPress(kWPN_FIREMODE_NEXT);
             actor.IR_OnKeyboardRelease(kWPN_FIREMODE_NEXT);
+            if (switches && !m_weapon.m_sounds.FindSoundItem("sndSwitchMode",false))
+                PlayHandling(SoundFireMode,Point(h.world,m_profile.trigger_point ? *m_profile.trigger_point : GripLocal()));
         }
         vr::HandHaptic(HandOf(1),0.10f);
     }
@@ -4896,8 +6522,7 @@ void CVrWeaponInteraction::InsertMagazine(CActor& actor, Handling& h)
             {
                 const int index=m_mechanism.held;
                 ReturnCartridges(m_mechanism.magazines[index]);
-                Msg("* [VR weapon] %s: magazine put in the backpack (%u rounds)",
-                    m_profile.section.c_str(),unsigned(m_mechanism.magazines[index].size()));
+                Note("magazine put in the backpack (%u rounds)",unsigned(m_mechanism.magazines[index].size()));
                 m_mechanism.magazines[index].clear();
                 m_mechanism.DiscardHeld();
                 m_pouch_preview=false;
@@ -4911,6 +6536,33 @@ void CVrWeaponInteraction::InsertMagazine(CActor& actor, Handling& h)
 }
 void CVrWeaponInteraction::Interact(CActor& actor)
 {
+    // A draw: the active item now, not at the last update. Noted before any
+    // early return (a menu, the input gate, the generic path), which skipped
+    // the hand's choice: a weapon drawn without a hand kept the hand that
+    // last held it.
+    const bool in_hand=actor.inventory().ActiveItem()==&m_weapon;
+    if (in_hand && !m_in_hand)
+    {
+        // Its holster follows the hand that holds it now; put away, it
+        // stays where it was put (m_holster_shoulder, set again then).
+        m_holster_shoulder=-1;
+        // Drawn by a key, the wheel, the inventory or a script, not taken
+        // by a hand: the dominant hand.
+        // Not into a hand holding something else (a detector, a pocket
+        // item) while the other is free: the detector moved to the other
+        // hand, and its controls stayed with the weapon hand.
+        if (!m_hand_claimed)
+        {
+            int hand=vr::DominantHand();
+            if (VrHandHoldsItem(actor,hand) && !VrHandHoldsItem(actor,1-hand)) hand=1-hand;
+            m_hand=hand; m_carried=false;
+        }
+        if (vr::ContactDebug()>0)
+            Msg("* [VR hands] %s: drawn %s, into the %s hand",m_weapon.cNameSect().c_str(),
+                m_hand_claimed ? "by the hand that took it" : "without a hand",m_hand ? "right" : "left");
+    }
+    m_in_hand=in_hand;
+    if (!in_hand) m_holstered=true;
     PollContact();
     // Between frames of handling: the switch normalizes the mechanism and
     // swaps the weapon's magazine with the launcher's.
@@ -4942,6 +6594,8 @@ void CVrWeaponInteraction::Interact(CActor& actor)
     if (actor.inventory().ActiveItem()==&m_weapon)
     {
         RefreshAuthoredHands();
+        // Then, once it is idle in the hand, the game's own hold replaces it.
+        CaptureLiveHands();
         RequestScopeView();
     }
     ApplyMechanismLimits();
@@ -5024,7 +6678,14 @@ void CVrWeaponInteraction::Interact(CActor& actor)
     // quick taps on an automatic are separate pulls (vr::FireTrigger).
     const bool trigger=m_fire_trigger.Step(held ? vr::HandTrigger(HandOf(1)) : 0.f);
     m_trigger_value=held ? clampr(vr::HandTrigger(HandOf(1))/vr::pull_threshold,0.f,1.f) : 0.f;
-    const bool mag_trigger=left_valid && vr::TriggerPulled(vr::HandTrigger(HandOf(0)));
+    // The support trigger works the weapon (slide, magazine, parts, shells)
+    // only from a hand holding nothing else: a flashlight's trigger switched
+    // its light and worked a part with one pull, and a hand carrying an
+    // object lost it when the weapon took the hand. Its edge is still kept
+    // (support_pull), so letting the item go with the trigger held starts
+    // nothing.
+    const bool support_pull=left_valid && vr::TriggerPulled(vr::HandTrigger(HandOf(0)));
+    const bool mag_trigger=support_pull && !VrHandHoldsItem(actor,HandOf(0));
     const bool mag_hold=mag_trigger || grip[0];
     // Slide release / fire mode stay on right A: left X toggles the
     // inventory, so a left-held weapon uses the support hand's A.
@@ -5033,21 +6694,21 @@ void CVrWeaponInteraction::Interact(CActor& actor)
     // This frame's controls, kept for the next frame's edges (m_trigger,
     // m_grip, ...): written once, when the update leaves by any path. A path
     // that passes the weapon between hands changes `next` before it leaves.
-    Edges next{trigger,{grip[0],grip[1]},button,secondary,mag_trigger};
+    Edges next{trigger,{grip[0],grip[1]},button,secondary,support_pull};
+    // The support hand out of tracking with a magazine in it: its last grip
+    // and trigger stand, so a hand found open again lets go of the magazine
+    // (InsertMagazine's release). Read as released meanwhile, the release
+    // edge was lost and the magazine stayed in the open hand.
+    if (!left_valid && m_mechanism.held>=0) { next.grip[0]=m_grip[0]; next.mag_trigger=m_mag_trigger; }
     CommitEdges commit{*this,next};
     if (!active) ResetHold();
     // Taken by a hand (a holster, the floor, its trigger included): it can
     // go back to the holster or be let go without a grip first, from this
     // frame's release check on.
     else if (m_hand_claimed) m_holster.gripped=true;
-    if (active && !m_pumping && !m_racking && m_mechanism.held<0 && HandOverOnRelease(actor,grip[1],grip[0]))
-    {
-        m_weapon.FireEnd();
-        m_release_pending=false;
-        // The hand now holding it is already gripped; the one that let go is not.
-        next.trigger=false; next.grip[0]=false; next.grip[1]=true; next.mag_trigger=false;
-        return;
-    }
+    const auto handover=active ? HandOverOnRelease(actor,next) : HandOverResult::None;
+    if (handover==HandOverResult::Done) m_weapon.FireEnd();
+    if (handover!=HandOverResult::None) return;
     if (active && (StepRelease(actor,grip[1]) || m_release_pending)) return;
     if (!m_input.Step(epoch,true,trigger || button || secondary))
     {
@@ -5064,9 +6725,7 @@ void CVrWeaponInteraction::Interact(CActor& actor)
     }
     else
     {
-        // Drawn by key or wheel rather than by a hand: the dominant hand.
-        if (m_holstered && !m_hand_claimed)
-        { m_hand=vr::DominantHand(); m_carried=false; }
+        // (Drawn without a hand: the dominant hand, chosen at the top.)
         m_holstered=false;
         m_hand_claimed=false;
         const bool ready=WeaponReady();
@@ -5107,8 +6766,7 @@ void CVrWeaponInteraction::Interact(CActor& actor)
             if (m_mechanism.held<0) { m_guide.active=false; m_inserting=false; }
             h.held_root=left;
             h.held_valid=left_valid && MagazineHandPose(HandOf(0),h.held_root);
-            if (left_valid && !m_racking && m_handle_hand_valid)
-                m_cycle_use_hand=h.local.distance_to(m_handle_hand)<h.local.distance_to(m_profile.cycle_grab);
+            if (left_valid && !m_racking) m_cycle_grab_at=NearestCycleGrab(h.local);
             h.cycle_point=Point(world,CycleGrabLocal());
             h.cycle_point.mad(world.k,-CycleGrabTravel());
             h.mag_base=Point(world,m_profile.mag_base);
@@ -5118,9 +6776,7 @@ void CVrWeaponInteraction::Interact(CActor& actor)
             if (left_valid && grip[0] && !m_grip[0] && m_carried &&
                 Near(left.c,Point(world,GripLocal()),0.12f))
             {
-                TakeBack();
-                next.grip[0]=next.grip[1]=true;
-                next.trigger=false;
+                TakeBack(next);
                 return;
             }
             h.has_release=m_mechanics.has_bolt_catch || m_mechanics.has_slide_stop ||
@@ -5210,7 +6866,7 @@ void VrReleaseHeldWeapon(CActor& actor, CWeapon& weapon, int holster_choice, boo
     float range=0.f;
     const bool at_holster=holster_choice>=0 ? holster_choice==1 :
         vr::HandTransform(side,false,hand) && weapon.VrHolsterPoint(actor,holster,range) &&
-        hand.c.distance_to(holster)<=range;
+        VrHolsterDistance(actor,holster,hand.c)<=range;
     // A knife taken from the belt goes back there when let go. Binoculars
     // are dropped away from the chest, as a gun is (VrHandItemsUpdate).
     const bool belt=weapon.CurrSlot()==KNIFE_SLOT;

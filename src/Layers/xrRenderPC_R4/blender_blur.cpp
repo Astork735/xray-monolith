@@ -510,6 +510,22 @@ void CBlender_ssfx_rain::Compile(CBlender_Compile& C)
 	}
 }
 
+void CBlender_vr_water::Compile(CBlender_Compile& C)
+{
+	IBlender::Compile(C);
+	// As the stock effects_water.s: alpha blended, depth tested, not written.
+	C.r_Pass("water_regular", "vr_water", true, TRUE, FALSE, TRUE, D3DBLEND_SRCALPHA, D3DBLEND_INVSRCALPHA);
+	C.r_dx10Texture("s_base", C.L_textures.empty() ? "water\\water_water" : *C.L_textures[0]);
+	C.r_dx10Texture("s_nmap", "water\\water_normal");
+	C.r_dx10Texture("s_env0", r2_T_sky0);
+	C.r_dx10Texture("s_env1", r2_T_sky1);
+	C.r_dx10Texture("s_position", r2_RT_P);
+	C.r_dx10Sampler("smp_base");
+	C.r_dx10Sampler("smp_nofilter");
+	C.r_dx10Sampler("smp_rtlinear");
+	C.r_End();
+}
+
 CBlender_ssfx_water_blur::CBlender_ssfx_water_blur() { description.CLS = 0; }
 
 CBlender_ssfx_water_blur::~CBlender_ssfx_water_blur()

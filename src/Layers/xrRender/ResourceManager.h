@@ -91,6 +91,13 @@ private:
 	xr_vector<ref_texture> m_necessary;
 	// misc
 	xrCriticalSection creationGuard;
+	// Background texture loading (BackgroundBegin): the worker and its queue,
+	// made on first use; the textures created since BackgroundBegin, while it
+	// tracks them, and bDeferredLoad as it was before.
+	struct BackgroundLoader;
+	BackgroundLoader* m_background = nullptr;
+	xr_vector<ref_texture>* m_background_tracking = nullptr;
+	BOOL m_background_deferred = FALSE;
 
 public:
 	CTextureDescrMngr m_textures_description;
@@ -235,6 +242,22 @@ public:
 	void DeferredLoad(BOOL E) { bDeferredLoad = E; }
 	void DeferredUpload();
 	void DeferredUnload();
+	// Textures created from BackgroundBegin to BackgroundEnd are loaded on a
+	// worker thread, in order (DX10/11: CTexture::Load makes a staging texture,
+	// moved to the GPU on its first use on the render thread, as at level
+	// load, where DeferredUpload loads them in parallel). Each batch keeps its
+	// textures referenced until the main thread sees it done (BackgroundDone,
+	// BackgroundWait), so none is destroyed while it loads. Main thread only.
+	void BackgroundBegin();
+	u32 BackgroundEnd();
+	bool BackgroundDone(u32 ticket);
+	void BackgroundWait(u32 ticket);
+	// Before textures are unloaded, uploaded in bulk or destroyed.
+	void BackgroundWaitAll();
+	void BackgroundShutdown();
+	// Main thread: moves loaded batches' staging textures to the GPU (what
+	// their first draw would do), in order, about budget_mb of them (< 0: all).
+	void BackgroundFinalize(float budget_mb);
 	void Evict();
 	void StoreNecessaryTextures();
 	void DestroyNecessaryTextures();

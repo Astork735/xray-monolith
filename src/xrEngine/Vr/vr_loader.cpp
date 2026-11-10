@@ -9,6 +9,9 @@ PFN_xrGetInstanceProcAddr xrGetInstanceProcAddr_p = nullptr;
 #define VR_XR_DEFINE(NAME) PFN_##NAME NAME##_p = nullptr;
 VR_XR_GLOBAL_FUNCTIONS(VR_XR_DEFINE)
 VR_XR_INSTANCE_FUNCTIONS(VR_XR_DEFINE)
+VR_XR_BODY_FUNCTIONS(VR_XR_DEFINE)
+VR_XR_FIDELITY_FUNCTIONS(VR_XR_DEFINE)
+VR_XR_VISIBILITY_MASK_FUNCTIONS(VR_XR_DEFINE)
 #undef VR_XR_DEFINE
 
 namespace
@@ -89,12 +92,58 @@ namespace vr
 		return ok;
 	}
 
+	bool LoadOpenXRBodyTracking(XrInstance instance, bool fidelity)
+	{
+		if (!OpenXRLoaded())
+			return false;
+
+		bool ok = true;
+#define VR_FETCH(NAME) ok &= Fetch(instance, #NAME, reinterpret_cast<PFN_xrVoidFunction*>(&NAME##_p));
+		VR_XR_BODY_FUNCTIONS(VR_FETCH)
+#undef VR_FETCH
+		// High fidelity is only asked for: without it the tracker still runs.
+		if (ok && fidelity)
+		{
+#define VR_FETCH(NAME) Fetch(instance, #NAME, reinterpret_cast<PFN_xrVoidFunction*>(&NAME##_p));
+			VR_XR_FIDELITY_FUNCTIONS(VR_FETCH)
+#undef VR_FETCH
+		}
+		if (!ok)
+		{
+#define VR_CLEAR(NAME) NAME##_p = nullptr;
+			VR_XR_BODY_FUNCTIONS(VR_CLEAR)
+			VR_XR_FIDELITY_FUNCTIONS(VR_CLEAR)
+#undef VR_CLEAR
+		}
+		return ok;
+	}
+
+	bool LoadOpenXRVisibilityMask(XrInstance instance)
+	{
+		if (!OpenXRLoaded())
+			return false;
+		bool ok = true;
+#define VR_FETCH(NAME) ok &= Fetch(instance, #NAME, reinterpret_cast<PFN_xrVoidFunction*>(&NAME##_p));
+		VR_XR_VISIBILITY_MASK_FUNCTIONS(VR_FETCH)
+#undef VR_FETCH
+		if (!ok)
+		{
+#define VR_CLEAR(NAME) NAME##_p = nullptr;
+			VR_XR_VISIBILITY_MASK_FUNCTIONS(VR_CLEAR)
+#undef VR_CLEAR
+		}
+		return ok;
+	}
+
 	void UnloadOpenXR()
 	{
 		xrGetInstanceProcAddr_p = nullptr;
 #define VR_CLEAR(NAME) NAME##_p = nullptr;
 		VR_XR_GLOBAL_FUNCTIONS(VR_CLEAR)
 		VR_XR_INSTANCE_FUNCTIONS(VR_CLEAR)
+		VR_XR_BODY_FUNCTIONS(VR_CLEAR)
+		VR_XR_FIDELITY_FUNCTIONS(VR_CLEAR)
+		VR_XR_VISIBILITY_MASK_FUNCTIONS(VR_CLEAR)
 #undef VR_CLEAR
 
 		if (s_module)

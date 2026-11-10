@@ -47,7 +47,7 @@ inline bool NameWord(const char* name, const char* part)
 inline bool ShellName(const char* name)
 {
     return NameHas(name, "cartridge") || NameHas(name, "patron") || NameHas(name, "shell") ||
-        NameHas(name, "gilza") || NameHas(name, "bullet");
+        NameHas(name, "gilza") || NameHas(name, "casing") || NameHas(name, "bullet");
 }
 // An optional attachment's part: never the gun itself.
 inline bool AttachmentName(const char* name)

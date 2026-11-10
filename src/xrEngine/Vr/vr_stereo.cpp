@@ -2,6 +2,7 @@
 #include "vr_gameplay.h"
 #ifdef VR_ENABLED
 #include "vr_gameplay_policy.h"
+#include "vr_body_tracking_policy.h"
 #include "vr_hand_render.h"
 #include "vr_ui_policy.h"
 #include "vr_stereo.h"
@@ -51,6 +52,7 @@ namespace
     u32 torso_frame = u32(-1);
     vr::UiToggleState inventory_toggle;
     vr::HeightRecalibration height_recalibration;
+    unsigned height_aligned_seen = 0; // CVrSystem::AlignCount last settled after
     // Comfort vignette: the latest stick motion (0..1), a snap turn, and the
     // eased level drawn this frame.
     float comfort_motion = 0.f;
@@ -509,8 +511,9 @@ namespace
         }
         g_vr_rendering_eye = false;
         g_vr_eye_index = -1;
-        // The mirror uses the eye texture while it is still acquired.
-        if (eye.eye == 0)
+        // The monitor mirrors the right eye, using its texture while it is
+        // still acquired.
+        if (eye.eye == 1)
         {
             vr::PerfScope timing(vr::PerfStage::EyeMirror, true);
             vr_mirror(eye.target, false);
@@ -706,13 +709,23 @@ namespace vr
         // The runtime paused the session (headset asleep): no xrWaitFrame
         // paces the loop until it is ready again, so do not spin.
         if (!prepared && system.HasSession() && !system.IsActive() && !system.NeedsRecovery()) Sleep(10);
-        // Stood up after calibrating seated: take the eye height again.
+        // Stood up after calibrating seated, or straightened up after a
+        // recenter or calibration: take the eye height again.
+        if (system.AlignCount() != height_aligned_seen)
+        {
+            height_aligned_seen = system.AlignCount();
+            height_recalibration.Aligned();
+        }
+        // Body tracking once a frame (its easing, measuring and diagnostics),
+        // whichever game code reads it.
+        if (prepared) vr::UpdateBodyTracking();
         float above = 0.f;
         const bool height_valid = prepared && vr::HeadHeightDelta(above);
+        const bool settling = height_recalibration.Settling();
         if (height_recalibration.Step(height_valid, above, Device.fTimeDelta))
         {
             system.RecalibrateHeight();
-            Msg("* [VR] head %.2f m above the calibrated eye for 2 s: eye height taken again", above);
+            if (!settling) Msg("* [VR] head %.2f m above the calibrated eye for 2 s: eye height taken again", above);
         }
         // Inventory is a level UI dialog. Use this frame's synchronized X
         // state so an open dialog can receive a second press to close.
@@ -732,14 +745,8 @@ namespace vr
     {
         auto& system = CVrSystem::Get();
         if (!system.IsRendering() && (simulation_frame_attempted || !system.PrepareFrame())) return;
-        if (auto* ui = system.UiTarget())
-        {
-            BindUi();
-            const float clear[4] = {0,0,0,0};
-            ID3D11DeviceContext* context = nullptr;
-            system.D3DDevice()->GetImmediateContext(&context);
-            context->ClearRenderTargetView(ui, clear); context->Release();
-        }
+        // PrepareFrame already cleared the acquired, waited UI image.
+        if (system.UiTarget()) BindUi();
     }
     void SubmitPendingStereoFrame()
     {
@@ -839,6 +846,7 @@ namespace vr
     {
         return GameplayActive() && CVrSystem::Get().HeadWorld(world);
     }
+    bool TrackedChestYaw(float& yaw);
     bool TorsoForward(Fvector& forward)
     {
         auto& system = CVrSystem::Get();
@@ -855,6 +863,16 @@ namespace vr
                 torso_yaw = torso_valid ? vr::TorsoYaw(torso_yaw, head, deg2rad(vr_torso_deadband)) : head;
                 // Looking down more than 35 degrees: at the belt.
                 torso_yaw = vr::TorsoSettle(torso_yaw, head, Device.fTimeDelta, direction.y < -0.57f);
+                torso_valid = true;
+            }
+            // Meta body tracking: the torso faces as the real one does,
+            // square to the shoulders. The headset's estimate carries on
+            // from there when it is lost.
+            float chest = 0.f;
+            const float weight = BodyTrackingWeight();
+            if (weight > 0.f && TrackedChestYaw(chest))
+            {
+                torso_yaw = torso_valid ? vr::BlendAngle(torso_yaw, chest, weight) : chest;
                 torso_valid = true;
             }
         }
@@ -954,14 +972,14 @@ namespace vr
     // time constant in hundredths of a second.
     struct SmoothedPose { u32 frame=u32(-1); bool valid=false; XrPosef pose{}; XrVector3f last_raw{}; };
     SmoothedPose smoothed_hands[2][2];
-    XrPosef SmoothHandPose(SmoothedPose& state, const XrPosef& raw)
+    // tau: the time constant (s); 0 or less takes the pose as it is.
+    XrPosef SmoothHandPose(SmoothedPose& state, const XrPosef& raw, float tau)
     {
         if (state.frame == Device.dwFrame) return state.pose;
         // A gap of more than a frame (a menu, the console, lost tracking)
         // starts afresh rather than sliding over from where it was.
         const bool resumed = state.frame == u32(-1) || Device.dwFrame - state.frame > 1;
         state.frame = Device.dwFrame;
-        const float tau = vr_controller_smoothing * 0.01f;
         // A jump of the real controller (tracking regained), not how far the
         // smoothed pose trails a fast hand: that trail is the smoothing.
         const XrVector3f& p = state.last_raw;
@@ -998,7 +1016,58 @@ namespace vr
         else s.orientation = raw.orientation;
         return s;
     }
-    // The hand's tracking pose this frame, smoothed (vr_controller_smoothing).
+    // Seated reach (vr_seated_reach). The game's floor under the actor's
+    // eyes, as the game last placed the body (SetGameFloor), and what is
+    // mapped between, in metres in the body's frame (the calibrated eye at
+    // 0): the real floor, the game's floor and where the mapping starts.
+    float game_floor_world = 0.f;
+    u32 game_floor_frame = u32(-1);
+    struct SeatedReachState
+    {
+        u32 frame = u32(-1);
+        float amount = 0.f; // eased 0..1
+        float real_floor = 0.f, game_floor = 0.f, start = 0.f;
+    } seated;
+    void SetGameFloor(float world_y) { game_floor_world = world_y; game_floor_frame = Device.dwFrame; }
+    void UpdateSeatedReach()
+    {
+        if (seated.frame == Device.dwFrame) return;
+        seated.frame = Device.dwFrame;
+        auto& system = CVrSystem::Get();
+        const float scale = _max(vr_world_scale, 0.01f);
+        float real_floor = 0.f;
+        Fvector head, direction, up;
+        bool applies = false;
+        if (vr_seated_reach && GameplayActive() && Device.dwFrame - game_floor_frame <= 1 &&
+            system.RealFloorInBody(real_floor) && system.HeadPose(head, direction, up))
+        {
+            const float real_m = real_floor / scale;
+            const float game_m = (game_floor_world - system.BodyPlacement().c.y) / scale;
+            applies = vr::SeatedReachApplies(vr_seated_reach, real_m, game_m);
+            if (applies)
+            {
+                seated.real_floor = real_m;
+                seated.game_floor = game_m;
+                seated.start = vr::SeatedReachStart(real_m, head.y / scale, vr_hip_height);
+            }
+        }
+        // Eased over half a second: the eye height taken again (standing
+        // up, sitting down) never snaps the hands.
+        const float step = clampr(Device.fTimeDelta, 0.f, 0.1f) / 0.5f;
+        seated.amount = clampr(seated.amount + (applies ? step : -step), 0.f, 1.f);
+    }
+    // What seated reach adds to a tracked point's height, in tracking
+    // metres (0 or less): a hand going down toward the real floor reaches
+    // the game's floor.
+    float SeatedReachOffset(const XrPosef& pose)
+    {
+        UpdateSeatedReach();
+        if (seated.amount <= 0.f) return 0.f;
+        const float y = CVrSystem::Get().TrackingToBody(pose).c.y / _max(vr_world_scale, 0.01f);
+        return seated.amount * vr::SeatedReachDrop(y, seated.real_floor, seated.game_floor, seated.start);
+    }
+    // The hand's tracking pose this frame, smoothed (vr_controller_smoothing),
+    // and taken down toward the game's floor when reaching down seated.
     bool HandPose(int hand, bool aim, XrPosef& pose)
     {
         if (!GameplayActive()) return false;
@@ -1008,7 +1077,8 @@ namespace vr
             return false;
         }
         if (hand >= 0 && hand < 2 && vr_controller_smoothing > 0.f)
-            pose = SmoothHandPose(smoothed_hands[hand][aim ? 1 : 0], pose);
+            pose = SmoothHandPose(smoothed_hands[hand][aim ? 1 : 0], pose, vr_controller_smoothing * 0.01f);
+        pose.position.y += SeatedReachOffset(pose);
         return true;
     }
     bool HandTransform(int hand, bool aim, Fmatrix& world)
@@ -1025,6 +1095,153 @@ namespace vr
         local = CVrSystem::Get().TrackingToBody(pose);
         return true;
     }
+    // Meta body tracking: the chest, then each side's shoulder joint, elbow
+    // and wrist (left, right), as XrBodyJointFB.
+    const int body_joint_ids[7] = {XR_BODY_JOINT_CHEST_FB,
+        XR_BODY_JOINT_LEFT_ARM_UPPER_FB, XR_BODY_JOINT_RIGHT_ARM_UPPER_FB,
+        XR_BODY_JOINT_LEFT_ARM_LOWER_FB, XR_BODY_JOINT_RIGHT_ARM_LOWER_FB,
+        XR_BODY_JOINT_LEFT_HAND_WRIST_FB, XR_BODY_JOINT_RIGHT_HAND_WRIST_FB};
+    struct BodyTrackingState
+    {
+        u32 frame = u32(-1);
+        float weight = 0.f;
+        // Body tracking is in use (weight above 0): both shoulders were
+        // tracked, now or until the weight eased out.
+        bool have = false;
+        // Each joint: located this frame, and a pose kept from when it was.
+        bool valid[7]{}, seen[7]{};
+        bool shoulders = false; // both shoulders located this frame
+        SmoothedPose smoothed[7];
+        XrPosef pose[7]{};
+        vr::BodySizeSampler size;
+        u32 debug_time = 0;
+    } body_state;
+    int BodyJointSlot(BodyJoint joint, int side)
+    {
+        if (joint == BodyJointChest) return 0;
+        if (side < 0 || side > 1 || joint < BodyJointShoulder || joint > BodyJointWrist) return -1;
+        return 1 + (int(joint) - int(BodyJointShoulder)) * 2 + side;
+    }
+    // vr_body_tracking_debug: once a second, whatever the state, so a body
+    // that is not used says why.
+    void LogBodyJoints()
+    {
+        if (!vr_body_tracking_debug || Device.dwTimeGlobal - body_state.debug_time < 1000) return;
+        body_state.debug_time = Device.dwTimeGlobal;
+        auto& system = CVrSystem::Get();
+        const int fidelity = system.BodyTrackingFidelity();
+        Msg("* [VR body] tracker: tracked=%d confidence=%.2f fidelity=%s | used: weight=%.2f | located: chest=%d "
+            "L shoulder=%d elbow=%d wrist=%d, R shoulder=%d elbow=%d wrist=%d | size: width=%.2f arm=%.2f (%d samples) "
+            "seated=%.2f",
+            int(system.BodyTrackingTracked()), system.BodyTrackingConfidence(),
+            fidelity == XR_BODY_TRACKING_FIDELITY_HIGH_META ? "high" : fidelity == XR_BODY_TRACKING_FIDELITY_LOW_META ?
+            "low" : "unknown", body_state.have ? body_state.weight : 0.f, int(body_state.valid[0]),
+            int(body_state.valid[1]), int(body_state.valid[3]), int(body_state.valid[5]), int(body_state.valid[2]),
+            int(body_state.valid[4]), int(body_state.valid[6]), body_state.size.Width(), body_state.size.Arm(),
+            body_state.size.Count(), seated.amount);
+        Fvector head, direction, up;
+        if (!body_state.have || !system.HeadPose(head, direction, up)) return;
+        // Relative to the eyes, in the body's frame (m; x right, y up, z ahead).
+        const float scale = _max(vr_world_scale, 0.01f);
+        const auto at = [&](int slot)
+        {
+            Fvector p = system.TrackingToBody(body_state.pose[slot]).c;
+            return p.sub(head).div(scale);
+        };
+        const Fvector ls = at(1), rs = at(2), le = at(3), re = at(4), lw = at(5), rw = at(6);
+        Msg("* [VR body] L: shoulder=(%.2f %.2f %.2f) elbow=(%.2f %.2f %.2f) wrist=(%.2f %.2f %.2f) "
+            "R: shoulder=(%.2f %.2f %.2f) elbow=(%.2f %.2f %.2f) wrist=(%.2f %.2f %.2f)",
+            ls.x, ls.y, ls.z, le.x, le.y, le.z, lw.x, lw.y, lw.z, rs.x, rs.y, rs.z, re.x, re.y, re.z, rw.x, rw.y, rw.z);
+    }
+    // Once a frame: this frame's tracked joints (smoothed), how far they are
+    // trusted, and the player's measured size. Each joint stands alone: the
+    // body is used while both shoulders are tracked; an elbow or wrist the
+    // runtime does not locate is only left out.
+    void UpdateBodyTracking()
+    {
+        if (body_state.frame == Device.dwFrame) return;
+        const float dt = body_state.frame == u32(-1) ? 0.f : clampr(Device.fTimeDelta, 0.f, 0.1f);
+        body_state.frame = Device.dwFrame;
+        auto& system = CVrSystem::Get();
+        const bool tracked = vr_body_tracking && GameplayActive() && system.BodyTrackingTracked();
+        // The headset's estimate of elbows and shoulders shakes more than
+        // the controllers do: at least 50 ms of smoothing.
+        const float tau = _max(vr_controller_smoothing * 0.01f, 0.05f);
+        XrPosef raw[7];
+        for (int i = 0; i < 7; ++i)
+        {
+            body_state.valid[i] = tracked && system.BodyJoint(body_joint_ids[i], raw[i]);
+            if (!body_state.valid[i]) continue;
+            body_state.pose[i] = SmoothHandPose(body_state.smoothed[i], raw[i], tau);
+            body_state.seen[i] = true;
+        }
+        body_state.shoulders = body_state.valid[1] && body_state.valid[2];
+        // The player's size, from the joints as tracked (m), when the arms are.
+        bool arms = true;
+        for (int i = 1; i < 7; ++i) arms = arms && body_state.valid[i];
+        if (arms)
+        {
+            const auto at = [&](int i) { return vr::BodyVec(raw[i].position.x, raw[i].position.y, raw[i].position.z); };
+            const float width = vr::BodyLength(at(1) - at(2));
+            const float arm = 0.5f * (vr::BodyLength(at(1) - at(3)) + vr::BodyLength(at(3) - at(5)) +
+                vr::BodyLength(at(2) - at(4)) + vr::BodyLength(at(4) - at(6)));
+            const bool settled = body_state.size.Settled();
+            body_state.size.Add(width, arm, dt);
+            if (!settled && body_state.size.Settled())
+                Msg("* [VR] body tracking: measured shoulder width %.2f m, arm length %.2f m",
+                    body_state.size.Width(), body_state.size.Arm());
+        }
+        body_state.weight = vr::TrackingWeight(body_state.weight, body_state.shoulders, dt);
+        body_state.have = body_state.weight > 0.f && body_state.seen[1] && body_state.seen[2];
+        if (body_state.weight <= 0.f)
+            for (bool& seen : body_state.seen) seen = false;
+        LogBodyJoints();
+    }
+    // The tracked torso's yaw in the body's frame, square to its shoulders.
+    bool TrackedChestYaw(float& yaw)
+    {
+        UpdateBodyTracking();
+        if (!body_state.have) return false;
+        auto& system = CVrSystem::Get();
+        const Fvector left = system.TrackingToBody(body_state.pose[1]).c;
+        const Fvector right = system.TrackingToBody(body_state.pose[2]).c;
+        return vr::ChestYaw(vr::BodyVec(left.x, left.y, left.z), vr::BodyVec(right.x, right.y, right.z), yaw);
+    }
+    bool BodyJointPosition(BodyJoint joint, int side, Fvector& world)
+    {
+        if (!GameplayActive()) return false;
+        UpdateBodyTracking();
+        const int slot = BodyJointSlot(joint, side);
+        // A joint located this frame; or, while the body eases out, as it
+        // was last located. Never a stale one while the rest is tracked.
+        if (!body_state.have || slot < 0 || !body_state.seen[slot] ||
+            (!body_state.valid[slot] && body_state.shoulders)) return false;
+        // Taken down with the hands when reaching down seated.
+        XrPosef pose = body_state.pose[slot];
+        pose.position.y += SeatedReachOffset(pose);
+        world = CVrSystem::Get().TrackingToWorld(pose).c;
+        return true;
+    }
+    float BodyTrackingWeight()
+    {
+        if (!GameplayActive()) return 0.f;
+        UpdateBodyTracking();
+        return body_state.have ? body_state.weight : 0.f;
+    }
+    float ShoulderWidthScale()
+    {
+        UpdateBodyTracking();
+        const float width = vr_shoulder_width > 0.f ? vr_shoulder_width :
+            body_state.size.Settled() ? body_state.size.Width() : 0.f;
+        return vr::BodySizeFactor(width, vr::average_shoulder_width);
+    }
+    float ArmLength()
+    {
+        UpdateBodyTracking();
+        const float arm = vr_arm_length > 0.f ? vr_arm_length :
+            body_state.size.Settled() ? body_state.size.Arm() : 0.f;
+        return arm * vr_world_scale;
+    }
     bool BodyTransform(Fmatrix& world)
     {
         if (!GameplayActive()) return false;
@@ -1036,7 +1253,12 @@ namespace vr
     {
         if (!GameplayActive() || ui_pointer_owns_buttons || LoadingControlBlocked(hand,1u)) return 0.f;
         auto& input=VrInput::Get();
-        return input.Select(hand) ? 1.f : input.Trigger(hand);
+        // The analog travel whenever it is bound: the Boolean select on the
+        // same trigger turns true past the runtime's threshold, and read as
+        // 1 it hid partial releases (1 > 0.75 > 1), so FireTrigger's reset
+        // never saw a quick tap. The select only without an analog trigger.
+        if (input.TriggerAnalog(hand)) return input.Trigger(hand);
+        return input.Select(hand) ? 1.f : 0.f;
     }
     bool HandSecondaryButton(int hand)
     {
@@ -1136,13 +1358,29 @@ namespace vr
     bool LeftHanded() { return vr_left_handed != 0; }
     int DominantHand() { return vr_left_handed ? 0 : 1; }
     bool WristDisplay() { return vr_wrist_display != 0; }
+    float MessageTextSize() { return vr_message_text_size; }
     bool HideHud() { return vr_hide_hud != 0; }
     float HudMagnification() { return vr_hud_distance > 0.f ? vr_hud_scale/vr_hud_distance : 1.f; }
+    bool WorldToHud(const Fvector& world, float& u, float& v, float& depth, bool& inside)
+    {
+        u=v=-1.f; depth=0.f; inside=false;
+        auto& system=CVrSystem::Get();
+        Fmatrix head;
+        // The menu's panel stays where it was opened in the room: not the HUD.
+        if (!GameplayActive() || system.UiPanelAnchored() || !system.HeadWorld(head)) return false;
+        Fmatrix to_head; to_head.invert(head);
+        Fvector local; to_head.transform_tiny(local,world);
+        depth=local.z;
+        float width=0.f, distance=0.f;
+        system.UiPanel(width,distance);
+        return vr::ProjectOntoQuad(local,distance,width,width*vr::kUiPanelAspect,u,v,inside);
+    }
     float ThrowScale() { return vr_throw_scale; }
     float Recoil() { return vr_recoil; }
     float LabelRange() { return vr_label_range; }
     float NpcLabelRange() { return vr_npc_label_range; }
     void Recenter() { ++gameplay_input_epoch; torso_valid = false; CVrSystem::Get().Recenter(); }
+    void CalibrateHeight() { CVrSystem::Get().RecalibrateHeight(); Msg("* [VR] eye height taken from the head now"); }
     void RequestQuickSave() { if (GameplayActive()) quick_save_pending = true; }
     void ForgetGameplayBody(const void* owner) { CVrSystem::Get().ForgetBody(owner); torso_valid = false; }
 
@@ -1155,6 +1393,12 @@ namespace vr
     bool HeadDirectionInBody(Fvector&) { return false; }
     bool HeadTransform(Fmatrix&) { return false; }
     bool TorsoForward(Fvector&) { return false; }
+    bool BodyJointPosition(BodyJoint, int, Fvector&) { return false; }
+    float BodyTrackingWeight() { return 0.f; }
+    void UpdateBodyTracking() {}
+    float ShoulderWidthScale() { return 1.f; }
+    float ArmLength() { return 0.f; }
+    void SetGameFloor(float) {}
     void UpdateGameplayBody() {}
     void ShiftTrackingOrigin(const Fvector&) {}
     bool Roomscale() { return false; }
@@ -1198,13 +1442,16 @@ namespace vr
     bool BodySlots() { return false; }
     bool BodySlotRings() { return false; }
     float BodySlotRadius() { return 0.10f; }
-    float HipHeight() { return 0.72f; }
+    float HipHeight() { return default_hip_height; }
     float HipWidth() { return 0.22f; }
     bool LeftHanded() { return false; }
     int DominantHand() { return 1; }
     bool WristDisplay() { return false; }
+    float MessageTextSize() { return 1.f; }
     bool HideHud() { return false; }
     float HudMagnification() { return 1.f; }
+    bool WorldToHud(const Fvector&, float& u, float& v, float& depth, bool& inside)
+    { u=v=-1.f; depth=0.f; inside=false; return false; }
     float ThrowScale() { return 1.75f; }
     float Recoil() { return 1.f; }
     float LabelRange() { return 0.f; }

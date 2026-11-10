@@ -2,6 +2,7 @@
 #include "stdafx.h"
 #include "VrWeaponModel.h"
 #include "VrWeaponPose.h"
+#include "../xrEngine/SkeletonMotions.h"
 
 namespace vrwi
 {
@@ -17,6 +18,10 @@ bool Descends(IKinematics& model, u16 id, u16 root)
         id=model.LL_GetData(id).GetParentID();
     }
     return false;
+}
+void EnumSubtreeVertices(IKinematics& model, u16 root, SEnumVerticesCallback& out)
+{
+    ForSubtree(model,root,[&](u16 id) { model.EnumBoneVertices(out,id); });
 }
 // Model-space pose of a bone below a part VR draws at its bind place (a
 // magazine): the part as bound, what hangs below it as the weapon's own
@@ -70,6 +75,11 @@ bool InMagazine(IKinematics& model, u16 id, u16 magazine, float height)
     // A spare: a magazine-named part at least half the magazine's height. A
     // smaller one (a follower, the rounds) is part of the magazine.
     if (height<0.f) height=MagazineHeight(model,magazine);
+    // A magazine bone with no mesh of its own carries the magazine (GAMMA's
+    // MP5: master_mag over mag, its rounds and follower): its parts are the
+    // magazine, not spares. Measured against no height, every part was a
+    // spare, nothing was left, and the MP5 had the game's own reload.
+    if (height<=0.f) return true;
     for (u16 bone=id;bone!=magazine && bone<model.LL_BoneCount();bone=model.LL_GetData(bone).GetParentID())
     {
         Fbox part;
@@ -112,6 +122,13 @@ bool MeasureBone(IKinematics& model, u16 bone, Fbox& box, bool subtree,
     box=bounds.box;
     return true;
 }
+u16 ReceiverBone(IKinematics& model, u16 trigger)
+{
+    const u16 count=model.LL_BoneCount();
+    if (trigger>=count) trigger=FindTrigger(model);
+    const u16 parent=trigger<count ? model.LL_GetData(trigger).GetParentID() : u16(BI_NONE);
+    return parent<count ? parent : model.LL_GetBoneRoot();
+}
 u16 FindTrigger(IKinematics& model)
 {
     u16 trigger=model.LL_BoneID("trigger");
@@ -132,8 +149,7 @@ Fvector GrabPoint(IKinematics& model, u16 part, bool pistol, float centre_x)
 {
     xr_vector<Fvector> points;
     PointCollector collector(points);
-    for (u16 id=0;id<model.LL_BoneCount();++id)
-        if (Descends(model,id,part)) model.EnumBoneVertices(collector,id);
+    EnumSubtreeVertices(model,part,collector);
     if (points.empty())
     {
         xr_vector<Fmatrix> bind;
@@ -146,7 +162,10 @@ Fvector GrabPoint(IKinematics& model, u16 part, bool pistol, float centre_x)
     box.getcenter(centre);
     Fvector sum; sum.set(0,0,0);
     unsigned used=0;
-    if (pistol && box.max.x-box.min.x>0.035f)
+    // A pistol slide is 2.4-3.2 cm wide: any real slide mesh (not a sliver)
+    // is taken by its rear serrations. A 3.5 cm minimum sent nearly every
+    // pistol to the long-gun rule, which took its slide in the middle.
+    if (pistol && box.max.x-box.min.x>0.01f)
     {
         const float rear=box.min.z+0.25f*(box.max.z-box.min.z);
         for (const Fvector& p:points)
@@ -163,6 +182,51 @@ Fvector GrabPoint(IKinematics& model, u16 part, bool pistol, float centre_x)
     sum.div(float(used));
     return sum;
 }
+std::optional<KnobPair> SideKnobs(IKinematics& model, u16 part, float centre_x)
+{
+    if (part==BI_NONE || part>=model.LL_BoneCount()) return std::nullopt;
+    xr_vector<Fvector> points;
+    PointCollector collector(points);
+    model.EnumBoneVertices(collector,part);
+    // Within 5 mm of the bore line counts as between the knobs.
+    const float gap=0.005f;
+    unsigned sides[2]={0,0}, between=0;
+    float widest[2]={0.f,0.f};
+    Fbox boxes[2]; boxes[0].invalidate(); boxes[1].invalidate();
+    for (const Fvector& p:points)
+    {
+        const float off=p.x-centre_x;
+        if (_abs(off)<=gap) { ++between; continue; }
+        const int side=off>0.f;
+        ++sides[side];
+        widest[side]=std::max(widest[side],_abs(off));
+        boxes[side].modify(p);
+    }
+    const unsigned total=unsigned(points.size());
+    // Each knob a quarter of the mesh or more; nothing to speak of between.
+    if (!total || between*20>total || sides[0]*4<total || sides[1]*4<total) return std::nullopt;
+    // Level with each other: their spans along the bore and up overlap by
+    // half the shorter one.
+    for (int axis:{1,2})
+    {
+        const float low=std::max(boxes[0].min[axis],boxes[1].min[axis]);
+        const float high=std::min(boxes[0].max[axis],boxes[1].max[axis]);
+        const float shorter=std::min(boxes[0].max[axis]-boxes[0].min[axis],boxes[1].max[axis]-boxes[1].min[axis]);
+        if (high-low<0.5f*shorter) return std::nullopt;
+    }
+    // Each knob by its outer face, as GrabPoint takes a long gun's part.
+    Fvector sums[2]; sums[0].set(0,0,0); sums[1].set(0,0,0);
+    unsigned used[2]={0,0};
+    for (const Fvector& p:points)
+    {
+        const float off=p.x-centre_x;
+        if (_abs(off)<=gap) continue;
+        const int side=off>0.f;
+        if (_abs(off)>=0.8f*widest[side]) { sums[side].add(p); ++used[side]; }
+    }
+    if (!used[0] || !used[1]) return std::nullopt;
+    return KnobPair{sums[0].div(float(used[0])),sums[1].div(float(used[1]))};
+}
 // A private copy of a hud model, for sampling its animations.
 IRenderVisual* HudCopy(LPCSTR visual)
 {
@@ -171,11 +235,46 @@ IRenderVisual* HudCopy(LPCSTR visual)
     ::Render->hud_loading=false;
     return copy;
 }
-// Plays a motion on every partition of a model, from its first frame.
+// Whether a motion can be played on this model: every bone its partitions
+// name is the model's, and has a track in the motion's file. An animation
+// set made for another armature crashed the engine either way: naming bones
+// the model lacks (GAMMA's DT MDR: "missing bone/wrong armature"), or
+// lacking a track for one of its bones (GAMMA's Protecta: a null track read
+// computing the bones).
+static bool MotionFits(IKinematicsAnimated& animated, MotionID motion)
+{
+    IKinematics* model=animated.dcast_PKinematics();
+    if (!model || !motion.valid() || motion.slot>=animated.LL_MotionsSlotCount()) return false;
+    shared_motions& slot=const_cast<shared_motions&>(animated.LL_MotionsSlot(motion.slot));
+    const CPartition& partitions=animated.partitions();
+    for (u16 part=0;part<partitions.count();++part)
+        if (const CPartDef* def=partitions.part(part))
+            for (u32 bone:def->bones)
+            {
+                if (bone>=model->LL_BoneCount()) return false;
+                const MotionVec* tracks=slot.bone_motions(model->LL_GetData(u16(bone)).name);
+                if (!tracks || tracks->size()<=motion.idx) return false;
+            }
+    return true;
+}
+// Plays a motion on every partition of a model, from its first frame (none
+// that does not fit it: MotionFits).
 void PlayOnAllParts(IKinematicsAnimated& animated, MotionID motion)
 {
+    if (!MotionFits(animated,motion)) return;
     for (u16 part=0;part<animated.partitions().count();++part)
         animated.PlayCycle(part,motion,FALSE,0,0,0,1.f);
+}
+bool PlayHandsMotion(IKinematicsAnimated& hands, MotionID motion, float* length)
+{
+    if (length) *length=0.f;
+    if (!motion.valid() || motion.slot>=hands.LL_MotionsSlotCount()) return false;
+    for (u16 part=0;part<hands.partitions().count();++part)
+    {
+        CBlend* blend=hands.PlayCycle(part,motion,FALSE,0,0,0,1.f);
+        if (length && blend) *length=std::max(*length,blend->timeTotal);
+    }
+    return true;
 }
 // Advances a model's animation by dt and evaluates its bones.
 void EvaluateBones(IKinematicsAnimated& animated, IKinematics& model, float dt)
@@ -196,6 +295,12 @@ bool PlayHudMotion(IKinematicsAnimated& animated, LPCSTR hud, LPCSTR key, float*
     MotionID motion=animated.ID_Cycle_Safe(item_name);
     if (!motion.valid()) motion=animated.ID_Cycle_Safe(hands_name);
     if (!motion.valid()) return false;
+    if (!MotionFits(animated,motion))
+    {
+        // Measured as if the weapon had no such animation.
+        Msg("! [VR weapon] %s: %s does not fit its HUD model's bones; not sampled",hud,key);
+        return false;
+    }
     for (u16 part=0;part<animated.partitions().count();++part)
     {
         CBlend* blend=animated.PlayCycle(part,motion,FALSE,0,0,0,1.f);
@@ -222,8 +327,7 @@ Fvector LowestPoint(IKinematics& model, u16 part)
 {
     xr_vector<Fvector> points;
     PointCollector collector(points);
-    for (u16 id=0;id<model.LL_BoneCount();++id)
-        if (Descends(model,id,part)) model.EnumBoneVertices(collector,id);
+    EnumSubtreeVertices(model,part,collector);
     if (points.empty()) { xr_vector<Fmatrix> bind; model.LL_GetBindTransform(bind); return bind[part].c; }
     float low=flt_max;
     for (const Fvector& p:points) low=std::min(low,p.y);

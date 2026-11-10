@@ -2,6 +2,7 @@
 #include "ui_base.h"
 #include "GamePersistent.h"
 #include "UICursor.h"
+#include "../xrEngine/Vr/vr_ui_policy.h"
 
 CUICursor& GetUICursor() { return UI().GetUICursor(); };
 ui_core& UI() { return *GamePersistent().m_pUI_core; };
@@ -267,16 +268,27 @@ void ui_core::RenderFont()
 	Font().Render();
 }
 
+float ui_core::screen_aspect()
+{
+	// VR: its UI panel's (the device is the eye-sized UI texture).
+	return g_vr_owns_present ? 1.f / vr::kUiPanelAspect : float(Device.dwWidth) / float(Device.dwHeight);
+}
+
 bool ui_core::is_widescreen()
+{
+	return screen_aspect() > (UI_BASE_WIDTH / UI_BASE_HEIGHT + 0.01f);
+}
+
+bool ui_core::hud_widescreen()
 {
 	return (float(Device.dwWidth) / float(Device.dwHeight)) > (UI_BASE_WIDTH / UI_BASE_HEIGHT + 0.01f);
 }
 
 u8 ui_core::screenmode()
 {
-	if ((float(Device.dwWidth) / float(Device.dwHeight)) > 1.8f)
+	if (screen_aspect() > 1.8f)
 		return u8(2);
-	else if ((float(Device.dwWidth) / float(Device.dwHeight)) > (UI_BASE_WIDTH / UI_BASE_HEIGHT + 0.01f))
+	else if (screen_aspect() > (UI_BASE_WIDTH / UI_BASE_HEIGHT + 0.01f))
 		return u8(1);
 	return u8(0);
 }
@@ -287,15 +299,8 @@ float ui_core::get_current_kx()
 	ui_core* core = GamePersistent().m_pUI_core;
 	if (core && (core->m_currentPointType == IUIRender::pttLIT || core->m_bAspectNeutral))
 		return 1.0f;
-	// VR shows the UI at 4:3 (vr::kUiPanelAspect): no widescreen correction.
-	if (g_vr_owns_present)
-		return 1.0f;
-
-	float h = float(Device.dwHeight);
-	float w = float(Device.dwWidth);
-
-	float res = (h / w) / (UI_BASE_HEIGHT / UI_BASE_WIDTH);
-	return res;
+	// VR: corrected for its 16:9 panel as for a 16:9 monitor.
+	return (1.f / screen_aspect()) / (UI_BASE_HEIGHT / UI_BASE_WIDTH);
 }
 
 shared_str ui_core::get_xml_name(LPCSTR fn)

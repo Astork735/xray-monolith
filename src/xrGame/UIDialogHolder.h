@@ -41,6 +41,9 @@ class PROTECT_API CDialogHolder : public pureFrame
 	void SetMainInputReceiver(CUIDialogWnd* ir, bool _find_remove);
 protected:
 	void DoRenderDialogs();
+	// The HUD pieces of the dialogs DoRenderDialogs draws as HUD (no cursor)
+	// on the magnified VR HUD (CUIWindow::CollectHudPieces).
+	void CollectHudDialogPieces(xr_vector<CUIWindow*>& out);
 	void CleanInternals();
 public:
 	CDialogHolder();

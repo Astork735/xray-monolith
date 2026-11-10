@@ -9,14 +9,20 @@
 #include "CustomDevice.h"
 #include "player_hud.h"
 #include "ActorEffector.h"
+#include <dinput.h>
 #include "Missile.h"
+#include "Grenade.h"
 #include "CharacterPhysicsSupport.h"
 #include "PHMovementControl.h"
 #include "UIGameCustom.h"
 #include "ui/UIPdaWnd.h"
 #include "VrWeaponInteraction.h"
+#include "VrWeaponModel.h"
+#include "VrWeaponPose.h"
 #include "WeaponKnife.h"
 #include "WeaponBinoculars.h"
+// The active item is being put away (VrPickup.cpp).
+bool VrActiveItemLeaving(CActor& actor);
 #include "Flashlight.h"
 #include "../xrEngine/Vr/vr_gameplay.h"
 #include "../xrEngine/vis_common.h"
@@ -64,13 +70,15 @@ PIItem PocketItemThisFrame(CActor& actor, int index)
     }
     return items[index];
 }
-// The hand is free: not holding the active weapon or busy with its
-// magazine, slide or foregrip.
+// The hand is free: not holding the active weapon, whatever implements it
+// (an unprofiled weapon or a launcher in its native mode is in a hand too),
+// or busy with its magazine, slide or foregrip. A weapon on its way out (let
+// go at the holster) holds no hand.
 bool HandFree(CActor& actor, int hand)
 {
     auto* weapon=smart_cast<CWeapon*>(actor.inventory().ActiveItem());
-    if (!weapon || !weapon->VrMode()) return true;
-    return hand!=weapon->VrWeaponHand() && !weapon->VrLeftHandBusy();
+    if (!weapon || VrActiveItemLeaving(actor)) return true;
+    return hand!=weapon->VrWeaponHand() && !(weapon->VrMode() && weapon->VrLeftHandBusy());
 }
 // The hand holds something other than a device: an item it grabbed, a
 // magazine from the floor, a pocket item, the bolt, a knife or binoculars,
@@ -88,7 +96,7 @@ bool Available(CActor& actor, int kind, int hand)
     // A hand holding anything takes nothing more; the hand that took the
     // detector may still reach for its slot (to put it back).
     if (!HandFree(actor,hand) || HandHoldsOther(actor,hand) ||
-        (pickup.device_hand==hand && kind!=vr::BodyDetector)) return false;
+        (VrDetectorHand(actor)==hand && kind!=vr::BodyDetector)) return false;
     // A bolt goes into a free hand whatever the other holds; one at a time.
     if (kind==vr::BodyBolt)
     {
@@ -150,6 +158,30 @@ void DrawModelAt(IRenderVisual* visual, Fmatrix pose, const Fvector& point)
     ::Render->set_Transform(&pose);
     ::Render->add_Visual(visual);
 }
+// The same, scaled by `scale`, resting against the body: the side toward
+// it at `rest`, its bulk out along `out` (unit), its box centred there.
+void DrawModelResting(IRenderVisual* visual, Fmatrix pose, float scale, const Fvector& rest, const Fvector& out)
+{
+    if (IKinematics* skeleton=visual->dcast_PKinematics()) skeleton->CalculateBones(TRUE);
+    pose.i.mul(scale); pose.j.mul(scale); pose.k.mul(scale);
+    const Fbox& box=visual->getVisData().box;
+    Fvector size; box.getsize(size);
+    const float depth=0.5f*(_abs(pose.i.dotproduct(out))*size.x+_abs(pose.j.dotproduct(out))*size.y+
+        _abs(pose.k.dotproduct(out))*size.z);
+    Fvector centre; box.getcenter(centre); pose.transform_dir(centre);
+    Fvector at; at.mad(rest,out,depth);
+    pose.c.sub(at,centre);
+    ::Render->set_Transform(&pose);
+    ::Render->add_Visual(visual);
+}
+// The scale that fits a model's longest side within `size` metres (never
+// enlarged).
+float FitScale(IRenderVisual* visual, float size)
+{
+    Fvector extent; visual->getVisData().box.getsize(extent);
+    const float longest=_max(extent.x,_max(extent.y,extent.z));
+    return longest>size && longest>EPS_L ? size/longest : 1.f;
+}
 void PressAction(CActor& actor, EGameActions action)
 {
     // As a key press, so script handlers and UI see what a desktop player does.
@@ -178,14 +210,76 @@ Fvector VrOnBodySurface(CActor& actor, float x, float height, float z)
     return Fvector().set(x,height,z);
 }
 
+float VrBodyHipShift()
+{
+    return vr::default_hip_height-vr::HipHeight();
+}
+
 Fvector VrOnBodyPlace(CActor& actor, const Fmatrix& pelvis, float angle, float height)
 {
     const float x=_sin(angle), z=_cos(angle);
     const float surface=actor.m_legs_controller.vr_body_surface(height,x,z);
     const float reach=(surface>0.f ? surface : 0.15f)+vr::body_slot_margin;
     Fvector point=pelvis.c;
-    point.mad(pelvis.i,x*reach).mad(pelvis.j,height).mad(pelvis.k,z*reach);
+    point.mad(pelvis.i,x*reach).mad(pelvis.j,height+VrBodyHipShift()).mad(pelvis.k,z*reach);
     return point;
+}
+
+// With the body shown: where a place's item rests on it. The point on the
+// body's axis at the place's height, the direction out from the body there
+// (level) and that place; the item drawn there (DrawModelResting) is
+// pushed out until its own footprint clears the outfit (the reach point,
+// VrOnBodyPlace, is further out). False without the body or for a place
+// not on it.
+struct VrBodyRest
+{
+    Fvector axis, out;
+    float x, z, height;
+};
+static bool VrOnBodyRest(CActor& actor, int kind, VrBodyRest& rest)
+{
+    Fmatrix pelvis;
+    vr::BodyPlace place;
+    if (!vr::BodyVisible() || !actor.m_legs_controller.vr_body_anchor(pelvis) ||
+        !vr::BodySlotOnBody(kind,vr::LeftHanded(),place)) return false;
+    rest.x=_sin(place.angle); rest.z=_cos(place.angle); rest.height=place.height;
+    rest.out.set(0,0,0).mad(pelvis.i,rest.x).mad(pelvis.k,rest.z);
+    rest.out.y=0.f;
+    if (rest.out.square_magnitude()<EPS_S) return false;
+    rest.out.normalize();
+    rest.axis=pelvis.c;
+    rest.axis.mad(pelvis.j,place.height+VrBodyHipShift());
+    return true;
+}
+// The model scaled by `scale`, resting against the body at `rest`: its box
+// centred on the place's height and direction, its side toward the body
+// 1 cm clear of the outfit within the box's own width and height (a flat
+// PDA lies on the chest, not out at the width of the flanks beside it).
+static void DrawModelResting(CActor& actor, IRenderVisual* visual, Fmatrix pose, float scale, const VrBodyRest& rest)
+{
+    const Fvector& out=rest.out;
+    Fvector up; up.set(0.f,1.f,0.f);
+    Fvector across; across.crossproduct(up,out);
+    pose.i.mul(scale); pose.j.mul(scale); pose.k.mul(scale);
+    Fvector size; visual->getVisData().box.getsize(size);
+    const auto half=[&](const Fvector& d)
+    {
+        return 0.5f*(_abs(pose.i.dotproduct(d))*size.x+_abs(pose.j.dotproduct(d))*size.y+
+            _abs(pose.k.dotproduct(d))*size.z);
+    };
+    const float tall=half(up), wide=half(across);
+    const float contact=actor.m_legs_controller.vr_body_contact(rest.height-tall,rest.height+tall,
+        rest.x,rest.z,wide);
+    Fvector at; at.mad(rest.axis,out,(contact>0.f ? contact : 0.15f)+0.01f);
+    DrawModelResting(visual,pose,1.f,at,out);
+}
+// A level frame facing `out`: i across, j up, k out.
+static Fmatrix OutwardFrame(const Fvector& out)
+{
+    Fmatrix frame; frame.identity();
+    frame.k=out; frame.j.set(0,1,0);
+    frame.i.crossproduct(frame.j,frame.k).normalize_safe();
+    return frame;
 }
 
 bool VrBodySlotPoint(CActor& actor, int kind, Fvector& point)
@@ -206,14 +300,19 @@ bool VrBodySlotPoint(CActor& actor, int kind, Fvector& point)
         const vr::V3 local=vr::BodySlotLocal(kind,vr::HipHeight(),vr::HipWidth(),vr::LeftHanded());
         Fvector at=VrOnBodySurface(actor,local.x,local.y+vr::HipHeight(),local.z);
         point=pelvis.c;
-        point.mad(pelvis.i,at.x).mad(pelvis.j,at.y).mad(pelvis.k,at.z);
+        point.mad(pelvis.i,at.x).mad(pelvis.j,at.y+VrBodyHipShift()).mad(pelvis.k,at.z);
         return true;
     }
     Fvector head;
     if (!vr::HeadPosition(head)) { head=actor.Position(); head.y+=1.67f; }
     const Fvector forward=VrTorsoFrame(actor).k;
-    const vr::V3 world=vr::BodyToWorld({head.x,head.y,head.z},forward.x,forward.z,
-        vr::BodySlotLocal(kind,vr::HipHeight(),vr::HipWidth(),vr::LeftHanded()));
+    vr::V3 local=vr::BodySlotLocal(kind,vr::HipHeight(),vr::HipWidth(),vr::LeftHanded());
+    // The places on the chest, over the shoulder and in the pockets spread
+    // with the player's shoulders (measured by body tracking, or
+    // vr_shoulder_width); the belt's follow vr_hip_width.
+    if (vr::IsPocket(kind) || kind==vr::BodyBinoculars || kind==vr::BodyPda || kind==vr::BodyInventory)
+        local.x*=vr::ShoulderWidthScale();
+    const vr::V3 world=vr::BodyToWorld({head.x,head.y,head.z},forward.x,forward.z,local);
     point.set(world.x,world.y,world.z);
     return true;
 }
@@ -319,6 +418,7 @@ void VrPocketUpdate(CActor& actor, const bool* tracked, const Fmatrix* hands, co
 {
     auto& pickup=actor.m_vr_pickup;
     Fvector head, looking;
+    head.set(0.f,0.f,0.f);
     const bool head_valid=vr::HeadPosition(head);
     Fmatrix head_world;
     looking=vr::HeadTransform(head_world) ? head_world.k : actor.XFORM().k;
@@ -359,6 +459,252 @@ int VrMissileHand(CActor& actor)
         actor.m_vr_pickup.missile_stowed) return -1;
     const int hand=actor.m_vr_pickup.missile_hand;
     return hand>=0 ? hand : vr::DominantHand();
+}
+
+namespace
+{
+// A grenade's own first-person model in the hand, its pin a part of its
+// own: two copies posed at their bind place (vrwi::ApplyWeaponPose), one
+// showing all but the pin, the other only the pin ([vr_derivation]
+// grenade_pin_bones: a stock grenade's "eka", its ring "jopa" under it).
+struct GrenadeModels
+{
+    shared_str visual;
+    IRenderVisual* body=nullptr;
+    IRenderVisual* pin=nullptr;
+    xr_vector<Fmatrix> body_poses, pin_poses;
+    vr::WeaponPoseCache<xr_vector<Fmatrix>> body_cache, pin_cache;
+    shared_str pin_bone;
+    // The ring's middle, where a hand takes it (the model's space).
+    Fvector ring{0.f,0.06f,0.f};
+    bool failed=false;
+};
+GrenadeModels g_grenade;
+
+void ReleaseGrenadeModels()
+{
+    if (g_grenade.body) ::Render->model_Delete(g_grenade.body);
+    if (g_grenade.pin) ::Render->model_Delete(g_grenade.pin);
+    g_grenade.body=g_grenade.pin=nullptr;
+    g_grenade.visual=nullptr;
+    g_grenade.pin_bone=nullptr;
+    g_grenade.body_poses.clear(); g_grenade.pin_poses.clear();
+    g_grenade.body_cache=vr::WeaponPoseCache<xr_vector<Fmatrix>>{};
+    g_grenade.pin_cache=vr::WeaponPoseCache<xr_vector<Fmatrix>>{};
+    g_grenade.ring.set(0.f,0.06f,0.f);
+    g_grenade.failed=false;
+}
+
+// The copies of this grenade's first-person model, made once per model.
+GrenadeModels* GrenadeCopies(CMissile& missile)
+{
+    const shared_str& section=missile.HudSection();
+    if (!section.size() || !pSettings->line_exist(section,"item_visual")) return nullptr;
+    const shared_str visual=pSettings->r_string(section,"item_visual");
+    if (g_grenade.visual!=visual)
+    {
+        ReleaseGrenadeModels();
+        g_grenade.visual=visual;
+        g_grenade.body=::Render->model_Create(visual.c_str());
+        g_grenade.pin=::Render->model_Create(visual.c_str());
+        IKinematics* model=g_grenade.body ? g_grenade.body->dcast_PKinematics() : nullptr;
+        g_grenade.failed=!model || !g_grenade.pin || !g_grenade.pin->dcast_PKinematics();
+        if (!g_grenade.failed)
+        {
+            const auto& names=vrwi::VrNames().grenade_pin_bones;
+            for (u16 id=0;id<model->LL_BoneCount() && !g_grenade.pin_bone.size();++id)
+                if (vrwi::NameHasAny(model->LL_BoneName_dbg(id),names)) g_grenade.pin_bone=model->LL_BoneName_dbg(id);
+            if (g_grenade.pin_bone.size())
+            {
+                xr_vector<Fvector> points;
+                vrwi::PointCollector collector(points);
+                vrwi::EnumSubtreeVertices(*model,model->LL_BoneID(g_grenade.pin_bone.c_str()),collector);
+                Fbox box; box.invalidate();
+                for (const Fvector& p:points) box.modify(p);
+                if (!points.empty()) box.getcenter(g_grenade.ring);
+                Msg("* [VR body] %s: pin %s, taken at (%.3f %.3f %.3f)",visual.c_str(),g_grenade.pin_bone.c_str(),
+                    g_grenade.ring.x,g_grenade.ring.y,g_grenade.ring.z);
+            }
+            else Msg("! [VR body] %s: no pin found ([vr_derivation] grenade_pin_bones); it is pulled unseen",
+                visual.c_str());
+        }
+    }
+    return g_grenade.failed ? nullptr : &g_grenade;
+}
+
+// The grenade's pin: taken by the other hand's trigger on the ring (or by
+// the teeth: the grenade held at the mouth as long as eating takes), and
+// carried in that hand while its trigger is held. Clear of its hole it is
+// out and the grenade is readied (its own checkout sound); brought back
+// into the hole it is in again. Let go out of the hole, it is gone, as is
+// one bitten out. Opening the grenade's hand then lets it go live.
+enum PinPlace { PinSeated, PinHand, PinTeeth, PinGone };
+struct GrenadePin
+{
+    u16 missile=u16(-1);
+    PinPlace where=PinSeated;
+    int hand=-1;
+    // The pin copy's model transform in the hand's frame, as taken.
+    Fmatrix in_hand=Fidentity;
+    bool out=false;
+    bool trigger_down[2]{};
+    u32 mouth_since=0;
+    float teeth_from=0.f;
+};
+GrenadePin g_pin;
+constexpr float pin_reach=0.06f, pin_clear=0.03f, pin_home=0.015f, pin_bite_pull=0.06f;
+
+bool StepGrenadePin(CActor& actor, CMissile& missile, int h, const bool* tracked, const Fmatrix* hands)
+{
+    Fmatrix pose;
+    if (!VrMissilePose(actor,pose)) return g_pin.out;
+    const GrenadeModels* models=GrenadeCopies(missile);
+    const Fvector ring_local=models ? models->ring : Fvector().set(0.f,0.06f,0.f);
+    Fvector seat; pose.transform_tiny(seat,ring_local);
+    const int o=1-h;
+    const bool trigger=tracked[o] && vr::TriggerPulled(vr::HandTrigger(o));
+    const bool pressed=trigger && !g_pin.trigger_down[o];
+    g_pin.trigger_down[o]=trigger;
+    LPCSTR name=missile.cNameSect().c_str();
+    switch (g_pin.where)
+    {
+    case PinSeated:
+    {
+        if (pressed && HandFree(actor,o) && !VrHandHoldsItem(actor,o) && hands[o].c.distance_to(seat)<=pin_reach)
+        {
+            g_pin.where=PinHand;
+            g_pin.hand=o;
+            g_pin.in_hand.mul_43(Fmatrix().invert(hands[o]),pose);
+            vr::HandHaptic(o,0.08f);
+            break;
+        }
+        // The teeth on the ring: the grenade held at the mouth.
+        Fvector head; Fmatrix head_world;
+        if (!vr::HeadPosition(head) || !vr::HeadTransform(head_world)) break;
+        const vr::V3 mouth=vr::MouthPoint({head.x,head.y,head.z},head_world.k.x,head_world.k.z);
+        const float at_mouth=vr::BodyDistance(mouth,{seat.x,seat.y,seat.z});
+        if (at_mouth>vr::mouth_reach) { g_pin.mouth_since=0; break; }
+        if (!g_pin.mouth_since) g_pin.mouth_since=Device.dwTimeGlobal|1;
+        else if (Device.dwTimeGlobal-g_pin.mouth_since>=vr::mouth_dwell_ms)
+        {
+            g_pin.where=PinTeeth;
+            g_pin.teeth_from=at_mouth;
+            vr::HandHaptic(h,0.08f);
+        }
+        break;
+    }
+    case PinHand:
+    {
+        if (!tracked[o]) break;
+        Fmatrix pin_world; pin_world.mul_43(hands[o],g_pin.in_hand);
+        Fvector ring; pin_world.transform_tiny(ring,ring_local);
+        const float off=ring.distance_to(seat);
+        if (!g_pin.out && off>=pin_clear)
+        {
+            g_pin.out=true;
+            for (int side=0;side<2;++side) vr::HandHaptic(side,0.25f);
+            Msg("* [VR body] %s: pin pulled by the %s hand",name,o ? "right" : "left");
+        }
+        else if (g_pin.out && off<=pin_home)
+        {
+            g_pin.out=false;
+            for (int side=0;side<2;++side) vr::HandHaptic(side,0.2f);
+            Msg("* [VR body] %s: pin pushed back in",name);
+        }
+        if (!trigger)
+        {
+            g_pin.where=g_pin.out ? PinGone : PinSeated;
+            if (g_pin.out) Msg("* [VR body] %s: pin let go",name);
+        }
+        break;
+    }
+    case PinTeeth:
+    {
+        Fvector head; Fmatrix head_world;
+        if (!vr::HeadPosition(head) || !vr::HeadTransform(head_world)) break;
+        const vr::V3 mouth=vr::MouthPoint({head.x,head.y,head.z},head_world.k.x,head_world.k.z);
+        if (vr::BodyDistance(mouth,{seat.x,seat.y,seat.z})-g_pin.teeth_from>=pin_bite_pull)
+        {
+            g_pin.where=PinGone;
+            g_pin.out=true;
+            for (int side=0;side<2;++side) vr::HandHaptic(side,0.25f);
+            Msg("* [VR body] %s: pin pulled with the teeth",name);
+        }
+        break;
+    }
+    case PinGone:
+        break;
+    }
+    return g_pin.out;
+}
+
+// Detectors and flashlights on the belt: their first-person model, as in
+// the hand (the world model of a flashlight is another one), posed at its
+// bind place. Made once per model.
+struct BeltCopy
+{
+    IRenderVisual* visual=nullptr;
+    xr_vector<Fmatrix> poses;
+    vr::WeaponPoseCache<xr_vector<Fmatrix>> cache;
+    bool tried=false;
+};
+xr_map<shared_str,BeltCopy> g_belt_copies;
+
+IRenderVisual* BeltVisual(PIItem item)
+{
+    auto* hud_item=smart_cast<CHudItem*>(item);
+    const shared_str section=hud_item ? hud_item->HudSection() : shared_str();
+    if (!section.size() || !pSettings->section_exist(section) || !pSettings->line_exist(section,"item_visual"))
+        return item->object().Visual();
+    BeltCopy& copy=g_belt_copies[section];
+    if (!copy.tried)
+    {
+        copy.tried=true;
+        copy.visual=::Render->model_Create(pSettings->r_string(section,"item_visual"));
+    }
+    IKinematics* model=copy.visual ? copy.visual->dcast_PKinematics() : nullptr;
+    if (!model) return item->object().Visual();
+    model->Callback(vrwi::CollapseHiddenBones,nullptr);
+    vr::ApplyWeaponPose(*model,copy.poses,vrwi::BonePose,bctCustom,nullptr,0.f,nullptr,{},false,true,true,
+        nullptr,{},{},nullptr,0.f,{},true,&copy.cache,Device.dwFrame);
+    return copy.visual;
+}
+
+void ReleaseBeltCopies()
+{
+    for (auto& entry:g_belt_copies)
+        if (entry.second.visual) ::Render->model_Delete(entry.second.visual);
+    g_belt_copies.clear();
+}
+}
+
+bool VrRenderGrenade(CActor& actor)
+{
+    auto* missile=smart_cast<CMissile*>(actor.inventory().ActiveItem());
+    Fmatrix pose;
+    if (!missile || !smart_cast<CGrenade*>(missile) || !VrMissilePose(actor,pose)) return false;
+    GrenadeModels* models=GrenadeCopies(*missile);
+    if (!models) return false;
+    const bool ours=g_pin.missile==missile->ID();
+    const bool seated=!ours || g_pin.where==PinSeated || g_pin.where==PinTeeth;
+    IKinematics& body=*models->body->dcast_PKinematics();
+    body.Callback(vrwi::CollapseHiddenBones,nullptr);
+    vr::ApplyWeaponPose(body,models->body_poses,vrwi::BonePose,bctCustom,nullptr,0.f,nullptr,{},false,true,true,
+        seated ? nullptr : models->pin_bone.c_str(),{},{},nullptr,0.f,{},true,&models->body_cache,Device.dwFrame);
+    ::Render->set_Transform(&pose);
+    ::Render->add_Visual(models->body);
+    Fmatrix hand;
+    if (ours && g_pin.where==PinHand && models->pin_bone.size() && vr::HandTransform(g_pin.hand,false,hand))
+    {
+        IKinematics& pin=*models->pin->dcast_PKinematics();
+        pin.Callback(vrwi::CollapseHiddenBones,nullptr);
+        vr::ApplyWeaponPose(pin,models->pin_poses,vrwi::BonePose,bctCustom,nullptr,0.f,nullptr,
+            {models->pin_bone.c_str()},true,true,true,nullptr,{},{},nullptr,0.f,{},true,&models->pin_cache,Device.dwFrame);
+        Fmatrix pin_pose; pin_pose.mul_43(hand,g_pin.in_hand);
+        ::Render->set_Transform(&pin_pose);
+        ::Render->add_Visual(models->pin);
+    }
+    return true;
 }
 
 void VrMissileUpdate(CActor& actor, const bool* tracked, const Fmatrix* hands, const bool* grip)
@@ -419,7 +765,14 @@ void VrMissileUpdate(CActor& actor, const bool* tracked, const Fmatrix* hands, c
         pickup.missile_stowed=true;
     }
     const int h=VrMissileHand(actor);
+    // A new grenade, or this one put away or gone: its pin is in.
+    if (g_pin.missile!=missile->ID() || pickup.missile_stowed || (missile->VrThrown() && !pickup.missile_pending))
+    {
+        g_pin=GrenadePin{};
+        g_pin.missile=missile->ID();
+    }
     if (h<0) return;
+    const bool needs_pin=smart_cast<CGrenade*>(missile)!=nullptr;
     const bool held=tracked[h] && grip[h];
     // In the hand only while the hand holds it: one let go while it was
     // still being drawn (or drawn by a key, never held) goes on the belt.
@@ -432,18 +785,35 @@ void VrMissileUpdate(CActor& actor, const bool* tracked, const Fmatrix* hands, c
     const bool released=pickup.missile_grip && !held && tracked[h];
     if (held && !pickup.missile_grip) pickup.missile_grip_since=Device.dwTimeGlobal;
     pickup.missile_grip=held;
-    // Keeping the hand closed on it readies it (the pin, for a grenade).
+    // Keeping the hand closed on it readies it; a grenade once its pin is
+    // pulled.
     if (held && !missile->VrThrown())
     {
         pickup.missile_pending=false;
-        missile->VrPrime();
+        // Pushed back in, it is safe again.
+        if (!needs_pin || StepGrenadePin(actor,*missile,h,tracked,hands)) missile->VrPrime();
+        else if (missile->VrPrimed()) missile->VrUnprime();
         return;
     }
     if (released)
     {
         Fvector velocity;
         float speed=0.f;
-        if (ThrowVelocity(pickup.throw_peak[h],missile,velocity,speed))
+        bool thrown=ThrowVelocity(pickup.throw_peak[h],missile,velocity,speed);
+        // Its pin in, a grenade is not thrown: back on the belt.
+        if (needs_pin && !g_pin.out)
+        {
+            if (thrown) Msg("* [VR body] %s: not thrown, its pin is in",missile->cNameSect().c_str());
+            thrown=false;
+        }
+        // Its pin out, one let go slowly drops from the hand, live.
+        else if (needs_pin && !thrown)
+        {
+            velocity=pickup.throw_peak[h];
+            speed=velocity.magnitude();
+            thrown=true;
+        }
+        if (thrown)
         {
             pickup.missile_pending=true;
             pickup.missile_pending_until=Device.dwTimeGlobal+1000;
@@ -548,7 +918,7 @@ void VrHeadGestureUpdate(CActor& actor, const bool* tracked, const Fmatrix* hand
     {
         // A free hand only: one holding anything uses its trigger for that.
         const bool at=tracked[h] && HandFree(actor,h) && !HandHoldsOther(actor,h) &&
-            h!=actor.m_vr_pickup.device_hand && VrHandAtHead(hands[h].c);
+            h!=VrDetectorHand(actor) && VrHandAtHead(hands[h].c);
         const bool trigger=at && vr::TriggerPulled(vr::HandTrigger(h));
         const bool button=at && vr::HandSecondaryButton(h);
         if (trigger && !head_trigger_down[h])
@@ -642,26 +1012,32 @@ void ReleaseVrBodySlots(CActor& actor)
     if (pickup.bolt_pouch) ::Render->model_Delete(pickup.bolt_pouch);
     pickup.bolt_pouch=nullptr;
     pickup.bolt_pouch_missing=false;
+    ReleaseGrenadeModels();
+    ReleaseBeltCopies();
 }
 
 int VrDetectorHand(CActor& actor)
 {
     auto* device=smart_cast<CCustomDevice*>(actor.inventory().ItemFromSlot(DETECTOR_SLOT));
     if (!g_vr_owns_present || !device || device->IsHidden()) return -1;
-    // The hand that took it from the belt, else the hand without the weapon.
+    // The hand that took it from the belt, else the hand without the weapon
+    // (any weapon in a hand: an unprofiled one was not counted, and the
+    // detector was shown in its hand).
     auto* weapon=smart_cast<CWeapon*>(actor.inventory().ActiveItem());
-    const int weapon_hand=weapon && weapon->VrMode() ? weapon->VrWeaponHand() : -1;
+    const int weapon_hand=weapon && !VrActiveItemLeaving(actor) ? weapon->VrWeaponHand() : -1;
     const int taken=actor.m_vr_pickup.device_hand;
     if (taken>=0 && taken!=weapon_hand) return taken;
     // Not taken by a hand: the free one, unless it is working the weapon.
-    if (weapon_hand>=0 && weapon->VrLeftHandBusy()) return -1;
+    if (weapon_hand>=0 && weapon->VrMode() && weapon->VrLeftHandBusy()) return -1;
     return weapon_hand>=0 ? 1-weapon_hand : 1-vr::DominantHand();
 }
 
 bool VrHandHoldsItem(CActor& actor, int hand)
 {
-    return HandHoldsOther(actor,hand) ||
-        (actor.m_vr_pickup.device_hand==hand && VrDetectorHand(actor)==hand);
+    // The device in whichever hand it is shown in (VrDetectorHand), taken by
+    // that hand or opened by a key: one owner for its place, its controls and
+    // what else the hand may do.
+    return HandHoldsOther(actor,hand) || (hand>=0 && VrDetectorHand(actor)==hand);
 }
 
 namespace
@@ -672,7 +1048,7 @@ int ReturnSlot(CActor& actor, int hand)
 {
     const auto& pickup=actor.m_vr_pickup;
     if (pickup.bolt_hand==hand) return vr::BodyBolt;
-    if (pickup.device_hand==hand) return vr::BodyDetector;
+    if (VrDetectorHand(actor)==hand) return vr::BodyDetector;
     if (pickup.slot_hold_hand==hand)
         for (int kind:{vr::BodyKnife,vr::BodyBinoculars})
             if (PIItem item=actor.inventory().ItemFromSlot(InventorySlot(kind));
@@ -747,27 +1123,149 @@ bool FirstPersonHold(CActor& actor, CHudItem& item, Fmatrix& hold)
 // (toward the knuckles, toward the index side, and their cross) and the
 // centre of the fist. Sampled once per hands and item section. Also every
 // bone's local pose and the hand bone in the item's frame, so the arms draw
-// the animation's own hand and fingers around it (VrKnifeBones).
+// the animation's own hand and fingers around it (VrItemBones).
 struct AuthoredGrip
 {
     bool valid=false;
+    // Taken from the game's own hands holding it (CaptureItemGrip): final.
+    bool live=false;
     Fvector basis[3];
     Fvector palm;
     Fmatrix hand_in_item;
     xr_vector<Fmatrix> locals;
+    // The same hold in the other hand (MirrorGrip): its hand bone in the
+    // mirrored item, and every bone's local pose; empty when the hands
+    // model has no counterpart bones.
+    Fmatrix mirror_hand_in_item;
+    xr_vector<Fmatrix> mirror_locals;
     shared_str visual;
 };
 xr_map<shared_str,AuthoredGrip> g_authored_grips;
+
+// The bone on the other side ("l_hand" <-> "r_hand", "bip01_l_finger1" <->
+// "bip01_r_finger1"); itself for a bone on the centre line.
+u16 Counterpart(IKinematics& model, u16 id)
+{
+    xr_string name=model.LL_BoneName_dbg(id);
+    for (size_t at=0; at+1<name.size(); ++at)
+    {
+        if ((at && name[at-1]!='_') || (name[at]!='l' && name[at]!='r') || name[at+1]!='_') continue;
+        name[at]=name[at]=='l' ? 'r' : 'l';
+        const u16 other=model.LL_BoneID(name.c_str());
+        return other!=BI_NONE ? other : id;
+    }
+    return id;
+}
+
+// The hold mirrored across the centre plane (x) into the other hand. Each
+// bone of the other side is the mirror image of its counterpart, turned by
+// how its own axes differ from its counterpart's mirrored ones in the bind
+// pose (C = inverse(mirror x counterpart's bind) x own bind, its turn only):
+// in the item, hand = mirror x hand x C(hand); a local pose is
+// inverse(C(parent)) x counterpart's local x C(bone). The item is mirrored
+// the same way (AuthoredHoldPose), which for a grenade, a detector or a
+// knife is the item itself.
+void MirrorGrip(AuthoredGrip& grip, IKinematics& model, u16 wrist)
+{
+    grip.mirror_locals.clear();
+    const u16 count=model.LL_BoneCount();
+    xr_vector<Fmatrix> bind;
+    model.LL_GetBindTransform(bind);
+    if (bind.size()<count || grip.locals.size()!=count || wrist>=count) return;
+    Fmatrix flip; flip.identity(); flip.i.x=-1.f;
+    xr_vector<u16> other(count);
+    xr_vector<Fmatrix> fix(count);
+    for (u16 id=0;id<count;++id)
+    {
+        other[id]=Counterpart(model,id);
+        Fmatrix mirrored; mirrored.mul_43(flip,bind[other[id]]);
+        fix[id].invert(mirrored);
+        fix[id].mulB_43(bind[id]);
+        fix[id].c.set(0.f,0.f,0.f);
+    }
+    if (other[wrist]==wrist) return;
+    grip.mirror_locals=grip.locals;
+    for (u16 id=0;id<count;++id)
+    {
+        const u16 parent=model.LL_GetData(id).GetParentID();
+        if (other[id]==id || parent>=count) continue;
+        Fmatrix local; local.mul_43(Fmatrix().invert(fix[parent]),grip.locals[other[id]]);
+        grip.mirror_locals[id].mul_43(local,fix[id]);
+    }
+    grip.mirror_hand_in_item.mul_43(flip,grip.hand_in_item);
+    grip.mirror_hand_in_item.mulB_43(fix[other[wrist]]);
+}
+
+shared_str GripKey(const shared_str& hands, const shared_str& section, bool left)
+{
+    string512 key; xr_sprintf(key,"%s|%s|%c",hands.c_str(),section.c_str(),left ? 'l' : 'r');
+    return key;
+}
+
+// The hand's axes (toward the knuckles, toward the index side, and their
+// cross), the centre of the fist and every bone's local pose, from a hands
+// model whose bones are posed; to_item maps its space into the item's.
+bool FillGrip(AuthoredGrip& grip, IKinematics& model, const Fmatrix& to_item, bool left, const shared_str& visual)
+{
+    const u16 wrist=model.LL_BoneID(left ? "l_hand" : "r_hand");
+    const u16 index=model.LL_BoneID(left ? "bip01_l_finger1" : "bip01_r_finger1");
+    const u16 middle=model.LL_BoneID(left ? "bip01_l_finger2" : "bip01_r_finger2");
+    if (wrist==BI_NONE || index==BI_NONE || middle==BI_NONE) return false;
+    const auto at=[&](u16 id) { Fvector p; to_item.transform_tiny(p,model.LL_GetTransform(id).c); return p; };
+    const Fvector w=at(wrist), i=at(index), m=at(middle);
+    Fvector knuckles; knuckles.add(i,m).mul(0.5f);
+    Fvector forward; forward.sub(knuckles,w);
+    Fvector side; side.sub(i,m);
+    if (forward.square_magnitude()<=EPS_S || side.square_magnitude()<=EPS_S) return false;
+    forward.normalize();
+    side.mad(forward,-side.dotproduct(forward)).normalize_safe();
+    grip.basis[0]=forward; grip.basis[1]=side;
+    grip.basis[2].crossproduct(forward,side);
+    // The fist's centre: behind the knuckles, in from the palm (the cross of
+    // knuckles and index side is the right palm's normal, the back of a left
+    // hand).
+    grip.palm=knuckles;
+    grip.palm.mad(forward,-0.045f).mad(grip.basis[2],left ? -0.025f : 0.025f);
+    grip.hand_in_item.mul_43(to_item,model.LL_GetTransform(wrist));
+    const u16 count=model.LL_BoneCount();
+    grip.locals.resize(count);
+    for (u16 id=0;id<count;++id)
+    {
+        const u16 parent=model.LL_GetData(id).GetParentID();
+        grip.locals[id]=model.LL_GetTransform(id);
+        if (parent<count)
+        {
+            Fmatrix inverse; inverse.invert(model.LL_GetTransform(parent));
+            grip.locals[id].mulA_43(inverse);
+        }
+    }
+    grip.visual=visual;
+    grip.valid=true;
+    MirrorGrip(grip,model,wrist);
+    return true;
+}
 // left: the animation's left hand holds it (detectors and flashlights are
 // held in the left hand in first person; a knife in the right).
 const AuthoredGrip* SampleAuthoredGrip(const shared_str& section, bool left=false)
 {
     if (!g_player_hud || !section.size()) return nullptr;
     const shared_str& hands=g_player_hud->section_name();
-    string512 key; xr_sprintf(key,"%s|%s|%c",hands.c_str(),section.c_str(),left ? 'l' : 'r');
-    const shared_str name=key;
+    // Asked several times a frame (each hand's arms, each eye): the last
+    // answer per side is kept by its shared strings, so the key below (a
+    // format and a string-table insert) is built only on a change.
+    struct Last { shared_str hands, section; const AuthoredGrip* grip=nullptr; bool set=false; };
+    static Last last[2];
+    Last& recent=last[left ? 1 : 0];
+    if (recent.set && recent.hands==hands && recent.section==section) return recent.grip;
+    const auto remember=[&](const AuthoredGrip* grip)
+    {
+        recent.hands=hands; recent.section=section; recent.grip=grip; recent.set=true;
+        return grip;
+    };
+    // The cache's entries never move (a map), so a remembered pointer stays valid.
+    const shared_str name=GripKey(hands,section,left);
     auto found=g_authored_grips.find(name);
-    if (found!=g_authored_grips.end()) return found->second.valid ? &found->second : nullptr;
+    if (found!=g_authored_grips.end()) return remember(found->second.valid ? &found->second : nullptr);
     AuthoredGrip& grip=g_authored_grips[name];
     if (!hands.size() || !pSettings->section_exist(section) || !pSettings->line_exist(hands,"visual") ||
         !pSettings->line_exist(section,"item_position") || !pSettings->line_exist(section,"item_orientation"))
@@ -786,16 +1284,10 @@ const AuthoredGrip* SampleAuthoredGrip(const shared_str& section, bool left=fals
     auto* animated=visual ? visual->dcast_PKinematicsAnimated() : nullptr;
     auto* model=visual ? visual->dcast_PKinematics() : nullptr;
     const u16 anchor=model ? model->LL_BoneID(anchors[anchor_index]) : BI_NONE;
-    const u16 wrist=model ? model->LL_BoneID(left ? "l_hand" : "r_hand") : BI_NONE;
-    const u16 index=model ? model->LL_BoneID(left ? "bip01_l_finger1" : "bip01_r_finger1") : BI_NONE;
-    const u16 middle=model ? model->LL_BoneID(left ? "bip01_l_finger2" : "bip01_r_finger2") : BI_NONE;
-    if (animated && anchor!=BI_NONE && wrist!=BI_NONE && index!=BI_NONE && middle!=BI_NONE)
+    if (animated && anchor!=BI_NONE)
     {
-        for (u16 part=0;part<animated->partitions().count();++part)
-            animated->PlayCycle(part,idle->m_animations[0].mid,FALSE,0,0,0,1.f);
-        animated->LL_UpdateTracks(0.f,true,true);
-        model->CalculateBones_Invalidate();
-        model->CalculateBones(TRUE);
+        vrwi::PlayHandsMotion(*animated,idle->m_animations[0].mid);
+        vrwi::EvaluateBones(*animated,*model,0.f);
         Fvector ypr=pSettings->r_fvector3(section,"item_orientation");
         ypr.mul(PI/180.f);
         Fmatrix offset; offset.setHPB(ypr.x,ypr.y,ypr.z);
@@ -803,40 +1295,9 @@ const AuthoredGrip* SampleAuthoredGrip(const shared_str& section, bool left=fals
         Fmatrix item, to_item;
         item.mul_43(model->LL_GetTransform(anchor),offset);
         to_item.invert(item);
-        const auto at=[&](u16 id) { Fvector p; to_item.transform_tiny(p,model->LL_GetTransform(id).c); return p; };
-        const Fvector w=at(wrist), i=at(index), m=at(middle);
-        Fvector knuckles; knuckles.add(i,m).mul(0.5f);
-        Fvector forward; forward.sub(knuckles,w);
-        Fvector side; side.sub(i,m);
-        if (forward.square_magnitude()>EPS_S && side.square_magnitude()>EPS_S)
-        {
-            forward.normalize();
-            side.mad(forward,-side.dotproduct(forward)).normalize_safe();
-            grip.basis[0]=forward; grip.basis[1]=side;
-            grip.basis[2].crossproduct(forward,side);
-            // The fist's centre: behind the knuckles, in from the palm (the
-            // cross of knuckles and index side is the right palm's normal,
-            // the back of a left hand).
-            grip.palm=knuckles;
-            grip.palm.mad(forward,-0.045f).mad(grip.basis[2],left ? -0.025f : 0.025f);
-            grip.hand_in_item.mul_43(to_item,model->LL_GetTransform(wrist));
-            const u16 count=model->LL_BoneCount();
-            grip.locals.resize(count);
-            for (u16 id=0;id<count;++id)
-            {
-                const u16 parent=model->LL_GetData(id).GetParentID();
-                grip.locals[id]=model->LL_GetTransform(id);
-                if (parent<count)
-                {
-                    Fmatrix inverse; inverse.invert(model->LL_GetTransform(parent));
-                    grip.locals[id].mulA_43(inverse);
-                }
-            }
-            grip.visual=pSettings->r_string(hands,"visual");
-            grip.valid=true;
+        if (FillGrip(grip,*model,to_item,left,pSettings->r_string(hands,"visual")))
             Msg("* [VR body] %s: held as the first-person idle's %s hand holds it",section.c_str(),
                 left ? "left" : "right");
-        }
     }
     if (visual) ::Render->model_Delete(visual);
     return grip.valid ? &grip : nullptr;
@@ -845,8 +1306,22 @@ const AuthoredGrip* SampleAuthoredGrip(const shared_str& section, bool left=fals
 // The item placed so the animation's hand lies on the controller: its axes
 // onto the controller hand's (knuckles forward, index side up the handle,
 // as player_hud_legs.cpp poses the hands) and its fist on the grip centre.
-bool AuthoredHoldPose(int hand, const AuthoredGrip& authored, Fmatrix& pose)
+// mirror: the controller is the other hand from the animation's. The hold
+// is mirrored across the item's centre plane (x): a mirror image of the
+// hand holds a mirror image of the item, which for a grenade, a detector
+// or a knife is the item itself. Taken unmirrored, a left hand held a
+// grenade with the right hand's grip, through its fingers.
+bool AuthoredHoldPose(int hand, const AuthoredGrip& sampled, Fmatrix& pose, bool mirror=false)
 {
+    AuthoredGrip mirrored;
+    if (mirror)
+    {
+        for (int n=0;n<3;++n) mirrored.basis[n].set(-sampled.basis[n].x,sampled.basis[n].y,sampled.basis[n].z);
+        // The cross of two mirrored axes turns the other way.
+        mirrored.basis[2].invert();
+        mirrored.palm.set(-sampled.palm.x,sampled.palm.y,sampled.palm.z);
+    }
+    const AuthoredGrip& authored=mirror ? mirrored : sampled;
     Fmatrix grip;
     if (!vr::HandTransform(hand,false,grip)) return false;
     Fvector frame[3];
@@ -955,9 +1430,63 @@ namespace
 // hold would need a mirrored model: there it keeps the camera-relative hold.
 bool DeviceInPalm(int hand, CCustomDevice& device, Fmatrix& pose)
 {
-    if (hand!=0) return false;
     const AuthoredGrip* authored=SampleAuthoredGrip(device.HudSection(),true);
-    return authored && AuthoredHoldPose(hand,*authored,pose);
+    return authored && AuthoredHoldPose(hand,*authored,pose,hand!=0);
+}
+}
+
+namespace
+{
+// An item's hold as the game's own first-person hands show it, once they
+// rest in its idle: the idle sampled on a private copy (SampleAuthoredGrip)
+// put about a quarter of GAMMA's guns off their hands, which the same
+// capture from the live hands fixed (CVrWeaponInteraction::CaptureLiveHands).
+// Taken when the hand has kept still on the item for two frames (the
+// idle's blend in is over), at 0.4 s whatever it shows; once per hands and
+// item section for the session.
+struct GripCapture { shared_str key; Fmatrix last=Fidentity; int still=0; u32 since=0; };
+GripCapture g_grip_capture[2];
+
+void CaptureItemGrip(CHudItem& item, bool left)
+{
+    GripCapture& capture=g_grip_capture[left ? 1 : 0];
+    attachable_hud_item* hud=item.HudItemData();
+    if (!g_player_hud || !hud || !hud->m_model || !g_player_hud->m_model || !g_player_hud->m_model_2)
+    { capture=GripCapture{}; return; }
+    const shared_str key=GripKey(g_player_hud->section_name(),item.HudSection(),left);
+    if (capture.key!=key) { capture=GripCapture{}; capture.key=key; }
+    // Sampled first: the capture replaces that sample.
+    if (!SampleAuthoredGrip(item.HudSection(),left)) return;
+    AuthoredGrip& grip=g_authored_grips[key];
+    if (grip.live) return;
+    if (item.GetState()!=CHUDState::eIdle || g_player_hud->script_anim_part!=u8(-1))
+    { capture.since=0; capture.still=0; return; }
+    if (!capture.since) { capture.since=Device.dwTimeGlobal; return; }
+    // The item where the game places it now, from the hands model it hangs
+    // from (player_hud::calc_transform), not its transform (VR's, for the
+    // device, once VrUpdateHudItems has run).
+    const bool second=hud->m_attach_place_idx!=0;
+    IKinematics* hands=(second ? g_player_hud->m_model_2 : g_player_hud->m_model)->dcast_PKinematics();
+    const Fmatrix& hands_world=second ? g_player_hud->m_transform_2 : g_player_hud->m_transform;
+    const u16 wrist=hands ? hands->LL_BoneID(left ? "l_hand" : "r_hand") : u16(BI_NONE);
+    if (wrist==BI_NONE) return;
+    Fmatrix item_world;
+    g_player_hud->calc_transform(hud->m_attach_place_idx,hud->m_attach_offset,item_world,
+        hud->m_measures.m_bLeadGunLeftHand);
+    Fmatrix to_item; to_item.invert(item_world); to_item.mulB_43(hands_world);
+    Fmatrix now; now.mul_43(to_item,hands->LL_GetTransform(wrist));
+    const bool still=now.c.distance_to(capture.last.c)<=0.0015f &&
+        now.k.dotproduct(capture.last.k)>=_cos(deg2rad(0.5f)) && now.j.dotproduct(capture.last.j)>=_cos(deg2rad(0.5f));
+    capture.last=now;
+    capture.still=still ? capture.still+1 : 0;
+    if (capture.still<2 && Device.dwTimeGlobal-capture.since<400) return;
+    AuthoredGrip live;
+    if (!FillGrip(live,*hands,to_item,left,grip.visual)) return;
+    const float moved=live.palm.distance_to(grip.palm);
+    live.live=true;
+    grip=live;
+    Msg("* [VR body] %s: hold taken from the game's own %s hand (the sampled one was %.0f mm off)",
+        item.HudSection().c_str(),left ? "left" : "right",moved*1000.f);
 }
 }
 
@@ -966,6 +1495,17 @@ void VrUpdateHudItems(CActor& actor)
     auto& pickup=actor.m_vr_pickup;
     pickup.device_pose_valid=pickup.knife_pose_valid=false;
     if (!g_vr_owns_present || !vr::GameplayActive()) return;
+    if (vr::AnimatedGrip())
+    {
+        // The device in the left hand's animation, a grenade or knife in
+        // the right's, while it is out.
+        auto* shown=smart_cast<CCustomDevice*>(actor.inventory().ItemFromSlot(DETECTOR_SLOT));
+        if (shown && VrDetectorHand(actor)>=0) CaptureItemGrip(*shown,true);
+        PIItem active=actor.inventory().ActiveItem();
+        auto* missile=smart_cast<CMissile*>(active);
+        if (missile && VrMissileHand(actor)>=0 && !missile->VrThrown()) CaptureItemGrip(*missile,false);
+        else if (CWeapon* belt=BeltItemInHand(actor)) CaptureItemGrip(*belt,false);
+    }
     Fmatrix hold;
     auto* device=smart_cast<CCustomDevice*>(actor.inventory().ItemFromSlot(DETECTOR_SLOT));
     const int device_hand=VrDetectorHand(actor);
@@ -1007,6 +1547,19 @@ bool VrDevicePose(CActor& actor, Fmatrix& pose)
     return true;
 }
 
+bool VrMissilePose(CActor& actor, Fmatrix& pose)
+{
+    auto* missile=smart_cast<CMissile*>(actor.inventory().ActiveItem());
+    const int hand=VrMissileHand(actor);
+    if (!missile || hand<0 || missile->VrThrown()) return false;
+    attachable_hud_item* hud=missile->HudItemData();
+    if (!hud || !hud->m_model) return false;
+    // Held as the knife is: where the first-person animation's hand holds
+    // it. The world model at a generic hand pose sat through the fingers.
+    const AuthoredGrip* authored=SampleAuthoredGrip(missile->HudSection());
+    return authored && AuthoredHoldPose(hand,*authored,pose,hand==0);
+}
+
 bool VrKnifePose(CActor& actor, Fmatrix& pose)
 {
     bool blade=false;
@@ -1014,24 +1567,49 @@ bool VrKnifePose(CActor& actor, Fmatrix& pose)
     if (!actor.m_vr_pickup.knife_pose_valid || !item) return false;
     // As the flat-screen idle animation's hand holds it, when that is known.
     if (const AuthoredGrip* authored=SampleAuthoredGrip(item->HudSection()))
-        if (AuthoredHoldPose(item->VrWeaponHand(),*authored,pose)) return true;
+        if (AuthoredHoldPose(item->VrWeaponHand(),*authored,pose,item->VrWeaponHand()==0)) return true;
     if (!HandHoldPose(item->VrWeaponHand(),actor.m_vr_pickup.knife_hold,
         item->HudItemData()->m_model->dcast_RenderVisual(),blade,pose)) pose=actor.m_vr_pickup.knife_pose;
     return true;
 }
 
-bool VrKnifeBones(CActor& actor, int side, VrHandBones& bones)
+bool VrItemBones(CActor& actor, int side, VrHandBones& bones)
 {
-    // The idle animation's right hand, bone for bone: it cannot be mirrored
-    // onto the left.
-    CWeapon* knife=BeltItemInHand(actor);
-    if (!vr::AnimatedGrip() || side!=1 || !knife || knife->VrWeaponHand()!=1)
-        return false;
-    const AuthoredGrip* authored=SampleAuthoredGrip(knife->HudSection());
+    // The idle animation's own hand, bone for bone, where the item is drawn
+    // (the knife, binoculars, a grenade, the detector or flashlight); in the
+    // other hand, its mirror image. Drawn by the controller's pose with the
+    // fingers closing on contact, the hand missed the item: a grenade
+    // through the palm, a detector above the fingers.
+    if (!vr::AnimatedGrip()) return false;
+    const AuthoredGrip* authored=nullptr;
+    bool left_animation=false;
     Fmatrix pose;
-    if (!authored || authored->locals.empty() || !VrKnifePose(actor,pose)) return false;
-    bones.hand.mul_43(pose,authored->hand_in_item);
-    bones.locals=&authored->locals;
+    auto* missile=smart_cast<CMissile*>(actor.inventory().ActiveItem());
+    if (CWeapon* knife=BeltItemInHand(actor); knife && knife->VrWeaponHand()==side)
+    {
+        authored=SampleAuthoredGrip(knife->HudSection());
+        if (!authored || !VrKnifePose(actor,pose)) return false;
+    }
+    else if (missile && VrMissileHand(actor)==side)
+    {
+        authored=SampleAuthoredGrip(missile->HudSection());
+        if (!authored || !VrMissilePose(actor,pose)) return false;
+    }
+    else if (VrDetectorHand(actor)==side)
+    {
+        auto* device=smart_cast<CCustomDevice*>(actor.inventory().ItemFromSlot(DETECTOR_SLOT));
+        // A flashlight turned over in the fist is not as the animation holds it.
+        if (!device || (actor.m_vr_pickup.device_flipped && smart_cast<CFlashlight*>(device)) ||
+            !DeviceInPalm(side,*device,pose)) return false;
+        authored=SampleAuthoredGrip(device->HudSection(),true);
+        left_animation=true;
+    }
+    if (!authored) return false;
+    const bool mirror=(side==0)!=left_animation;
+    const xr_vector<Fmatrix>& locals=mirror ? authored->mirror_locals : authored->locals;
+    if (locals.empty()) return false;
+    bones.hand.mul_43(pose,mirror ? authored->mirror_hand_in_item : authored->hand_in_item);
+    bones.locals=&locals;
     bones.visual=authored->visual;
     return true;
 }
@@ -1161,6 +1739,49 @@ void RenderVrBinoculars(CActor& actor)
     vr::DrawScopeLens(centre,Fvector().mul(head.i,radius),Fvector().mul(head.j,radius),1.f,0.f,0.f);
 }
 
+namespace
+{
+// A device its script tunes with the mouse buttons ([vr_derivation]
+// mouse_tuned_devices; GAMMA's RF receiver: left button up, right down,
+// Shift ten at a time, with nothing else in the hands): the trigger tunes
+// up and the upper face button down, a step a press; held half a second,
+// ten at a time every 0.15 s. Sent as those keys' releases, which is what
+// its script reads.
+void TuneDevice(CActor& actor, CCustomDevice& device, int hand, bool up, bool down, bool up_was, bool down_was)
+{
+    static u32 next_step=0;
+    static bool told=false;
+    if (!vrwi::NameHasAny(device.cNameSect().c_str(),vrwi::VrNames().mouse_tuned_devices)) return;
+    const bool pressed=(up && !up_was) || (down && !down_was);
+    if (!pressed && !up && !down) return;
+    // The receiver's script tunes only with nothing in the hands; the left
+    // button's release would also reach a weapon as its trigger.
+    if (actor.inventory().ActiveItem())
+    {
+        if (pressed && !told)
+            Msg("* [VR body] %s: tuned with no weapon in the hands (its script's rule)",device.cNameSect().c_str());
+        told=told || pressed;
+        return;
+    }
+    const auto step=[&](bool upward, bool ten)
+    {
+        if (ten) Level().IR_OnKeyboardHold(DIK_LSHIFT);
+        Level().IR_OnKeyboardRelease(upward ? MOUSE_1 : MOUSE_2);
+        vr::HandHaptic(hand,0.04f);
+    };
+    if (pressed)
+    {
+        step(up && !up_was,false);
+        next_step=Device.dwTimeGlobal+500;
+    }
+    else if (int(Device.dwTimeGlobal-next_step)>=0)
+    {
+        step(up,true);
+        next_step=Device.dwTimeGlobal+150;
+    }
+}
+}
+
 void VrHandItemsUpdate(CActor& actor, const bool* tracked, const bool* grip)
 {
     auto& pickup=actor.m_vr_pickup;
@@ -1232,9 +1853,31 @@ void VrHandItemsUpdate(CActor& actor, const bool* tracked, const bool* grip)
     const bool coming=device && device->IsHidden() &&
         (device->GetNextState()!=CHUDState::eHidden || Device.dwTimeGlobal-pickup.device_taken_time<400);
     if (!device || (device->IsHidden() && !coming)) pickup.device_hand=-1;
-    else if (const int h=pickup.device_hand; h>=0 && tracked[h])
+    // One owner: the hand it is shown in (VrDetectorHand), whose trigger and
+    // button work it. One the hand that took it gave up for a weapon (a key
+    // drew it there) moved to the other hand, which does not grip it: held
+    // there as one opened by a key, until put back at its slot or by a key.
+    // Its controls followed the hand that took it, the weapon hand.
+    const int shown=device ? VrDetectorHand(actor) : -1;
+    if (shown>=0 && pickup.device_hand>=0 && shown!=pickup.device_hand) pickup.device_hand=-1;
+    // Also after this update has not run (a load, a menu) or for another
+    // actor: kept across a load, a trigger held through it toggled the light.
+    static int controls_hand=-1;
+    static u32 controls_frame=0;
+    static const CActor* controls_actor=nullptr;
+    const bool continuous=controls_actor==&actor && Device.dwFrame-controls_frame<=1;
+    controls_frame=Device.dwFrame; controls_actor=&actor;
+    if (shown!=controls_hand || !continuous)
     {
-        if (!grip[h])
+        // A trigger or button already held in the new hand is not a press.
+        controls_hand=shown;
+        pickup.device_trigger_down=shown>=0 && vr::TriggerPulled(vr::HandTrigger(shown));
+        pickup.device_button_down=shown>=0 && vr::HandSecondaryButton(shown);
+    }
+    const bool out=device && !(device->IsHidden() && !coming);
+    if (const int h=shown; out && h>=0 && tracked[h])
+    {
+        if (pickup.device_hand==h && !grip[h])
         {
             PressAction(actor,kDETECTOR);
             vr::HandHaptic(h,0.12f);
@@ -1244,7 +1887,15 @@ void VrHandItemsUpdate(CActor& actor, const bool* tracked, const bool* grip)
         {
             const bool trigger=vr::TriggerPulled(vr::HandTrigger(h));
             if (trigger && !pickup.device_trigger_down)
-                if (auto* light=smart_cast<CFlashlight*>(device)) { light->VrToggleLight(); vr::HandHaptic(h,0.08f); }
+                if (auto* light=smart_cast<CFlashlight*>(device))
+                {
+                    light->VrToggleLight();
+                    vr::HandHaptic(h,0.08f);
+                    Msg("* [VR body] %s: light %s by the %s trigger",device->cNameSect().c_str(),
+                        light->torch_active() ? "on" : "off",h ? "right" : "left");
+                }
+            TuneDevice(actor,*device,h,trigger,vr::HandSecondaryButton(h),pickup.device_trigger_down,
+                pickup.device_button_down);
             pickup.device_trigger_down=trigger;
             // The upper face button (Y/B) turns a flashlight over in the
             // fist: held overhand, the hand raised, or underhand. A
@@ -1318,10 +1969,17 @@ void RenderVrChestPda(CActor& actor, const Fmatrix& body)
     IRenderVisual* visual=pda->object().Visual();
     Fvector point;
     if (!visual || !VrBodySlotPoint(actor,vr::BodyPda,point)) return;
-    const float lean=deg2rad(20.f);
+    // With the body shown, flat against its chest where it is, facing out
+    // from it there.
+    VrBodyRest rest;
+    const bool resting=VrOnBodyRest(actor,vr::BodyPda,rest);
+    const Fmatrix frame=resting ? OutwardFrame(rest.out) : body;
+    // Nearly flat on the chest: a steeper lean keeps the top on it and
+    // swings the bottom edge out.
+    const float lean=deg2rad(8.f);
     Fvector out, up;
-    out.set(body.k).mul(_cos(lean)).mad(body.j,_sin(lean));
-    up.set(body.j).mul(_cos(lean)).mad(body.k,-_sin(lean));
+    out.set(frame.k).mul(_cos(lean)).mad(frame.j,_sin(lean));
+    up.set(frame.j).mul(_cos(lean)).mad(frame.k,-_sin(lean));
     const Fbox& box=visual->getVisData().box;
     Fvector size; box.getsize(size);
     const float extent[3]={size.x,size.y,size.z};
@@ -1333,12 +1991,13 @@ void RenderVrChestPda(CActor& actor, const Fmatrix& body)
     }
     if (thin==longest) longest=(thin+1)%3;
     Fvector axes[3];
-    axes[thin]=out; axes[longest]=up; axes[3-thin-longest]=body.i;
+    axes[thin]=out; axes[longest]=up; axes[3-thin-longest]=frame.i;
     // Keep the frame's handedness (i = j x k).
     Fvector check; check.crossproduct(axes[1],axes[2]);
     if (check.dotproduct(axes[0])<0.f) axes[3-thin-longest].invert();
     Fmatrix pose; pose.identity();
     pose.i=axes[0]; pose.j=axes[1]; pose.k=axes[2];
+    if (resting) { DrawModelResting(actor,visual,pose,1.f,rest); return; }
     // Its back against the chest.
     Fvector centre; box.getcenter(centre);
     pose.transform_dir(centre);
@@ -1373,6 +2032,13 @@ bool RenderVrBoltPouch(CActor& actor, const Fmatrix& body)
     const float longest=_max(extent.x,_max(extent.y,extent.z));
     if (longest<EPS_L) return false;
     const float scale=READ_IF_EXISTS(pSettings,r_float,"vr_bolt_pouch","size",0.14f)/longest;
+    // With the body shown, upright against it, facing out where it hangs.
+    VrBodyRest rest;
+    if (VrOnBodyRest(actor,vr::BodyBolt,rest))
+    {
+        DrawModelResting(actor,visual,OutwardFrame(rest.out),scale,rest);
+        return true;
+    }
     // Upright, facing out from the body, centred on the slot.
     Fmatrix pose; pose.identity();
     pose.i.set(body.i).mul(scale); pose.j.set(body.j).mul(scale); pose.k.set(body.k).mul(scale);
@@ -1422,14 +2088,48 @@ void RenderVrBodySlots(CActor& actor)
             if (!leaving && !stowed) continue;
         }
         if (kind==vr::BodyDetector && hud && !hud->IsHidden()) continue;
-        IRenderVisual* visual=item->object().Visual();
+        IRenderVisual* visual=kind==vr::BodyDetector ? BeltVisual(item) : item->object().Visual();
         Fvector point;
         if (!visual || !VrBodySlotPoint(actor,kind,point)) continue;
+        // With the body shown, against it, facing out where it hangs.
+        VrBodyRest rest;
+        if (VrOnBodyRest(actor,kind,rest))
+        {
+            const Fmatrix frame=OutwardFrame(rest.out);
+            Fmatrix pose; pose.identity();
+            pose.i=frame.i; pose.j=frame.k; pose.k.set(0,-1,0);
+            DrawModelResting(actor,visual,pose,1.f,rest);
+            continue;
+        }
         Fmatrix pose; pose.identity();
         pose.i=body.i; pose.j=body.k; pose.k.set(0,-1,0);
         DrawModelAt(visual,pose,point);
     }
     RenderVrChestPda(actor,body);
+    // The quick-use items in their pockets, always shown, upright, small
+    // enough to fit a pocket ([vr_body_slots] pocket_size, metres along the
+    // longest side); none for a pocket whose item is in a hand.
+    const float pocket_size=READ_IF_EXISTS(pSettings,r_float,"vr_body_slots","pocket_size",0.10f);
+    for (int pocket=0; pocket<4; ++pocket)
+    {
+        const auto& held=actor.m_vr_pickup.pocket_held;
+        if (held[0]==pocket || held[1]==pocket) continue;
+        PIItem item=PocketItem(actor,pocket);
+        IRenderVisual* visual=item ? item->object().Visual() : nullptr;
+        const int kind=vr::BodyPocket1+pocket;
+        Fvector point;
+        if (!visual || !VrBodySlotPoint(actor,kind,point)) continue;
+        const float scale=FitScale(visual,pocket_size);
+        VrBodyRest rest;
+        if (VrOnBodyRest(actor,kind,rest))
+        {
+            DrawModelResting(actor,visual,OutwardFrame(rest.out),scale,rest);
+            continue;
+        }
+        Fmatrix pose=body;
+        pose.i.mul(scale); pose.j.mul(scale); pose.k.mul(scale);
+        DrawModelAt(visual,pose,point);
+    }
     const auto draw=[](PIItem item, Fmatrix pose, const Fvector& point)
     {
         if (IRenderVisual* visual=item ? item->object().Visual() : nullptr) DrawModelAt(visual,pose,point);
@@ -1452,12 +2152,5 @@ void RenderVrBodySlots(CActor& actor)
             draw(PocketItem(actor,pickup.pocket_held[h]),pose,hand.c);
             continue;
         }
-        // Upright in the pocket a free hand reaches into, to show what it holds.
-        const int kind=pickup.body_hover[h];
-        Fvector point;
-        if (!vr::IsPocket(kind) || !VrBodySlotPoint(actor,kind,point)) continue;
-        Fmatrix pose; pose.identity();
-        pose.i=body.i; pose.j=body.j; pose.k=body.k;
-        draw(PocketItem(actor,kind-vr::BodyPocket1),pose,point);
     }
 }

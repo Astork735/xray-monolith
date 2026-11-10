@@ -31,6 +31,11 @@ public:
     // in the horizontal direction (x right, z forward) of its frame; 0 when
     // unknown. Body slots are kept outside it.
     float   vr_body_surface(float height, float x, float z) const;
+    // How far out along the horizontal direction (x, z) a flat item facing
+    // that way meets the body: the furthest the body reaches toward it
+    // within its footprint, `low` to `high` above the pelvis and
+    // `half_width` to each side. 0 when unknown.
+    float   vr_body_contact(float low, float high, float x, float z, float half_width) const;
 
 private:
     IKinematics* m_model = nullptr;
@@ -102,6 +107,8 @@ private:
     u16                     m_vr_body_arm[2]{u16(-1),u16(-1)};
     float                   m_vr_body_yaw = 0.f;
     bool                    m_vr_body_yaw_valid = false, m_vr_body_solved = false;
+    // The body scale last logged (solve_vr_body).
+    float                   m_vr_body_scale_logged = 1.f;
     // The upper chest hidden this frame: bent so close in front of the eyes
     // that it would fill the view.
     bool                    m_vr_chest_hidden = false;

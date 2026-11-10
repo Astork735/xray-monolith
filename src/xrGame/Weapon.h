@@ -104,7 +104,12 @@ public:
     // The time to the next shot: in VR with vr_mechanical_fire_rate, a single
     // shot is limited by the trigger and the hand-worked or self-cycling
     // action (VrCanFire), not by the rpm; automatic and burst fire keep it.
+    // An action worked by hand is always (the hand cycles it).
     float VrShotTime(float native);
+    // In VR, an action worked by hand (a bolt-action): its shot ends with
+    // the shot time, not the shot animation (rpm_anim_fix), which also
+    // works the bolt the hand works.
+    bool VrHandWorkedShot() const;
     bool VrCycling() const;
     bool VrBlockReload() const;
     bool VrUsesMagazineButton() const;

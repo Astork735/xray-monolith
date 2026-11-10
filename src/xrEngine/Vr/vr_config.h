@@ -52,13 +52,21 @@ extern float vr_label_range;        // item names shown within this many metres 
 extern float vr_controller_smoothing; // hand pose smoothing, 0 off .. 10 (a 100 ms time constant)
 extern float vr_cursor_smoothing;   // menu cursor smoothing, 0 off .. 10 (100 ms at rest, less while moving)
 extern int vr_shared_shadows;       // 1 = the eyes share one set of sun shadow cascades
+extern int vr_legacy_water;         // 1 = the eyes use the stock water shader, not SSFX water (defined in device.cpp)
 extern float vr_scope_quality;      // scope view pixels per lens pixel on the eye (0 = eye size)
 extern int vr_roomscale;            // 1 = the actor walks after a head that walked away from it
 extern float vr_torso_deadband;     // degrees the head turns before belt and holsters turn with it
-extern int vr_depth_layer;          // 1 = submit eye depth for the runtime's reprojection (when offered)
+extern int vr_depth_layer;          // 1 = submit eye depth for the runtime's reprojection (when offered); default 0
 extern float vr_ui_distance;        // metres from the eyes to the menu and inventory panel (closer reads larger)
 extern float vr_hud_distance;       // metres from the eyes to the in-game HUD (ammo, messages)
 extern float vr_hud_scale;          // in-game HUD size: its panel's width over the menu's 1.5 m
+extern float vr_message_text_size;  // PDA message text on the HUD, times the usual size (1 = as on desktop)
+extern int vr_body_tracking;        // 1 = Meta body tracking (via VDXR) shapes elbows, shoulders and torso
+extern float vr_body_tracking_min_confidence; // the tracker's confidence (0..1) it needs to be used
+extern int vr_body_tracking_debug;  // 1 = log the tracked joints once a second
+extern int vr_seated_reach;         // 0 off, 1 when seated (auto), 2 whenever the real floor is nearer
+extern float vr_shoulder_width;     // m between the shoulder joints; 0 = measured by body tracking
+extern float vr_arm_length;         // m from shoulder joint to wrist; 0 = measured by body tracking
 
 // Result of parsing "-vr" / "-novr" plus the saved preference.
 extern EVrLaunchMode g_vr_launch_mode;

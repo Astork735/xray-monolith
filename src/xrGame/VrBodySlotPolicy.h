@@ -75,8 +75,9 @@ inline V3 BodySlotLocal(int kind, float hip_height, float hip_width = 0.22f, boo
 // forward, + toward the weapon hand) and a height above it, all within 75
 // degrees of forward. The slot code puts each body_slot_margin outside
 // the measured body. The belt carries the grenade and bolt at the front,
-// the detector and knife at the sides; the PDA and binoculars ride the
-// lower chest, the pockets the stomach between them, the ammunition pouch
+// the detector and knife at the sides; the binoculars ride the lower chest,
+// the PDA higher and nearer the middle, on the flat of the chest where its
+// bottom edge clears the pockets (stomach) below it; the ammunition pouch
 // the off-hand hip. False for a place that keeps its head-relative spot
 // (the inventory, over the shoulder).
 struct BodyPlace { float angle, height; };
@@ -92,7 +93,7 @@ inline bool BodySlotOnBody(int kind, bool mirrored, BodyPlace& place)
     case BodyBolt:       place = {30.f*deg*hand, 0.16f}; return true;
     case BodyDetector:   place = {-70.f*deg*hand, 0.16f}; return true;
     case BodyKnife:      place = {70.f*deg*hand, 0.16f}; return true;
-    case BodyPda:        place = {-40.f*deg*hand, 0.40f}; return true;
+    case BodyPda:        place = {-28.f*deg*hand, 0.45f}; return true;
     case BodyBinoculars: place = {40.f*deg*hand, 0.40f}; return true;
     // Quick slot 1 on the left for either hand.
     case BodyPocket1:    place = {-60.f*deg, 0.29f}; return true;
@@ -160,5 +161,16 @@ inline bool BinocularsAtEyesPolicy(float eyepiece_distance, float alignment, boo
 {
     return eyepiece_distance < (raised ? binocular_keep_reach : binocular_raise_reach) &&
         alignment > (raised ? binocular_keep_aligned : binocular_raise_aligned);
+}
+// The shoulder a long gun hangs on (true: the right). put_side: the shoulder
+// it was put on by hand while holstered (0 left, 1 right, -1 none; reset
+// when it is drawn, so a gun in the hand follows that hand). Else slot 3's
+// gun, with a long gun in the other slot (second), hangs over the off-hand
+// shoulder of the handedness setting; any other over the shoulder of the
+// hand that holds it (or last held it).
+inline bool LongGunShoulderRight(int put_side, bool slot3, bool second, bool hand_right, bool dominant_right)
+{
+    if (put_side >= 0) return put_side == 1;
+    return slot3 && second ? !dominant_right : hand_right;
 }
 }

@@ -67,7 +67,7 @@ void dxImGuiRender::Frame()
 void dxImGuiRender::Render(ImDrawData* data)
 {
 #if defined(USE_DX11)
-    // The VR UI panel: ImGui lays out on the 4:3 UI grid and is scaled to
+    // The VR UI panel: ImGui lays out on the panel's 16:9 grid and is scaled to
     // the bound panel texture, whose pixels are wider than tall there.
     D3D11_VIEWPORT target{};
     UINT count = 1;

@@ -4,8 +4,61 @@
 #include "../../xrEngine/environment.h"
 
 #include "../xrRender/dxEnvironmentRender.h"
+#include "../xrRender/FBasicVisual.h"
 
 #define STENCIL_CULL 0
+
+// VR: the screen area (UV, 0..1) the queued water can cover, from the
+// projected corners of each water visual's box. False when a box reaches
+// behind the eye, where its projection is unbounded.
+static bool vr_water_screen_bounds(Fvector4& bounds)
+{
+	bounds.set(1.f, 1.f, 0.f, 0.f);
+	const Fmatrix& m = Device.mFullTransform;
+	for (auto* node = RImplementation.mapWater.begin(); node != RImplementation.mapWater.end(); ++node)
+	{
+		Fbox box;
+		box.xform(node->val.pVisual->vis.box, node->val.Matrix);
+		for (int corner = 0; corner < 8; ++corner)
+		{
+			Fvector p;
+			box.getpoint(corner, p);
+			const float cw = p.x * m._14 + p.y * m._24 + p.z * m._34 + m._44;
+			if (cw < EPS_L) return false;
+			const float u = (p.x * m._11 + p.y * m._21 + p.z * m._31 + m._41) / cw * 0.5f + 0.5f;
+			const float v = 0.5f - (p.x * m._12 + p.y * m._22 + p.z * m._32 + m._42) / cw * 0.5f;
+			bounds.x = _min(bounds.x, u); bounds.y = _min(bounds.y, v);
+			bounds.z = _max(bounds.z, u); bounds.w = _max(bounds.w, v);
+		}
+	}
+	bounds.set(clampr(bounds.x, 0.f, 1.f), clampr(bounds.y, 0.f, 1.f), clampr(bounds.z, 0.f, 1.f),
+		clampr(bounds.w, 0.f, 1.f));
+	return true;
+}
+
+bool CRenderTarget::vr_blur_small_needed()
+{
+	if (!g_vr_rendering_eye) return true;
+	// Their other readers: night and heat vision; pp_bloom (used without SSFX
+	// bloom); depth of field. The flat-screen scopes and SSFX fog are off in VR.
+	if (ps_r2_nightvision > 0 || ps_r2_heatvision > 0 || !RImplementation.o.ssfx_bloom ||
+		ps_r2_ls_flags.test(R2FLAG_DOF) || RImplementation.o.dx10_msaa)
+		return true;
+	// The final combine has them bound, but needs them only if its shader
+	// samples them: the compiler leaves unread textures out of its table.
+	for (int element = 1; element <= 4; ++element)
+	{
+		ShaderElement* E = s_combine->E[element]._get();
+		if (!E) continue;
+		for (const ref_pass& pass : E->passes)
+		{
+			if (!pass._get() || !pass->ps._get()) return true;
+			R_constant_table& constants = pass->ps->constants;
+			if (constants.get("s_blur_4") || constants.get("s_blur_8")) return true;
+		}
+	}
+	return false;
+}
 
 void CRenderTarget::DoAsyncScreenshot()
 {
@@ -95,17 +148,20 @@ void CRenderTarget::phase_combine()
 	// Save previus and current matrices
 	Fvector2 m_blur_scale;
 	{
-		static Fmatrix m_saved_viewproj;
+		// One per view (vr_view_slot): a VR eye's previous frame is its own,
+		// not the other eye's.
+		static Fmatrix m_saved_viewproj[vr_view_slots];
 
 		if (!Device.m_SecondViewport.IsSVPFrame())
 		{
-			static Fvector3 saved_position;
-			Position_previous.set(saved_position);
-			saved_position.set(Device.vCameraPosition);
+			static Fvector3 saved_position[vr_view_slots];
+			const u32 slot = vr_view_slot();
+			Position_previous.set(saved_position[slot]);
+			saved_position[slot].set(Device.vCameraPosition);
 
-			Matrix_previous.mul(m_saved_viewproj, Device.mInvView);
+			Matrix_previous.mul(m_saved_viewproj[slot], Device.mInvView);
 			Matrix_current.set(Device.mProject);
-			m_saved_viewproj.set(Device.mFullTransform);
+			m_saved_viewproj[slot].set(Device.mFullTransform);
 		}
 		float scale = g_vr_rendering_eye ? 0.f : ps_r2_mblur / 2.f;
 		m_blur_scale.set(scale, -scale).div(12.f);
@@ -350,8 +406,36 @@ void CRenderTarget::phase_combine()
 		phase_ssfx_ssr(); // [SSFX] - New SSR Phase
 	}
 
+	// VR: the right eye reads and writes its own reflection history, from
+	// here through the final water draw below.
+	struct WaterHistoryEnd
+	{
+		CRenderTarget& target; bool active;
+		~WaterHistoryEnd() { if (active) target.vr_water_history_end(); }
+	} water_history_end{*this, RImplementation.o.ssfx_water && !vr_simple_water && vr_water_history_begin()};
+
+	// VR: a view with no water skips the work below; its history is then
+	// cleared before it next draws water, to the black a desktop frame
+	// without water leaves in it.
+	bool water_work = RImplementation.o.ssfx_water && !vr_simple_water && !Device.m_SecondViewport.IsSVPFrame();
+	if (water_work && g_vr_rendering_eye)
+	{
+		bool& skipped = vr_water_skipped[vr_view_slot()];
+		if (RImplementation.mapWater.size() == 0)
+		{
+			skipped = true;
+			water_work = false;
+		}
+		else if (skipped)
+		{
+			const FLOAT black[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+			HW.pContext->ClearRenderTargetView(rt_ssfx_water->pRT, black);
+			skipped = false;
+		}
+	}
+
 	// [SSFX] - Water SSR rendering
-	if (RImplementation.o.ssfx_water && !Device.m_SecondViewport.IsSVPFrame())
+	if (water_work)
 	{
 		FLOAT ColorRGBA[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
 		HW.pContext->ClearRenderTargetView(rt_ssfx_temp->pRT, ColorRGBA);
@@ -365,6 +449,12 @@ void CRenderTarget::phase_combine()
 		float w = float(Device.dwWidth);
 		float h = float(Device.dwHeight);
 
+		// VR: where on screen the water can be. Outside it rt_ssfx_temp keeps
+		// its clear colour through the SSR pass, so the history copy and the
+		// blur below only need its area (vr_water_screen_bounds).
+		Fvector4 water_uv;
+		const bool water_area = g_vr_rendering_eye && vr_water_screen_bounds(water_uv);
+
 		// Render Scale
 		set_viewport_size(HW.pContext, w / ps_ssfx_water.x, h / ps_ssfx_water.x);
 
@@ -376,13 +466,50 @@ void CRenderTarget::phase_combine()
 		set_viewport_size(HW.pContext, w, h);
 
 		// Save Frame
-		HW.pContext->CopyResource(rt_ssfx_water->pTexture->surface_get(), rt_ssfx_temp->pTexture->surface_get());
+		if (water_area)
+		{
+			// The history gets the same clear colour, then the water's part
+			// (the SSR pass draws at 1 / ps_ssfx_water.x of the screen; 2
+			// pixels spare for rasterization).
+			const float scale = 1.f / ps_ssfx_water.x;
+			const float tw = float(rt_ssfx_temp->dwWidth), th = float(rt_ssfx_temp->dwHeight);
+			D3D11_BOX box;
+			box.left = u32(clampr(floorf(water_uv.x * w * scale) - 2.f, 0.f, tw));
+			box.top = u32(clampr(floorf(water_uv.y * h * scale) - 2.f, 0.f, th));
+			box.right = u32(clampr(ceilf(water_uv.z * w * scale) + 2.f, 0.f, tw));
+			box.bottom = u32(clampr(ceilf(water_uv.w * h * scale) + 2.f, 0.f, th));
+			box.front = 0; box.back = 1;
+			HW.pContext->ClearRenderTargetView(rt_ssfx_water->pRT, ColorRGBA);
+			if (box.right > box.left && box.bottom > box.top)
+				HW.pContext->CopySubresourceRegion(rt_ssfx_water->pSurface, 0, box.left, box.top, 0,
+					rt_ssfx_temp->pSurface, 0, &box);
+		}
+		else
+			HW.pContext->CopyResource(rt_ssfx_water->pTexture->surface_get(), rt_ssfx_temp->pTexture->surface_get());
 
-		// Water SSR Blur
-		phase_ssfx_water_blur();
+		// Water SSR Blur. In VR only the half-size area the water's
+		// reflections can spread to: the water's area plus the two passes'
+		// reach (at most 12 and 24 half-size pixels, 13 taps each).
+		if (water_area)
+		{
+			const float hw = w / 2, hh = h / 2, reach = 32.f;
+			Irect blur_area;
+			blur_area.x1 = iFloor(clampr(water_uv.x * hw - reach, 0.f, hw));
+			blur_area.y1 = iFloor(clampr(water_uv.y * hh - reach, 0.f, hh));
+			blur_area.x2 = iCeil(clampr(water_uv.z * hw + reach, 0.f, hw));
+			blur_area.y2 = iCeil(clampr(water_uv.w * hh + reach, 0.f, hh));
+			phase_ssfx_water_blur(&blur_area);
+		}
+		else
+			phase_ssfx_water_blur();
 
-		// Water waves
-		phase_ssfx_water_waves();
+		// Water waves: from time and wind only, so in VR the first view of a
+		// frame makes them for the others.
+		if (!g_vr_rendering_eye || vr_waves_frame != Device.dwFrame)
+		{
+			phase_ssfx_water_waves();
+			vr_waves_frame = g_vr_rendering_eye ? Device.dwFrame : u32(-1);
+		}
 	}
 
 	if (!RImplementation.o.dx10_msaa)
@@ -393,7 +520,12 @@ void CRenderTarget::phase_combine()
 	// Final water rendering ( All the code above can be omitted if the Water module isn't installed )
 	RCache.set_xform_world(Fidentity);
 	RImplementation.r_dsgraph_render_water();
-	
+	if (water_history_end.active)
+	{
+		water_history_end.active = false;
+		vr_water_history_end();
+	}
+
 	{
 		if (RImplementation.o.ssfx_rain)
 		{

@@ -16,6 +16,8 @@ bool IsGameTypeSingle();
 #include "UIInventoryUtilities.h"
 #include "../game_news.h"
 #include "UIPdaMsgListItem.h"
+#include "../ui_base.h"
+#include "../../xrEngine/Vr/vr_gameplay.h"
 
 #include "../../xrServerEntities/script_engine.h"
 
@@ -115,9 +117,29 @@ void CUIMessagesWindow::Init(float x, float y, float width, float height)
 	}
 }
 
+CGameFont* VrMessageFont(float height); // HUDManager.cpp
+namespace
+{
+// VR (vr_message_text_size): the HUD panel's message text is hard to read
+// in a headset, so a message's time, caption and text take one font that
+// many times the height of the usual message text (Letterica 16). Messages
+// already shown keep their line breaks until they fade.
+void VrEnlargeMessage(CUIPdaMsgListItem& item)
+{
+	const float size = g_vr_owns_present ? vr::MessageTextSize() : 1.f;
+	CGameFont* usual = UI().Font().pFontLetterica16Russian;
+	if (!(size > 1.001f) || !usual) return;
+	CGameFont* font = VrMessageFont(usual->GetHeight() * size);
+	for (CUITextWnd* text : {&item.UITimeText, &item.UICaptionText, &item.UIMsgText})
+		text->SetFont(font);
+}
+}
+
 void CUIMessagesWindow::AddIconedPdaMessage(GAME_NEWS_DATA* news)
 {
 	CUIPdaMsgListItem* pItem = m_pGameLog->AddPdaMessage();
+	// Before the text is measured: widths and heights follow the font.
+	VrEnlargeMessage(*pItem);
 
 	LPCSTR time_str = InventoryUtilities::GetTimeAsString(news->receive_time, InventoryUtilities::etpTimeToMinutes).
 		c_str();

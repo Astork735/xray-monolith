@@ -10,6 +10,7 @@
 
 void CResourceManager::reset_begin()
 {
+	BackgroundWaitAll();
 	// destroy everything, renderer may use
 	::Render->reset_begin();
 
@@ -108,6 +109,7 @@ void mdump(C c)
 
 CResourceManager::~CResourceManager()
 {
+	BackgroundShutdown();
 	DestroyNecessaryTextures();
 	Dump(false);
 }

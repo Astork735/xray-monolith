@@ -8,6 +8,7 @@
 
 #include "pch_script.h"
 #include "script_render_device.h"
+#include "ui_base.h"
 
 using namespace luabind;
 
@@ -36,6 +37,20 @@ bool is_app_ready()
 	return !!g_appLoaded;
 }
 
+// The screen scripts lay their UI out for: in VR its 16:9 UI panel, as wide as
+// the UI texture (ui_core::screen_aspect). The texture's own nearly square
+// size made utils_xml.screen_ratio stretch script windows 1.45 times and
+// GAMMA's body health HUD take its unfinished 4:3 layout.
+u32 ui_width(const CRenderDevice* self)
+{
+	return self->dwWidth;
+}
+
+u32 ui_height(const CRenderDevice* self)
+{
+	return g_vr_owns_present ? u32(float(self->dwWidth) / ui_core::screen_aspect() + 0.5f) : self->dwHeight;
+}
+
 u32 time_global(const CRenderDevice* self)
 {
 	THROW(self);
@@ -54,8 +69,8 @@ void CScriptRenderDevice::script_register(lua_State* L)
 	module(L)
 	[
 		class_<CRenderDevice>("render_device")
-		.def_readonly("width", &CRenderDevice::dwWidth)
-		.def_readonly("height", &CRenderDevice::dwHeight)
+		.property("width", &ui_width)
+		.property("height", &ui_height)
 		.def_readonly("time_delta", &CRenderDevice::dwTimeDelta)
 		.def_readonly("f_time_delta", &CRenderDevice::fTimeDelta)
 		.def_readonly("cam_pos", &CRenderDevice::vCameraPosition)

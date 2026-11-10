@@ -433,6 +433,7 @@ CRenderTarget::CRenderTarget()
 	b_ssfx_taa = xr_new<CBlender_ssfx_taa>();
 	b_ssfx_rain = xr_new<CBlender_ssfx_rain>();
 	b_ssfx_water_blur = xr_new<CBlender_ssfx_water_blur>();
+	b_vr_water = xr_new<CBlender_vr_water>();
 	b_ssfx_bloom = xr_new<CBlender_ssfx_bloom_build>();
 	b_ssfx_bloom_lens = xr_new<CBlender_ssfx_bloom_lens>();
 	b_ssfx_bloom_downsample = xr_new<CBlender_ssfx_bloom_downsample>();
@@ -1333,6 +1334,80 @@ void CRenderTarget::vr_register_screen_target(ref_rt& rt, u32 divisor)
 	if (rt._get() && rt->pSurface) vr_screen_targets.push_back({&rt, divisor});
 }
 
+bool CRenderTarget::vr_create_twin(VrScreenTarget& target, u32 width, u32 height)
+{
+	CRT* rt = target.rt->_get();
+	D3D11_TEXTURE2D_DESC desc;
+	rt->pSurface->GetDesc(&desc);
+	desc.Width = width; desc.Height = height;
+	bool ok = SUCCEEDED(HW.pDevice->CreateTexture2D(&desc, NULL, &target.surface));
+	// The twin's views copy the original's descriptions; only the
+	// resource under them differs.
+	if (ok && rt->pRT)
+	{
+		D3D11_RENDER_TARGET_VIEW_DESC view;
+		rt->pRT->GetDesc(&view);
+		ok = SUCCEEDED(HW.pDevice->CreateRenderTargetView(target.surface, &view, &target.rtv));
+	}
+	if (ok && rt->pZRT)
+	{
+		D3D11_DEPTH_STENCIL_VIEW_DESC view;
+		rt->pZRT->GetDesc(&view);
+		ok = SUCCEEDED(HW.pDevice->CreateDepthStencilView(target.surface, &view, &target.dsv));
+	}
+	if (ok && rt->pUAView)
+	{
+		D3D11_UNORDERED_ACCESS_VIEW_DESC view;
+		rt->pUAView->GetDesc(&view);
+		ok = SUCCEEDED(HW.pDevice->CreateUnorderedAccessView(target.surface, &view, &target.uav));
+	}
+	if (ok && rt->pTexture._get() && rt->pTexture->get_SRView())
+	{
+		D3D11_SHADER_RESOURCE_VIEW_DESC view;
+		rt->pTexture->get_SRView()->GetDesc(&view);
+		ok = SUCCEEDED(HW.pDevice->CreateShaderResourceView(target.surface, &view, &target.srv));
+	}
+	if (!ok)
+	{
+		vr_release_twin(target);
+		return false;
+	}
+	// Defined contents: history effects (the SSFX water's reflections) read
+	// a target before writing it.
+	if (target.rtv)
+	{
+		const FLOAT black[4] = {0.f, 0.f, 0.f, 0.f};
+		HW.pContext->ClearRenderTargetView(target.rtv, black);
+	}
+	target.texture_surface = target.surface;
+	target.texture_surface->AddRef();
+	target.width = width; target.height = height;
+	return true;
+}
+
+void CRenderTarget::vr_release_twin(VrScreenTarget& target)
+{
+	_RELEASE(target.srv);
+	_RELEASE(target.uav);
+	_RELEASE(target.dsv);
+	_RELEASE(target.rtv);
+	_RELEASE(target.texture_surface);
+	_RELEASE(target.surface);
+	target.width = target.height = 0;
+}
+
+void CRenderTarget::vr_swap_twin(VrScreenTarget& target)
+{
+	CRT* rt = target.rt->_get();
+	std::swap(rt->pSurface, target.surface);
+	std::swap(rt->pRT, target.rtv);
+	std::swap(rt->pZRT, target.dsv);
+	std::swap(rt->pUAView, target.uav);
+	std::swap(rt->dwWidth, target.width);
+	std::swap(rt->dwHeight, target.height);
+	if (rt->pTexture._get()) rt->pTexture->surface_swap(target.texture_surface, target.srv);
+}
+
 bool CRenderTarget::vr_make_twins(u32 size)
 {
 	if (vr_twin_size == size) return true;
@@ -1341,48 +1416,15 @@ bool CRenderTarget::vr_make_twins(u32 size)
 	vr_release_twins();
 	for (auto& target : vr_screen_targets)
 	{
-		CRT* rt = target.rt->_get();
-		D3D11_TEXTURE2D_DESC desc;
-		rt->pSurface->GetDesc(&desc);
-		desc.Width = desc.Height = _max(1u, size / target.divisor);
-		bool ok = SUCCEEDED(HW.pDevice->CreateTexture2D(&desc, NULL, &target.surface));
-		// The twin's views copy the original's descriptions; only the
-		// resource under them differs.
-		if (ok && rt->pRT)
+		const u32 twin_size = _max(1u, size / target.divisor);
+		if (!vr_create_twin(target, twin_size, twin_size))
 		{
-			D3D11_RENDER_TARGET_VIEW_DESC view;
-			rt->pRT->GetDesc(&view);
-			ok = SUCCEEDED(HW.pDevice->CreateRenderTargetView(target.surface, &view, &target.rtv));
-		}
-		if (ok && rt->pZRT)
-		{
-			D3D11_DEPTH_STENCIL_VIEW_DESC view;
-			rt->pZRT->GetDesc(&view);
-			ok = SUCCEEDED(HW.pDevice->CreateDepthStencilView(target.surface, &view, &target.dsv));
-		}
-		if (ok && rt->pUAView)
-		{
-			D3D11_UNORDERED_ACCESS_VIEW_DESC view;
-			rt->pUAView->GetDesc(&view);
-			ok = SUCCEEDED(HW.pDevice->CreateUnorderedAccessView(target.surface, &view, &target.uav));
-		}
-		if (ok && rt->pTexture._get() && rt->pTexture->get_SRView())
-		{
-			D3D11_SHADER_RESOURCE_VIEW_DESC view;
-			rt->pTexture->get_SRView()->GetDesc(&view);
-			ok = SUCCEEDED(HW.pDevice->CreateShaderResourceView(target.surface, &view, &target.srv));
-		}
-		if (!ok)
-		{
-			Msg("! [VR] scope view: no %ux%u twin for %s; rendering it at eye size", desc.Width, desc.Height,
-				rt->cName.c_str());
+			Msg("! [VR] scope view: no %ux%u twin for %s; rendering it at eye size", twin_size, twin_size,
+				target.rt->_get()->cName.c_str());
 			vr_release_twins();
 			vr_twin_failed = size;
 			return false;
 		}
-		target.texture_surface = target.surface;
-		target.texture_surface->AddRef();
-		target.width = target.height = desc.Width;
 	}
 	vr_twin_size = size;
 	// A screen-sized target missing from the list above keeps its full size
@@ -1408,34 +1450,71 @@ bool CRenderTarget::vr_make_twins(u32 size)
 void CRenderTarget::vr_release_twins()
 {
 	VERIFY(!vr_twins_in);
-	for (auto& target : vr_screen_targets)
-	{
-		_RELEASE(target.srv);
-		_RELEASE(target.uav);
-		_RELEASE(target.dsv);
-		_RELEASE(target.rtv);
-		_RELEASE(target.texture_surface);
-		_RELEASE(target.surface);
-		target.width = target.height = 0;
-	}
+	for (auto& target : vr_screen_targets) vr_release_twin(target);
 	vr_twin_size = 0;
 }
 
 void CRenderTarget::vr_swap_twins()
 {
-	for (auto& target : vr_screen_targets)
-	{
-		CRT* rt = target.rt->_get();
-		std::swap(rt->pSurface, target.surface);
-		std::swap(rt->pRT, target.rtv);
-		std::swap(rt->pZRT, target.dsv);
-		std::swap(rt->pUAView, target.uav);
-		std::swap(rt->dwWidth, target.width);
-		std::swap(rt->dwHeight, target.height);
-		if (rt->pTexture._get()) rt->pTexture->surface_swap(target.texture_surface, target.srv);
-	}
+	for (auto& target : vr_screen_targets) vr_swap_twin(target);
 	vr_twins_in = !vr_twins_in;
 	// Nothing cached may keep a view of the other size bound.
+	RCache.ResetExternalState();
+}
+
+ShaderElement* CRenderTarget::vr_water_element(ShaderElement* material)
+{
+	// The material's base texture: the one its pass binds as s_base.
+	LPCSTR base = "water\\water_water";
+	SPass* pass = material && !material->passes.empty() ? material->passes[0]._get() : nullptr;
+	R_constant* slot = pass && pass->ps._get() ? pass->ps->constants.get("s_base") : nullptr;
+	if (slot && pass->T._get())
+		for (const auto& texture : *pass->T)
+			if (texture.first == slot->samp.index && texture.second._get() && texture.second->cName.size())
+			{
+				base = texture.second->cName.c_str();
+				break;
+			}
+	auto found = vr_water_shaders.find(base);
+	if (found == vr_water_shaders.end())
+	{
+		ref_shader shader;
+		shader.create(b_vr_water, "vr_water", base);
+		found = vr_water_shaders.emplace(base, shader).first;
+	}
+	return &*found->second->E[0];
+}
+
+bool CRenderTarget::vr_water_history_begin()
+{
+	if (vr_water_history_in || !g_vr_rendering_eye || g_vr_eye_index != 1 || vr_twins_in) return false;
+	CRT* rt = rt_ssfx_water._get();
+	if (!rt || !rt->pSurface) return false;
+	if (vr_water_history.surface && (vr_water_history.width != rt->dwWidth || vr_water_history.height != rt->dwHeight))
+		vr_release_twin(vr_water_history);
+	if (!vr_water_history.surface)
+	{
+		if (vr_water_history_failed) return false;
+		if (!vr_create_twin(vr_water_history, rt->dwWidth, rt->dwHeight))
+		{
+			Msg("! [VR] no right-eye water reflection history (%ux%u); the eyes share one", rt->dwWidth, rt->dwHeight);
+			vr_water_history_failed = true;
+			return false;
+		}
+		// Start from the left eye's reflections rather than none.
+		HW.pContext->CopyResource(vr_water_history.surface, rt->pSurface);
+	}
+	vr_swap_twin(vr_water_history);
+	vr_water_history_in = true;
+	RCache.ResetExternalState();
+	return true;
+}
+
+void CRenderTarget::vr_water_history_end()
+{
+	if (!vr_water_history_in) return;
+	vr_swap_twin(vr_water_history);
+	vr_water_history_in = false;
 	RCache.ResetExternalState();
 }
 
@@ -1464,6 +1543,8 @@ CRenderTarget::~CRenderTarget()
 {
 	vr_scope_end();
 	vr_release_twins();
+	vr_water_history_end();
+	vr_release_twin(vr_water_history);
 	for (auto& map : vr_sun_maps) _RELEASE(map);
 	_RELEASE(t_ss_async);
 
@@ -1549,6 +1630,8 @@ CRenderTarget::~CRenderTarget()
 	xr_delete(b_ssfx_taa); // SSS TAA
 	xr_delete(b_ssfx_rain); // SSS Rain
 	xr_delete(b_ssfx_water_blur); // SSS Water Blur
+	vr_water_shaders.clear();
+	xr_delete(b_vr_water);
 	xr_delete(b_ssfx_bloom); // SSS Bloom
 	xr_delete(b_ssfx_bloom_lens); // SSS Bloom Lens
 	xr_delete(b_ssfx_bloom_downsample); // SSS Bloom Blur

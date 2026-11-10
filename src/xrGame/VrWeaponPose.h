@@ -41,7 +41,8 @@ float TurnAbout(const Matrix& first, const Matrix& now, const Matrix& parent, in
             v.z=p.x*parent.i.z+p.y*parent.j.z+p.z*parent.k.z;
         };
         transform(a); transform(b);
-        if (axis==2) a.z=b.z=0.f; else a.x=b.x=0.f;
+        // The turn about `axis` (0 x, 1 y, 2 z): the axes' components across it.
+        if (axis==2) a.z=b.z=0.f; else if (axis==1) a.y=b.y=0.f; else a.x=b.x=0.f;
         const float la=std::sqrt(a.x*a.x+a.y*a.y+a.z*a.z);
         const float lb=std::sqrt(b.x*b.x+b.y*b.y+b.z*b.z);
         if (la<0.5f || lb<0.5f) continue;
@@ -72,21 +73,74 @@ void CollapseHiddenSkinning(Model& model)
         }
 }
 
+// One actual visual's immutable bind/topology and reusable visibility work.
+// Reset after releasing the visual, even if its replacement has the same address.
+template<class Poses>
+struct WeaponPoseCache
+{
+    struct Bone
+    {
+        unsigned short parent=0, depth=0;
+        signed char state=-1;
+        bool shown=false, reload=false, carried=false, handled=false;
+    };
+    const void* model=nullptr;
+    const void* pose_data=nullptr;
+    Poses bind;
+    std::vector<Bone> bones;
+    std::vector<unsigned short> order;
+    std::vector<signed char> requested;
+    std::vector<unsigned char> counted;
+    unsigned frame=~0u;
+    unsigned short moving=0, handle=0;
+    float travel=0.f, handle_travel=0.f;
+    bool magazine_only=false, calculate=false;
+
+    void Reset()
+    {
+        model=pose_data=nullptr; frame=~0u;
+        bind.clear(); bones.clear(); order.clear(); requested.clear(); counted.clear();
+    }
+    template<class Model> void Prepare(Model& visual)
+    {
+        const unsigned short count=visual.LL_BoneCount();
+        if (model==&visual && bind.size()==count) return;
+        Reset();
+        visual.LL_GetBindTransform(bind);
+        bones.resize(count); order.resize(count); requested.resize(count);
+        for (unsigned short id=0;id<count;++id) bones[id].parent=visual.LL_GetData(id).GetParentID();
+        for (unsigned short id=0;id<count;++id)
+        {
+            order[id]=id;
+            for (unsigned short a=bones[id].parent; a<count && bones[id].depth<count; a=bones[a].parent)
+                ++bones[id].depth;
+        }
+        // Dedicated magazine assets need not number parents before children.
+        std::sort(order.begin(),order.end(),[&](unsigned short a, unsigned short b)
+            { return bones[a].depth<bones[b].depth; });
+        model=&visual;
+    }
+};
+
 // Shared private-model pose path. The pose buffer must outlive the model.
 // `calculate` false: the caller recalculates the bones itself afterwards.
+// An optional frame suppresses identical preparation between views. Each cache
+// belongs to one visual and callback/pose buffer, never to an eye or a weapon type.
+// Returns false only when that same frame's pose was already prepared.
 template<class Model, class Poses, class Callback, class HiddenNames=std::initializer_list<const char*>>
-void ApplyWeaponPose(Model& model, Poses& poses, Callback callback, unsigned callback_type,
+bool ApplyWeaponPose(Model& model, Poses& poses, Callback callback, unsigned callback_type,
     const char* moving_bone, float travel, const char* rounds_bone,
     std::initializer_list<const char*> detachable_bones, bool magazine_only,
     bool magazine_inserted, bool rounds_visible, const char* hidden_bone=nullptr,
     std::initializer_list<const char*> hidden_bones={},
     std::initializer_list<const char*> extra_detachable_bones={},
     const char* handle_bone=nullptr, float handle_travel=0.f,
-    const HiddenNames& reload_magazines={}, bool calculate=true)
+    const HiddenNames& reload_magazines={}, bool calculate=true,
+    WeaponPoseCache<Poses>* storage=nullptr, unsigned frame=~0u)
 {
-    Poses bind;
-    model.LL_GetBindTransform(bind);
-    poses.resize(bind.size());
+    WeaponPoseCache<Poses> local;
+    auto& cache=storage ? *storage : local;
+    cache.Prepare(model);
     const auto missing=static_cast<unsigned short>(-1);
     const auto moving=moving_bone && *moving_bone ? model.LL_BoneID(moving_bone) : missing;
     // A separate charging handle (MP5, P90, AR-15) moves only when racked.
@@ -97,7 +151,8 @@ void ApplyWeaponPose(Model& model, Poses& poses, Callback callback, unsigned cal
     // Listed bones have an explicit state. Every other bone inherits its
     // parent's, so unlisted sub-bones of a hidden magazine, scope or launcher
     // hide with it, and those of a visible loose magazine stay visible.
-    std::vector<signed char> state(count,-1);
+    auto& state=cache.requested;
+    std::fill(state.begin(),state.end(),-1);
     // Each name is looked up once, not once per bone.
     const auto mark=[&](std::initializer_list<const char*> names, signed char value)
     {
@@ -122,47 +177,48 @@ void ApplyWeaponPose(Model& model, Poses& poses, Callback callback, unsigned cal
         const auto id=text && *text ? model.LL_BoneID(text) : missing;
         if (id<count) state[id]=-2;
     }
-    const auto visible=[&](unsigned short i)
+    if (frame!=~0u && cache.frame==frame && cache.pose_data==poses.data() && poses.size()==count &&
+        cache.moving==moving && cache.handle==handle && cache.travel==travel &&
+        cache.handle_travel==handle_travel && cache.magazine_only==magazine_only && cache.calculate==calculate &&
+        std::equal(state.begin(),state.end(),cache.bones.begin(),
+            [](signed char value, const auto& bone) { return value==bone.state; }))
+        return false;
+    poses.assign(cache.bind.begin(),cache.bind.end());
+    // Resolve inheritance once, parents first. Reload-only subtrees override
+    // even explicitly visible descendants; moving parts carry their children.
+    for (unsigned short id:cache.order)
     {
-        // A reload-only copy and all its children stay hidden even if a
-        // child also appears in an explicit rounds/attachment list.
-        if (reload_magazines.size())
-            for (unsigned short a=i, depth=0; depth<count && a<count; ++depth)
-            {
-                if (state[a]==-2) return false;
-                a=model.LL_GetData(a).GetParentID();
-            }
-        for (unsigned short depth=0;depth<count && i<count;++depth)
-        {
-            if (state[i]>=0) return state[i]>0;
-            const unsigned short parent=model.LL_GetData(i).GetParentID();
-            if (parent>=count) return !magazine_only;
-            i=parent;
-        }
-        return !magazine_only;
-    };
+        auto& bone=cache.bones[id];
+        const auto* parent=bone.parent<count ? &cache.bones[bone.parent] : nullptr;
+        bone.state=state[id];
+        bone.reload=state[id]==-2 || (parent && parent->reload);
+        bone.shown=!bone.reload && (state[id]>=0 ? state[id]>0 : parent ? parent->shown : !magazine_only);
+        bone.carried=id==moving || (parent && parent->carried);
+        bone.handled=id==handle || (parent && parent->handled);
+    }
     for (unsigned short i=0;i<count;++i)
     {
-        const bool shown=visible(i);
+        const auto& prepared=cache.bones[i];
+        const bool shown=prepared.shown;
         if (bool(model.LL_GetBoneVisible(i))!=shown)
             model.LL_SetBoneVisible(i,shown,false);
-        poses[i]=bind[i];
-        // The moving part carries its children (a charging handle on a bolt).
-        bool carried=false, handled=false;
-        for (unsigned short a=i;a<count && !carried;a=model.LL_GetData(a).GetParentID())
-            carried=a==moving;
-        for (unsigned short a=i;a<count && !handled && handle<count;a=model.LL_GetData(a).GetParentID())
-            handled=a==handle;
-        if (carried && !magazine_only) poses[i].c.z-=travel;
-        else if (handled && !magazine_only) poses[i].c.z-=handle_travel;
         auto& bone=model.LL_GetBoneInstance(i);
-        bone.mTransformHidden=bind[i];
+        bone.mTransformHidden=poses[i];
+        // The moving part carries its children (a charging handle on a bolt).
+        if (prepared.carried && !magazine_only) poses[i].c.z-=travel;
+        else if (prepared.handled && !magazine_only) poses[i].c.z-=handle_travel;
         bone.set_callback(callback_type,callback,&poses[i],true);
     }
-    if (!calculate) return;
-    model.CalculateBones_Invalidate();
-    model.CalculateBones(true);
-    CollapseHiddenSkinning(model);
+    cache.frame=frame; cache.pose_data=poses.data();
+    cache.moving=moving; cache.handle=handle; cache.travel=travel; cache.handle_travel=handle_travel;
+    cache.magazine_only=magazine_only; cache.calculate=calculate;
+    if (calculate)
+    {
+        model.CalculateBones_Invalidate();
+        model.CalculateBones(true);
+        CollapseHiddenSkinning(model);
+    }
+    return true;
 }
 // A collimator's reticle is seen only when the line from the eye to it
 // passes through the sight's window (a disc of radius around window,

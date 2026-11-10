@@ -3,13 +3,15 @@
 #include <algorithm>
 namespace vr
 {
-// The UI panel's height over its width in the headset. The game lays its UI
-// out on a 1024x768 grid scaled separately in x and y to the (nearly square)
-// eye-sized UI texture, so the panel shows that texture at 4:3: layout and
-// pictures keep their shape. ui_core makes no widescreen correction in VR
-// and the font renderer narrows glyphs drawn on the panel to match
-// (dxFontRender, while g_vr_ui_pass).
-constexpr float kUiPanelAspect = 0.75f;
+// The UI panel's height over its width in the headset: 16:9, as the monitor
+// mods lay their UI out for. The game lays its UI out on a 1024x768 grid
+// scaled separately in x and y to the (nearly square) eye-sized UI texture,
+// shown at this aspect; ui_core takes it as the screen's (its _16 layouts
+// and widescreen correction, scripts' device().width/height) and the font
+// renderer narrows glyphs drawn on the panel to match (dxFontRender, while
+// g_vr_ui_pass). At 4:3 the game took GAMMA's 4:3 layouts, some never
+// finished: its body health frame squeezed to 76% under a full-width body.
+constexpr float kUiPanelAspect = 9.f / 16.f;
 // Where a ray from the eye (origin, direction in the head's frame) meets the
 // UI panel `distance` ahead: u, v across it, clamped to its edges so a
 // tracked cursor keeps moving there when the ray lands just outside. The
@@ -28,6 +30,25 @@ inline bool QuadRayCursor(const Fvector& origin, const Fvector& direction,
     inside=u>=0.f && u<=1.f && v>=0.f && v<=1.f;
     u=std::max(0.f,std::min(1.f,u));
     v=std::max(0.f,std::min(1.f,v));
+    return true;
+}
+// Where the line from the eyes (the head's origin) to a point in head space
+// (x right, y up, z forward) crosses a head-locked panel `distance` ahead:
+// panel coordinates, 0..1 across it (v down), unclamped. A point behind the
+// head comes out mirrored through the centre, as a flat-screen projection's
+// divide by a negative w does. `inside`: ahead and on the panel. False only
+// level with the eyes (z = 0) or for a degenerate panel.
+inline bool ProjectOntoQuad(const Fvector& point, float distance, float width, float height,
+    float& u, float& v, bool& inside)
+{
+    inside=false;
+    u=v=-1.f;
+    if (!(std::fabs(point.z)>0.000001f && width>0 && height>0 && distance>0)) return false;
+    const float t=distance/point.z;
+    u=0.5f+point.x*t/width;
+    v=0.5f-point.y*t/height;
+    if (!std::isfinite(u) || !std::isfinite(v)) { u=v=-1.f; return false; }
+    inside=point.z>0.f && u>=0.f && u<=1.f && v>=0.f && v<=1.f;
     return true;
 }
 // Each available control arms independently on release: a held grip must not

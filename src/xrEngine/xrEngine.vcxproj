@@ -954,6 +954,9 @@
     <ClInclude Include="Vr\vr_swapchain.h" />
     <ClInclude Include="Vr\vr_input.h" />
     <ClInclude Include="Vr\vr_system.h" />
+    <ClInclude Include="Vr\vr_body_tracking.h" />
+    <ClInclude Include="Vr\vr_body_tracking_policy.h" />
+    <ClInclude Include="Vr\vr_visibility_mask.h" />
     <ClInclude Include="Vr\vr_performance.h" />
     <ClInclude Include="Vr\vr_stereo.h" />
     <ClInclude Include="Blood\blood_logic.h" />
@@ -967,6 +970,7 @@
     <ClCompile Include="Vr\vr_swapchain.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="Vr\vr_input.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="Vr\vr_system.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="Vr\vr_body_tracking.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="Vr\vr_performance.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="Vr\vr_stereo.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="..\3rd party\discord\achievement_manager.cpp" />

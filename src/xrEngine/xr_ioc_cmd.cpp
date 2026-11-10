@@ -48,6 +48,14 @@ public:
     explicit CCC_VrRecenter(LPCSTR name) : IConsole_Command(name) { bEmptyArgsHandled = TRUE; }
     void Execute(LPCSTR) override { vr::Recenter(); }
 };
+// Takes the head's height now as the eye height: a recenter keeps it, and
+// the automatic retake only follows a head that rose (stood up).
+class CCC_VrCalibrateHeight : public IConsole_Command
+{
+public:
+    explicit CCC_VrCalibrateHeight(LPCSTR name) : IConsole_Command(name) { bEmptyArgsHandled = TRUE; }
+    void Execute(LPCSTR) override { vr::CalibrateHeight(); }
+};
 #endif
 
 xr_token* vid_quality_token = NULL;
@@ -1081,6 +1089,7 @@ void CCC_Register()
 	// Native OpenXR VR (see docs/VR.md). Persisted to user.ltx; the "-vr"/"-novr"
 	// command line flags override these for a single run.
 	CMD1(CCC_VrRecenter, "vr_recenter");
+	CMD1(CCC_VrCalibrateHeight, "vr_calibrate_height");
     CMD1(CCC_VrPerfCapture, "vr_perf_capture");
 	CMD4(CCC_Integer, "vr_enabled", &vr_enabled, 0, 2);            // 0 off, 1 prefer, 2 force
 	CMD4(CCC_Integer, "vr_tracking_origin", &vr_tracking_origin, 0, 1); // 0 seated, 1 standing
@@ -1127,10 +1136,18 @@ void CCC_Register()
     CMD4(CCC_Integer, "vr_roomscale", &vr_roomscale, 0, 1);
     CMD4(CCC_Float, "vr_torso_deadband", &vr_torso_deadband, 10.f, 120.f);
     CMD4(CCC_Integer, "vr_depth_layer", &vr_depth_layer, 0, 1);
+    CMD4(CCC_Integer, "vr_legacy_water", &vr_legacy_water, 0, 1);
     CMD4(CCC_Float, "vr_ui_distance", &vr_ui_distance, 0.6f, 2.5f);
     CMD4(CCC_Float, "vr_hud_distance", &vr_hud_distance, 0.3f, 2.5f);
     CMD4(CCC_Float, "vr_hud_scale", &vr_hud_scale, 0.4f, 1.6f);
 	CMD4(CCC_Float, "vr_render_scale", &vr_render_scale, 0.5f, 2.0f);
+    CMD4(CCC_Float, "vr_message_text_size", &vr_message_text_size, 1.f, 3.f);
+    CMD4(CCC_Integer, "vr_body_tracking", &vr_body_tracking, 0, 1);
+    CMD4(CCC_Float, "vr_body_tracking_min_confidence", &vr_body_tracking_min_confidence, 0.f, 1.f);
+    CMD4(CCC_Integer, "vr_body_tracking_debug", &vr_body_tracking_debug, 0, 1);
+    CMD4(CCC_Integer, "vr_seated_reach", &vr_seated_reach, 0, 2);
+    CMD4(CCC_Float, "vr_shoulder_width", &vr_shoulder_width, 0.f, 0.55f); // 0 = measured
+    CMD4(CCC_Float, "vr_arm_length", &vr_arm_length, 0.f, 0.85f);         // 0 = measured
 #endif
 
 #ifdef DEBUG

@@ -1,54 +1,18 @@
 ﻿// What a free VR hand takes on a squeeze: weapons, items and the pointer (UpdateVrPickup).
 #include "stdafx.h"
-#include "VrWeaponInteraction.h"
-#include "VrWeaponPose.h"
-#include "VrReloadDerivation.h"
-#include "VrSupportAction.h"
-#include "VrWeaponNames.h"
-#include "VrBodySlots.h"
-#include "VrSaveLedger.h"
-#include "Bolt.h"
+#include "VrWeaponInteractionInternal.h"
+#include "HudItem.h"
 #include "WeaponAmmo.h"
-#include "ai_object_location.h"
 #include "Weapon.h"
-#include "WeaponMagazined.h"
-#include "WeaponPistol.h"
-#include "WeaponRevolver.h"
-#include "WeaponKnife.h"
-#include "WeaponBinoculars.h"
-#include "xr_level_controller.h"
 #include "Actor.h"
 #include "inventory.h"
 #include "PhysicsShellHolder.h"
 #include "Level.h"
 #include "game_cl_base.h"
-#include "player_hud.h"
-#include "HUDManager.h"
-#include "UIGameCustom.h"
-#include "ai_space.h"
-#include "script_engine.h"
-#include "script_game_object.h"
 #include "../xrEngine/CameraBase.h"
-#include "../xrEngine/xr_input.h"
 #include "../xrEngine/Vr/vr_gameplay.h"
-#include "../xrEngine/Vr/vr_stereo.h"
-#include "../Include/xrRender/Kinematics.h"
-#include "../Include/xrRender/DrawUtils.h"
-#include "../xrEngine/Vr/vr_overlay_draw.h"
-#include "../xrEngine/bone.h"
-#include "../xrEngine/EnnumerateVertices.h"
-#include "WeaponShotgun.h"
-#include "WeaponBM16.h"
-#include "WeaponRG6.h"
-#include "WeaponRPG7.h"
-#include "../Include/xrRender/KinematicsAnimated.h"
-#include "ClimableObject.h"
-#include "../xrphysics/Extendedgeom.h"
+#include "../Include/xrRender/RenderVisual.h"
 #include "../xrPhysics/PhysicsShell.h"
-#include "CharacterPhysicsSupport.h"
-#include "PHMovementControl.h"
-#include "xrServer_Objects_ALife_Items.h"
-#include "VrWeaponInteractionInternal.h"
 using namespace vrwi;
 
 bool VrActiveItemLeaving(CActor& actor)
@@ -58,6 +22,28 @@ bool VrActiveItemLeaving(CActor& actor)
     if (actor.inventory().GetNextActiveSlot()!=actor.inventory().GetActiveSlot()) return true;
     const CHudItem* hud=active->cast_hud_item();
     return hud && (hud->IsHidden() || hud->GetState()==CHUDState::eHiding || hud->GetNextState()==CHUDState::eHiding);
+}
+
+bool VrWeaponComing(CActor& actor, const CObject* except)
+{
+    CInventory& inventory=actor.inventory();
+    const u16 next=inventory.GetNextActiveSlot();
+    if (next!=NO_ACTIVE_SLOT && next!=inventory.GetActiveSlot())
+        if (PIItem item=inventory.ItemFromSlot(next); item && &item->object()!=except && item->cast_weapon())
+            return true;
+    const auto& pickup=actor.m_vr_pickup;
+    return pickup.wield_id!=u16(-1) && !pickup.wield_stow && (!except || pickup.wield_id!=except->ID());
+}
+
+vr::ActiveItem VrActiveItemState(CActor& actor, const CObject* self)
+{
+    if (PIItem active=actor.inventory().ActiveItem())
+        return &active->object()==self ? vr::ActiveItem::ThisWeapon :
+            VrActiveItemLeaving(actor) ? vr::ActiveItem::OtherLeaving : vr::ActiveItem::OtherHeld;
+    // Nothing out: one weapon is on its way to a hand at a time. A draw by
+    // one hand while the other's was still queued replaced it, and the first
+    // weapon kept that hand's claim.
+    return VrWeaponComing(actor,self) ? vr::ActiveItem::OtherComing : vr::ActiveItem::None;
 }
 
 
@@ -79,8 +65,19 @@ static bool VrClearLine(CActor& actor, const Fvector& from, const Fvector& to)
 // static world is a wall (an item or a character between is not).
 bool VrHandReachable(CActor& actor, const Fvector& hand)
 {
+    // Asked twice a frame for the pointing hand (its pointer pick, then the
+    // item it names): one ray per hand position per frame.
+    static u32 frame=u32(-1);
+    static Fvector at[2];
+    static bool result[2];
+    static int known=0;
+    if (frame!=Device.dwFrame) { frame=Device.dwFrame; known=0; }
+    for (int n=0;n<known;++n)
+        if (at[n].x==hand.x && at[n].y==hand.y && at[n].z==hand.z) return result[n];
     const Fvector& eye=actor.cam_FirstEye()->vPosition;
-    return eye.distance_to(hand)<=2.f && VrClearLine(actor,eye,hand);
+    const bool reachable=eye.distance_to(hand)<=2.f && VrClearLine(actor,eye,hand);
+    if (known<2) { at[known]=hand; result[known++]=reachable; }
+    return reachable;
 }
 
 // A loose world item the given hand may take. Asked every frame for every
@@ -114,11 +111,16 @@ float BoxDistance(const Fvector& local, const Fbox& box)
 // `pointer_missed`: the caller's own VrPointerPick this frame found nothing
 // takeable, so the second case is not tried again.
 CPhysicsShellHolder* VrGrabTarget(CActor& actor, int side, bool near_only, bool& touching, const char*& why,
-    bool pointer_missed)
+    bool pointer_missed, const Fmatrix* hand_pose, const Fmatrix* aim_pose)
 {
-    touching=false; why="no tracked hand";
+    touching=false; why="";
     Fmatrix hand, aim;
-    if (!vr::HandTransform(side,false,hand) || !vr::HandTransform(side,true,aim)) return nullptr;
+    if (hand_pose) hand=*hand_pose;
+    else if (!vr::HandTransform(side,false,hand))
+    { why=vr::GameplayActive() ? "no grip pose for the hand" : "gameplay input inactive"; return nullptr; }
+    if (aim_pose) aim=*aim_pose;
+    else if (!vr::HandTransform(side,true,aim))
+    { why=vr::GameplayActive() ? "no aim pose for the hand" : "gameplay input inactive"; return nullptr; }
     const Fvector eye=actor.cam_FirstEye()->vPosition;
     // Kept between calls (game thread only): this runs every frame.
     static xr_vector<ISpatial*> nearby;
@@ -190,9 +192,25 @@ void UpdateVrPickup(CActor& actor, int side, bool available, bool grip, bool tri
     // The grip with the same hysteresis as everything else the hand holds.
     const bool down=grip || trigger;
     if (!down) pickup_armed=true;
+    // Over either shoulder (either hand reaches the backpack), at the tracked
+    // head's height, or ammunition at the pouch: into the inventory.
+    const auto store=[&]() -> bool
+    {
+        const bool to_back=VrAtBackpack(actor,hand.c);
+        const bool to_pouch=smart_cast<CWeaponAmmo*>(grabbed) && Near(hand.c,VrPouchPoint(actor),vr_pouch_reach);
+        auto* item=(to_pouch || to_back) ? grabbed->cast_inventory_item() : nullptr;
+        if (!item || !actor.inventory().CanTakeItem(item)) return false;
+        grabbed_id=u16(-1);
+        pickup_armed=false;
+        Game().SendPickUpEvent(actor.ID(),grabbed->ID());
+        vr::HandHaptic(side,0.22f);
+        return true;
+    };
     if (grabbed)
     {
-        if (!down) { grabbed_id=u16(-1); return; }
+        // Let go there, it is stored as well, as a floor magazine is: one
+        // that reached the backpack and was let go between two frames fell.
+        if (!down) { if (!store()) grabbed_id=u16(-1); return; }
         vr::HideHandForFrame(side);
         Fmatrix target; target.mul_43(hand,grab_offset);
         // With physical hands, carried into a wall it stops at the wall
@@ -212,11 +230,12 @@ void UpdateVrPickup(CActor& actor, int side, bool available, bool grip, bool tri
         // when it is free; otherwise only the backpack takes it.
         if (auto* weapon=smart_cast<CWeapon*>(grabbed))
         {
-            const u16 slot=weapon->BaseSlot();
+            // Its own slot's holster, or the other when that holds a weapon.
+            const u16 slot=VrFreeWeaponSlot(actor,*weapon);
             Fvector holster;
             float range=0.f;
-            if ((slot==INV_SLOT_2 || slot==INV_SLOT_3) && !actor.inventory().ItemFromSlot(slot) &&
-                VrSlotHolster(actor,*weapon,slot,side==1,holster,range) && hand.c.distance_to(holster)<=range &&
+            if (slot!=NO_ACTIVE_SLOT &&
+                VrSlotHolster(actor,*weapon,slot,side==1,holster,range) && VrHolsterDistance(actor,holster,hand.c)<=range &&
                 actor.inventory().CanTakeItem(weapon))
             {
                 grabbed_id=u16(-1);
@@ -225,29 +244,18 @@ void UpdateVrPickup(CActor& actor, int side, bool available, bool grip, bool tri
                 state.wield_hand=side;
                 state.wield_stow=true;
                 state.wield_expires=Device.dwTimeGlobal+3000;
+                // It stays on the shoulder it was brought to.
+                if (CVrWeaponInteraction* vr=weapon->VrInteraction())
+                    vr->SetHolsterShoulder(VrSlotShoulderRight(actor,*weapon,slot,side==1) ? 1 : 0);
                 Game().SendPickUpEvent(actor.ID(),weapon->ID());
                 vr::HandHaptic(side,0.22f);
                 if (vr::ContactDebug()>0) Msg("* [VR pickup] hand %d: %s into its holster",side,weapon->cName().c_str());
                 return;
             }
         }
-        // Over either shoulder (either hand reaches the backpack), at the
-        // tracked head's height.
-        const bool to_back=VrAtBackpack(actor,hand.c);
-        // Ammunition carried to the ammunition pouch goes into it, as over
-        // the shoulder.
-        const bool to_pouch=smart_cast<CWeaponAmmo*>(grabbed) && Near(hand.c,VrPouchPoint(actor),vr_pouch_reach);
-        if (to_pouch || to_back)
-        {
-            auto* item=grabbed->cast_inventory_item();
-            if (item && actor.inventory().CanTakeItem(item))
-            {
-                grabbed_id=u16(-1);
-                pickup_armed=false;
-                Game().SendPickUpEvent(actor.ID(),grabbed->ID());
-                vr::HandHaptic(side,0.22f);
-            }
-        }
+        // Carried into the backpack (or ammunition to the pouch), it is
+        // stored at once.
+        store();
         return;
     }
     // A squeeze that starts where grabbing is not allowed (at the weapon or
@@ -260,10 +268,13 @@ void UpdateVrPickup(CActor& actor, int side, bool available, bool grip, bool tri
         // is taken; a squeeze there otherwise is for the weapon.
         bool touching=false;
         const char* why="";
-        CPhysicsShellHolder* item_object=VrGrabTarget(actor,side,at_weapon,touching,why);
+        // The poses this update already validated: read again, a GAMMA
+        // session refused every grab as "no tracked hand".
+        CPhysicsShellHolder* item_object=VrGrabTarget(actor,side,at_weapon,touching,why,false,&hand,&aim);
         if (!item_object)
         {
-            if (vr::ContactDebug()>0) Msg("* [VR pickup] hand %d: %s%s",side,why,at_weapon ? " (at the weapon)" : "");
+            if (vr::ContactDebug()>0)
+                Msg("* [VR pickup] hand %d: %s%s",side,why && *why ? why : "nothing found",at_weapon ? " (at the weapon)" : "");
             return;
         }
         // No actor_on_item_before_pickup here: that gates the use key's pickup
@@ -279,10 +290,8 @@ void UpdateVrPickup(CActor& actor, int side, bool available, bool grip, bool tri
         // carried: one weapon is held at a time.
         auto* weapon=smart_cast<CWeapon*>(item_object);
         const bool slot_weapon=weapon && (weapon->BaseSlot()==INV_SLOT_2 || weapon->BaseSlot()==INV_SLOT_3);
-        PIItem occupant=slot_weapon ? actor.inventory().ItemFromSlot(weapon->BaseSlot()) : nullptr;
-        const vr::ActiveItem hands=!actor.inventory().ActiveItem() ? vr::ActiveItem::None :
-            VrActiveItemLeaving(actor) ? vr::ActiveItem::OtherLeaving : vr::ActiveItem::OtherHeld;
-        if (slot_weapon && vr::TakeIntoHand(hands,!occupant || occupant==weapon))
+        const vr::ActiveItem hands=VrActiveItemState(actor,item_object);
+        if (slot_weapon && vr::TakeIntoHand(hands,VrFreeWeaponSlot(actor,*weapon)!=NO_ACTIVE_SLOT))
         {
             state.wield_id=weapon->ID();
             state.wield_hand=side;

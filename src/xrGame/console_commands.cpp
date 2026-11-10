@@ -1007,6 +1007,17 @@ void get_files_list(xr_vector<shared_str>& files, LPCSTR dir, LPCSTR file_ext, b
 
 #include "UIGameCustom.h"
 
+void VrDeriveDump(LPCSTR filter);
+// Measures every weapon section with a HUD as its first draw does and logs the
+// derivation: vr_derive_dump [part of a section name]. tools/vr_derive_diff.py
+// compares two such logs.
+class CCC_VrDeriveDump : public IConsole_Command
+{
+public:
+	CCC_VrDeriveDump(LPCSTR N) : IConsole_Command(N) { bEmptyArgsHandled = TRUE; }
+	virtual void Execute(LPCSTR args) { VrDeriveDump(args); }
+};
+
 // Writes the loaded spawn registry (overlays and level packs applied) as an all.spawn file into $app_data_root$.
 class CCC_SpawnOverlaysDump : public IConsole_Command
 {
@@ -2545,6 +2556,7 @@ void CCC_RegisterCommands()
 
 	CMD1(CCC_ALifeSave, "save"); // save game
 	CMD1(CCC_SpawnOverlaysDump, "spawn_overlays_dump");
+	CMD1(CCC_VrDeriveDump, "vr_derive_dump");
 	CMD1(CCC_ALifeLoadFrom, "load"); // load game from ...
 	CMD1(CCC_LoadLastSave, "load_last_save"); // load last saved game from ...
 

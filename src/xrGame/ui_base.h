@@ -97,8 +97,15 @@ public:
 	void RenderFont();
 
 	virtual void OnDeviceReset();
+	// The UI's screen, width over height: VR's UI panel (16:9), else the
+	// window. Its layouts (_16 xml), widescreen correction and tests follow.
+	static float screen_aspect();
 	static bool is_widescreen();
 	static u8 screenmode();
+	// The window's (the device's) aspect, VR or not: picks a weapon's
+	// first-person data (hands_position_16x9, _16x9 motions), which VR
+	// measures its hands and sights from.
+	static bool hud_widescreen();
 	static float get_current_kx();
 	shared_str get_xml_name(LPCSTR fn);
 

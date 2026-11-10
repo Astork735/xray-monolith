@@ -190,6 +190,24 @@ void CDialogHolder::RemoveDialogToRender(CUIWindow* pDialog)
 }
 
 
+namespace
+{
+// A HUD dialog (no cursor): on the magnified VR HUD its pieces grow inward
+// (CUIWindow::DrawHudPieces), laid out with the others.
+bool HudDialog(CUIWindow* wnd)
+{
+	const CUIDialogWnd* dialog = smart_cast<CUIDialogWnd*>(wnd);
+	return dialog && !dialog->NeedCursor();
+}
+}
+
+void CDialogHolder::CollectHudDialogPieces(xr_vector<CUIWindow*>& out)
+{
+	for (const dlgItem& item : m_dialogsToRender)
+		if (item.enabled && item.wnd->IsShown() && HudDialog(item.wnd))
+			CUIWindow::CollectHudPieces(*item.wnd, out);
+}
+
 void CDialogHolder::DoRenderDialogs()
 {
 	xr_vector<dlgItem>::iterator it = m_dialogsToRender.begin();
@@ -197,11 +215,8 @@ void CDialogHolder::DoRenderDialogs()
 	{
 		if ((*it).enabled && (*it).wnd->IsShown())
 		{
-			// A HUD dialog (no cursor) on the magnified VR HUD: its pieces
-			// grow inward (CUIWindow::DrawHudElement).
 			CUIWindow* wnd = (*it).wnd;
-			const CUIDialogWnd* dialog = smart_cast<CUIDialogWnd*>(wnd);
-			const bool hud = CUIWindow::s_vr_hud_inset > 1.f && dialog && !dialog->NeedCursor();
+			const bool hud = CUIWindow::s_vr_hud_inset > 1.f && HudDialog(wnd);
 			const bool was = wnd->m_vr_hud_root;
 			if (hud) wnd->m_vr_hud_root = true;
 			wnd->Draw();

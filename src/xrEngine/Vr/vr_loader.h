@@ -67,10 +67,22 @@
 	X(xrLocateSpace) \
 	X(xrApplyHapticFeedback)
 
+// Optional, resolved apart (vr::LoadOpenXRBodyTracking): a runtime without
+// body tracking (XR_FB_body_tracking) or its fidelity request
+// (XR_META_body_tracking_fidelity) still starts VR.
+#define VR_XR_BODY_FUNCTIONS(X) 	X(xrGetSystemProperties) 	X(xrCreateBodyTrackerFB) 	X(xrDestroyBodyTrackerFB) 	X(xrLocateBodyJointsFB)
+#define VR_XR_FIDELITY_FUNCTIONS(X) 	X(xrRequestBodyTrackingFidelityMETA)
+// Optional (vr::LoadOpenXRVisibilityMask): the area of each eye the lenses
+// never show (XR_KHR_visibility_mask).
+#define VR_XR_VISIBILITY_MASK_FUNCTIONS(X) 	X(xrGetVisibilityMaskKHR)
+
 #define VR_XR_DECLARE(NAME) extern PFN_##NAME NAME##_p;
 extern PFN_xrGetInstanceProcAddr xrGetInstanceProcAddr_p;
 VR_XR_GLOBAL_FUNCTIONS(VR_XR_DECLARE)
 VR_XR_INSTANCE_FUNCTIONS(VR_XR_DECLARE)
+VR_XR_BODY_FUNCTIONS(VR_XR_DECLARE)
+VR_XR_FIDELITY_FUNCTIONS(VR_XR_DECLARE)
+VR_XR_VISIBILITY_MASK_FUNCTIONS(VR_XR_DECLARE)
 #undef VR_XR_DECLARE
 
 // Map the API names onto the resolved pointers.
@@ -113,6 +125,12 @@ VR_XR_INSTANCE_FUNCTIONS(VR_XR_DECLARE)
 #define xrGetActionStatePose                   xrGetActionStatePose_p
 #define xrLocateSpace                          xrLocateSpace_p
 #define xrApplyHapticFeedback                  xrApplyHapticFeedback_p
+#define xrGetSystemProperties                  xrGetSystemProperties_p
+#define xrCreateBodyTrackerFB                  xrCreateBodyTrackerFB_p
+#define xrDestroyBodyTrackerFB                 xrDestroyBodyTrackerFB_p
+#define xrLocateBodyJointsFB                   xrLocateBodyJointsFB_p
+#define xrRequestBodyTrackingFidelityMETA      xrRequestBodyTrackingFidelityMETA_p
+#define xrGetVisibilityMaskKHR                 xrGetVisibilityMaskKHR_p
 
 namespace vr
 {
@@ -122,6 +140,16 @@ namespace vr
 
 	// Resolves the instance-level entry points. Call after xrCreateInstance.
 	bool LoadOpenXRInstance(XrInstance instance);
+
+	// Resolves the optional body tracking entry points (only once the
+	// extensions were enabled). Never fails VR: false leaves body tracking
+	// off. The fidelity request is resolved only when `fidelity` is set and
+	// may stay null.
+	bool LoadOpenXRBodyTracking(XrInstance instance, bool fidelity);
+
+	// Resolves xrGetVisibilityMaskKHR (only once XR_KHR_visibility_mask was
+	// enabled). Never fails VR: false leaves the mask unknown.
+	bool LoadOpenXRVisibilityMask(XrInstance instance);
 
 	// Releases the loader DLL and clears all pointers.
 	void UnloadOpenXR();

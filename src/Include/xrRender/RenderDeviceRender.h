@@ -45,6 +45,16 @@ public:
 	virtual void ResourcesStoreNecessaryTextures() = 0;
 	virtual void ResourcesDumpMemoryUsage() = 0;
 	virtual void ResourcesPrefetchCreateTexture(LPCSTR name) = 0;
+	// Textures created between ResourcesBackgroundBegin and ResourcesBackgroundEnd
+	// (a model_Create) are registered unloaded and loaded on a worker thread, in
+	// order; End returns a ticket for them (0: nothing to wait for). Done polls
+	// it (and releases finished work: call it from the main thread), Wait blocks
+	// until it is loaded. On renderers that cannot load off the main thread End
+	// loads them at once.
+	virtual void ResourcesBackgroundBegin() = 0;
+	virtual u32 ResourcesBackgroundEnd() = 0;
+	virtual bool ResourcesBackgroundDone(u32 ticket) = 0;
+	virtual void ResourcesBackgroundWait(u32 ticket) = 0;
 
 	//	HWSupport
 	virtual bool HWSupportsShaderYUV2RGB() = 0;

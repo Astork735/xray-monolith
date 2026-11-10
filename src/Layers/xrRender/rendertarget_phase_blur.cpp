@@ -78,6 +78,11 @@ void CRenderTarget::phase_blur()
 	RCache.set_c("blur_params", 0.0, 1.0, w, h);
 	RCache.set_Geometry(g_combine);
 	RCache.Render(D3DPT_TRIANGLELIST, Offset, 0, 4, 0, 2);
+#if defined(USE_DX11)
+	// VR: the half-size blur feeds SSFX bloom every frame; the quarter and
+	// eighth ones only passes that are off this frame (vr_blur_small_needed).
+	if (!vr_blur_small_needed()) return;
+#endif
 	///////////////////////////////////////////////////////////////////////////////////
 	////Horizontal blur / Half res
 	///////////////////////////////////////////////////////////////////////////////////
@@ -414,7 +419,7 @@ void CRenderTarget::phase_ssfx_volumetric_blur()
 	HW.pContext->CopyResource(rt_Generic_2->pTexture->surface_get(), rt_ssfx_accum->pTexture->surface_get());
 };
 
-void CRenderTarget::phase_ssfx_water_blur()
+void CRenderTarget::phase_ssfx_water_blur(const Irect* scissor)
 {
 	//Constants
 	u32 Offset = 0;
@@ -430,6 +435,22 @@ void CRenderTarget::phase_ssfx_water_blur()
 	p1.set(0.5f, 0.5f);
 
 	set_viewport_size(HW.pContext, w / 2, h / 2);
+
+	// VR: only the scissor's area is blurred. Outside it both targets hold
+	// the clear colour, which is also what blurring the cleared, water-free
+	// area there gives, so every later read sees the same values. The
+	// override keeps it on while the passes' own states are applied.
+	struct ScissorEnd
+	{
+		bool active;
+		~ScissorEnd() { if (active) { StateManager.OverrideScissoring(false); RCache.set_Scissor(NULL); } }
+	} scissor_end{scissor != nullptr};
+	const FLOAT clear_color[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+	if (scissor)
+	{
+		StateManager.OverrideScissoring(true, TRUE);
+		HW.pContext->RSSetScissorRects(1, reinterpret_cast<const D3D11_RECT*>(scissor));
+	}
 
 	if (ps_ssfx_water.y > 0)
 	{
@@ -453,6 +474,8 @@ void CRenderTarget::phase_ssfx_water_blur()
 		RCache.Render(D3DPT_TRIANGLELIST, Offset, 0, 4, 0, 2);
 
 		// BLUR PHASE 2 //////////////////////////////////////////////////////////
+		// (The water's SSR is in rt_ssfx_temp until here; phase 1 has read it.)
+		if (scissor) HW.pContext->ClearRenderTargetView(rt_ssfx_temp->pRT, clear_color);
 		u_setrt(rt_ssfx_temp, 0, 0, NULL);
 		RCache.set_CullMode(CULL_NONE);
 		RCache.set_Stencil(FALSE);
@@ -476,6 +499,7 @@ void CRenderTarget::phase_ssfx_water_blur()
 	{
 		HW.pContext->CopyResource(rt_ssfx_temp2->pTexture->surface_get(), rt_ssfx_temp->pTexture->surface_get());
 
+		if (scissor) HW.pContext->ClearRenderTargetView(rt_ssfx_temp->pRT, clear_color);
 		u_setrt(rt_ssfx_temp, 0, 0, NULL);
 		RCache.set_CullMode(CULL_NONE);
 		RCache.set_Stencil(FALSE);

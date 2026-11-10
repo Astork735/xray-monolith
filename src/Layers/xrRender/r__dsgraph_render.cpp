@@ -114,7 +114,10 @@ void __fastcall water_node(mapSorted_Node* N)
 #ifdef USE_DX11
 	if (RImplementation.o.ssfx_water)
 	{
-		RCache.set_Shader(RImplementation.Target->s_ssfx_water);
+		if (RImplementation.Target->vr_simple_water)
+			RCache.set_Element(RImplementation.Target->vr_water_element(N->val.se));
+		else
+			RCache.set_Shader(RImplementation.Target->s_ssfx_water);
 	}
 #endif
 

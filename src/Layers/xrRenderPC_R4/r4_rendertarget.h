@@ -40,6 +40,37 @@ public:
 	// unchanged at it. False (nothing swapped) when a twin cannot be made.
 	bool vr_scope_begin(u32 size);
 	void vr_scope_end();
+	// The view whose frame-to-frame history (previous matrices, water
+	// reflections) is in use: 0 desktop, 1 left eye, 2 right eye, 3 the
+	// scope's view. Flat is always 0.
+	static const u32 vr_view_slots = 4;
+	u32 vr_view_slot() const
+	{
+		if (!g_vr_rendering_eye) return 0;
+		return g_vr_eye_index >= 0 ? u32(g_vr_eye_index) + 1 : 3;
+	}
+	// VR: the right eye swaps in its own rt_ssfx_water (the SSFX water's
+	// reflection history) between begin and end. The left eye and the
+	// scope's view (whose twins include it) keep their own already. False
+	// when nothing was swapped in.
+	bool vr_water_history_begin();
+	void vr_water_history_end();
+	// VR: the SSFX water work of a view with no water is skipped. The view
+	// then clears its history before it next draws water, which is what the
+	// desktop's history holds after any frame without water.
+	bool vr_water_skipped[vr_view_slots] = {};
+	u32 vr_waves_frame = u32(-1);
+	// VR "Simple Water" (vr_legacy_water) this view: water is routed as for
+	// SSFX water but drawn with vr_water_element instead, and the SSFX water
+	// passes are skipped. Set by CRender::Render for each view.
+	bool vr_simple_water = false;
+	// The stock water pass for a water material, with its base texture;
+	// made on first use per texture and kept with the target.
+	ShaderElement* vr_water_element(ShaderElement* material);
+	xr_map<xr_string, ref_shader> vr_water_shaders;
+	// Whether this view's quarter and eighth blurs (rt_blur_4, rt_blur_8)
+	// have a reader: phase_blur skips them when not. Always true on desktop.
+	bool vr_blur_small_needed();
 private:
 	struct VrScreenTarget
 	{
@@ -59,10 +90,17 @@ private:
 	bool vr_twins_in = false;
 	u32 vr_saved_size[2] = {};
 	float vr_saved_half[2] = {};
+	VrScreenTarget vr_water_history{&rt_ssfx_water, 1};
+	bool vr_water_history_in = false, vr_water_history_failed = false;
 	void vr_register_screen_target(ref_rt& rt, u32 divisor);
 	bool vr_make_twins(u32 size);
 	void vr_release_twins();
 	void vr_swap_twins();
+	// One target's twin: made from the original's descriptions at w x h
+	// (cleared to black), released, and swapped with the original.
+	bool vr_create_twin(VrScreenTarget& target, u32 width, u32 height);
+	static void vr_release_twin(VrScreenTarget& target);
+	static void vr_swap_twin(VrScreenTarget& target);
 public:
 	//
 	IBlender* b_occq;
@@ -118,6 +156,7 @@ public:
 	IBlender* b_ssfx_taa;
 	IBlender* b_ssfx_rain;
 	IBlender* b_ssfx_water_blur;
+	IBlender* b_vr_water;
 	IBlender* b_ssfx_bloom_downsample;
 	IBlender* b_ssfx_bloom_upsample;
 	IBlender* b_ssfx_bloom;
@@ -494,7 +533,9 @@ public:
 
 	void phase_ssfx_ssr(); // SSR Phase
 	void phase_ssfx_volumetric_blur(); // Volumetric Blur
-	void phase_ssfx_water_blur(); // Water Blur
+	// Water Blur. VR passes the part of the half-size target the reflections
+	// can reach; the rest is left at the black blurring there would give.
+	void phase_ssfx_water_blur(const Irect* scissor = nullptr);
 	void phase_ssfx_water_waves(); // Water Waves
 	void phase_ssfx_ao(); // AO
 	void phase_ssfx_il(); // IL

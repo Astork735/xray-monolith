@@ -3,6 +3,7 @@
 #ifdef VR_ENABLED
 
 #include "vr_config.h"
+#include "vr_gameplay.h"
 #include "vr_policy.h"
 
 #include <string.h>
@@ -36,7 +37,7 @@ int vr_physical_crouch = 1;
 float vr_crouch_depth = 0.30f, vr_low_crouch_depth = 0.60f;
 int vr_body_slots = 1, vr_slot_rings = 1;
 float vr_slot_radius = 0.10f;
-float vr_hip_height = 0.72f, vr_hip_width = 0.22f;
+float vr_hip_height = vr::default_hip_height, vr_hip_width = 0.22f;
 float vr_vignette = 0.f;
 int vr_wrist_display = 1, vr_hide_hud = 0, vr_left_handed = 0;
 float vr_throw_scale = 1.75f;
@@ -49,10 +50,19 @@ int vr_shared_shadows = 1;
 float vr_scope_quality = 1.f;
 int vr_roomscale = 1;
 float vr_torso_deadband = 50.f;
-int vr_depth_layer = 1;
+// Off by default (2026-11-09): with Virtual Desktop the copy and the runtime's
+// depth handling cost GPU time and late frames with no visible gain.
+int vr_depth_layer = 0;
 float vr_ui_distance = 1.0f;
 float vr_hud_distance = 1.0f;
 float vr_hud_scale = 1.0f;
+float vr_message_text_size = 2.f;
+int vr_body_tracking = 1;
+float vr_body_tracking_min_confidence = 0.5f;
+int vr_body_tracking_debug = 0;
+int vr_seated_reach = 1;
+float vr_shoulder_width = 0.f;
+float vr_arm_length = 0.f;
 
 EVrLaunchMode g_vr_launch_mode = VR_Launch_Auto;
 

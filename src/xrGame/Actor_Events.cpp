@@ -24,6 +24,10 @@
 #include <luabind/luabind.hpp>
 #include "script_game_object.h"
 
+// VR: what a pickup costs the frame it lands in (VrWeaponUpdate.cpp).
+u32 VrTextureBytes();
+void VrNoteWorkLoaded(const char* what, const char* object, float ms, u32 textures_before);
+
 void CActor::OnEvent(NET_Packet& P, u16 type)
 {
 	inherited::OnEvent(P, type);
@@ -64,9 +68,13 @@ void CActor::OnEvent(NET_Packet& P, u16 type)
 				Msg("--- Actor [%d][%s]  %s  [%d][%s]", ID(), Name(), act, _GO->ID(), _GO->cNameSect().c_str());
 #endif // MP_LOGGING
 
+				CTimer take_timer; take_timer.Start();
+				const u32 textures_before = VrTextureBytes();
 				inventory().Take(_GO, false, true);
 
 				SelectBestWeapon(Obj);
+				VrNoteWorkLoaded("taken into the inventory (scripts included)", _GO->cNameSect().c_str(),
+				                 take_timer.GetElapsed_sec() * 1000.f, textures_before);
 			}
 			else
 			{

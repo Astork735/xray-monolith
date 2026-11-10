@@ -55,6 +55,8 @@ bool CVrSystem::CreateInstance()
     VR_XR_CHECK(xrEnumerateInstanceExtensionProperties(nullptr, count, &count, extensions.data()), "enumerate extensions");
     bool d3d11 = false;
     m_depth_extension = m_hp_extension = false;
+    m_body_extension = m_fidelity_extension = false;
+    m_visibility_mask_extension = false;
     for (const auto& extension : extensions)
     {
         if (!strcmp(extension.extensionName, XR_KHR_D3D11_ENABLE_EXTENSION_NAME)) d3d11 = true;
@@ -62,12 +64,21 @@ bool CVrSystem::CreateInstance()
         // controller profile (its face buttons are lost through the WMR one).
         if (!strcmp(extension.extensionName, XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME)) m_depth_extension = true;
         if (!strcmp(extension.extensionName, XR_EXT_HP_MIXED_REALITY_CONTROLLER_EXTENSION_NAME)) m_hp_extension = true;
+        // Optional: Meta body tracking (Virtual Desktop's VDXR forwards it).
+        if (!strcmp(extension.extensionName, XR_FB_BODY_TRACKING_EXTENSION_NAME)) m_body_extension = true;
+        if (!strcmp(extension.extensionName, XR_META_BODY_TRACKING_FIDELITY_EXTENSION_NAME)) m_fidelity_extension = true;
+        // Optional: the area of each eye the lenses hide.
+        if (!strcmp(extension.extensionName, XR_KHR_VISIBILITY_MASK_EXTENSION_NAME)) m_visibility_mask_extension = true;
     }
+    m_fidelity_extension = m_fidelity_extension && m_body_extension;
     if (!d3d11) { Msg("! [VR] runtime lacks XR_KHR_D3D11_enable"); return false; }
-    const char* enabled[3] = {XR_KHR_D3D11_ENABLE_EXTENSION_NAME};
+    const char* enabled[6] = {XR_KHR_D3D11_ENABLE_EXTENSION_NAME};
     uint32_t enabled_count = 1;
     if (m_depth_extension) enabled[enabled_count++] = XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME;
     if (m_hp_extension) enabled[enabled_count++] = XR_EXT_HP_MIXED_REALITY_CONTROLLER_EXTENSION_NAME;
+    if (m_body_extension) enabled[enabled_count++] = XR_FB_BODY_TRACKING_EXTENSION_NAME;
+    if (m_fidelity_extension) enabled[enabled_count++] = XR_META_BODY_TRACKING_FIDELITY_EXTENSION_NAME;
+    if (m_visibility_mask_extension) enabled[enabled_count++] = XR_KHR_VISIBILITY_MASK_EXTENSION_NAME;
     XrInstanceCreateInfo info{XR_TYPE_INSTANCE_CREATE_INFO};
     info.enabledExtensionCount = enabled_count; info.enabledExtensionNames = enabled;
     info.applicationInfo.apiVersion = XR_API_VERSION_1_0;
@@ -78,6 +89,13 @@ bool CVrSystem::CreateInstance()
     XrInstanceProperties properties{XR_TYPE_INSTANCE_PROPERTIES};
     if (XR_SUCCEEDED(xrGetInstanceProperties(m_instance, &properties)))
         Msg("* [VR] runtime: %s", properties.runtimeName);
+    if (m_body_extension) m_body_extension = vr::LoadOpenXRBodyTracking(m_instance, m_fidelity_extension);
+    // Body tracking reaches the game through Virtual Desktop's own runtime
+    // (VDXR), not through SteamVR.
+    Msg("* [VR] body tracking (XR_FB_body_tracking): %s%s", m_body_extension ? "available" : "not offered by this runtime",
+        m_body_extension && m_fidelity_extension ? ", high fidelity offered" : "");
+    if (m_visibility_mask_extension) m_visibility_mask_extension = vr::LoadOpenXRVisibilityMask(m_instance);
+    if (!m_visibility_mask_extension) Msg("* [VR] visibility mask (XR_KHR_visibility_mask): not offered by this runtime");
     return true;
 }
 bool CVrSystem::Prepare()
@@ -143,6 +161,7 @@ bool CVrSystem::Initialize(ID3D11Device* device, unsigned width, unsigned height
     // Optional: without it the compositor reprojects colour only.
     if (m_depth_extension && !vr::CreateDepthSwapchains(m_session, Width(), Height(), m_depth))
         m_depth_extension = false;
+    for (int eye = 0; eye < 2; ++eye) QueryVisibilityMask(eye);
     m_start_time = GetTickCount64();
     // Polling frames (including empty ones) lets runtimes progress to VISIBLE.
     while (!m_lost && m_state != XR_SESSION_STATE_VISIBLE && m_state != XR_SESSION_STATE_FOCUSED &&
@@ -169,6 +188,16 @@ void CVrSystem::Shutdown()
 {
     if (m_frame_begun) SubmitFrame();
     vr::PerfDetach();
+    m_body.Destroy();
+    m_body.ResetAvailability();
+    m_body_extension = m_fidelity_extension = false;
+    m_visibility_mask_extension = false;
+    for (int eye = 0; eye < 2; ++eye)
+    {
+        m_mask_vertices[eye].clear(); m_mask_indices[eye].clear();
+        m_mask_report[eye] = false; m_mask_share[eye] = -1.f;
+    }
+    m_floor_valid = false;
     VrInput::Get().Shutdown();
     for (auto& eye : m_eyes) vr::DestroyEyeSwapchain(eye);
     for (auto& depth : m_depth) vr::DestroyEyeSwapchain(depth);
@@ -222,10 +251,59 @@ void CVrSystem::HandleSessionStateChanged(const XrEventDataSessionStateChanged& 
         m_views_valid = false;
         m_origin_valid = false; m_preserve_origin = m_head_valid && !m_recenter_pending;
         VrInput::Get().Invalidate();
+        m_body.Invalidate();
+        m_floor_valid = false;
     }
     else if (m_state == XR_SESSION_STATE_LOSS_PENDING || m_state == XR_SESSION_STATE_EXITING)
     {
         m_lost = true; m_session_running = false;
+    }
+}
+void CVrSystem::QueryVisibilityMask(int eye)
+{
+    m_mask_vertices[eye].clear(); m_mask_indices[eye].clear();
+    m_mask_report[eye] = false; m_mask_share[eye] = -1.f;
+    if (!m_visibility_mask_extension || !m_session || !xrGetVisibilityMaskKHR) return;
+    // Two calls: the counts, then the triangles. A failure only leaves the
+    // mask unknown; it never ends the session.
+    const auto config = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    const auto type = XR_VISIBILITY_MASK_TYPE_HIDDEN_TRIANGLE_MESH_KHR;
+    XrVisibilityMaskKHR mask{XR_TYPE_VISIBILITY_MASK_KHR};
+    XrResult result = xrGetVisibilityMaskKHR(m_session, config, uint32_t(eye), type, &mask);
+    std::vector<XrVector2f> vertices(XR_SUCCEEDED(result) ? mask.vertexCountOutput : 0);
+    std::vector<uint32_t> indices(XR_SUCCEEDED(result) ? mask.indexCountOutput : 0);
+    if (XR_SUCCEEDED(result) && !vertices.empty() && !indices.empty())
+    {
+        mask.vertexCapacityInput = uint32_t(vertices.size()); mask.vertices = vertices.data();
+        mask.indexCapacityInput = uint32_t(indices.size()); mask.indices = indices.data();
+        result = xrGetVisibilityMaskKHR(m_session, config, uint32_t(eye), type, &mask);
+        // On success the counts are within the capacities given.
+        vertices.resize(XR_SUCCEEDED(result) ? mask.vertexCountOutput : 0);
+        indices.resize(XR_SUCCEEDED(result) ? mask.indexCountOutput : 0);
+    }
+    if (XR_FAILED(result))
+    {
+        Msg("! [VR] visibility mask: eye %d not available (%s)", eye, vr::ResultToString(result));
+        return;
+    }
+    m_mask_vertices[eye].reserve(vertices.size());
+    for (const auto& vertex : vertices) m_mask_vertices[eye].push_back({vertex.x, vertex.y});
+    m_mask_indices[eye] = indices;
+    m_mask_report[eye] = true;
+}
+void CVrSystem::ReportVisibilityMask()
+{
+    for (int eye = 0; eye < 2; ++eye)
+    {
+        if (!m_mask_report[eye]) continue;
+        m_mask_report[eye] = false;
+        const XrFovf& fov = m_views[eye].fov;
+        const auto& vertices = m_mask_vertices[eye];
+        const auto& indices = m_mask_indices[eye];
+        m_mask_share[eye] = vr::HiddenImageShare(vertices.data(), vertices.size(), indices.data(), indices.size(),
+            tanf(fov.angleLeft), tanf(fov.angleRight), tanf(fov.angleDown), tanf(fov.angleUp));
+        Msg("* [VR] visibility mask: eye %d, %u triangles, %.1f%% of the image hidden", eye,
+            unsigned(indices.size() / 3), m_mask_share[eye] * 100.f);
     }
 }
 void CVrSystem::PollEvents()
@@ -245,6 +323,13 @@ void CVrSystem::PollEvents()
             const auto& change = *reinterpret_cast<XrEventDataReferenceSpaceChangePending*>(&event);
             const auto type = m_view_space == m_stage_space ? XR_REFERENCE_SPACE_TYPE_STAGE : XR_REFERENCE_SPACE_TYPE_LOCAL;
             if (change.session == m_session && change.referenceSpaceType == type) m_space_change_time = change.changeTime;
+        }
+        else if (event.type == XR_TYPE_EVENT_DATA_VISIBILITY_MASK_CHANGED_KHR)
+        {
+            const auto& change = *reinterpret_cast<XrEventDataVisibilityMaskChangedKHR*>(&event);
+            if (change.session == m_session && change.viewConfigurationType == XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO &&
+                change.viewIndex < 2)
+                QueryVisibilityMask(int(change.viewIndex));
         }
         if (m_lost) break;
     }
@@ -282,6 +367,7 @@ bool CVrSystem::UpdateTracking()
     const XrResult result = xrLocateViews(m_session, &info, &state, 2, &count, m_views);
     const XrViewStateFlags valid = XR_VIEW_STATE_POSITION_VALID_BIT | XR_VIEW_STATE_ORIENTATION_VALID_BIT;
     m_views_valid = Check(result, "xrLocateViews") && count == 2 && (state.viewStateFlags & valid) == valid;
+    if (m_views_valid && (m_mask_report[0] || m_mask_report[1])) ReportVisibilityMask();
     XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
     if (m_views_valid)
         m_views_valid = Check(xrLocateSpace(m_head_space, m_view_space, info.displayTime, &head), "locate head") &&
@@ -290,6 +376,8 @@ bool CVrSystem::UpdateTracking()
     if (!m_views_valid)
     {
         if (m_head_valid) { m_origin_valid = false; m_preserve_origin = !m_recenter_pending; }
+        m_body.Invalidate();
+        m_floor_valid = false;
         return false;
     }
     m_head_pose = head.pose;
@@ -311,6 +399,43 @@ bool CVrSystem::UpdateTracking()
     }
     m_head_body.mul_43(m_tracking_to_body, tracking_head);
     m_head_valid = true;
+    UpdateBodyTracking(info.displayTime);
+    return true;
+}
+void CVrSystem::UpdateBodyTracking(XrTime time)
+{
+    // The real floor: STAGE's origin wherever the view space is.
+    m_floor_valid = false;
+    if (m_stage_space)
+    {
+        XrSpaceLocation floor{XR_TYPE_SPACE_LOCATION};
+        if (m_stage_space == m_view_space) { m_floor_pose = {{0,0,0,1},{0,0,0}}; m_floor_valid = true; }
+        else if (XR_SUCCEEDED(xrLocateSpace(m_stage_space, m_view_space, time, &floor)) &&
+            (floor.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT))
+        {
+            m_floor_pose = floor.pose;
+            m_floor_valid = true;
+        }
+    }
+    // The tracker runs only while vr_body_tracking is on (the headset does
+    // the work, and Virtual Desktop sends it over).
+    if (!vr_body_tracking)
+    {
+        if (m_body.Created()) { m_body.Destroy(); Msg("* [VR] body tracking: off (vr_body_tracking 0)"); }
+        // Turned on again: try at once.
+        m_body.ResetAvailability();
+        return;
+    }
+    if (!m_body_extension) return;
+    // Retried every few seconds until the runtime supports it: Virtual
+    // Desktop reports body tracking only while the headset sends the body.
+    if (!m_body.Created() && !m_body.Create(m_instance, m_system, m_session, m_fidelity_extension, time)) return;
+    m_body.Locate(m_view_space, time, vr_body_tracking_min_confidence);
+}
+bool CVrSystem::RealFloorInBody(float& y) const
+{
+    if (!m_floor_valid || !m_head_valid) return false;
+    y = TrackingToBody(m_floor_pose).c.y;
     return true;
 }
 void CVrSystem::BeginTiming()
@@ -610,6 +735,10 @@ void CVrSystem::AlignTrackingOrigin()
     forward.normalize();
     Fmatrix origin; origin.identity(); origin.k = forward;
     origin.i.crossproduct(origin.j, origin.k); origin.c = tracking_head.c;
+    // The head's height now is the eye height (a new wearer gets theirs);
+    // a head lowered while recentering rises onto it again in the next
+    // seconds (vr::HeightRecalibration).
+    ++m_align_count;
     m_tracking_to_body.invert(origin);
     m_head_body.mul_43(m_tracking_to_body, tracking_head);
     m_origin_valid = true; m_preserve_origin = false; m_recenter_pending = false;

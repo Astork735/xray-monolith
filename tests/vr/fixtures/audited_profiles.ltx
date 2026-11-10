@@ -1,12 +1,9 @@
-; Native VR weapon profiles. A section is vr_wpn_<weapon section>.
-; CVrWeaponInteraction reads the keys used by AK-74 and USP below. All
-; physical capabilities are opt-in; absent keys do not imply a magazine,
-; chamber, slide stop, or movable bolt. Paths and bind positions are checked
-; against the active HUD model before enabling a physical interaction.
+; Reference geometry of the stock PM, AK-74 and USP-45 HUD models, measured
+; by hand from the installed OGF files. Once the game's VR profiles for those
+; three; now test data only (weapon_profile_tests.py checks it against the
+; models): every weapon in the game is derived from its own model.
 ; Geometry is in metres in the HUD model's bind coordinate system.
-;
-; The stock PM uses the same interaction component as the rifles and other
-; pistols. Its small adapter retains the PM firing obstruction check.
+
 [vr_wpn_wpn_pm]
 expected_visual         = anomaly_weapons\wpn_pm\wpn_pm_hud.ogf
 two_handed              = false

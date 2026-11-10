@@ -28,10 +28,18 @@ int VrDetectorHand(CActor& actor);
 bool VrDevicePose(CActor& actor, Fmatrix& pose);
 // Where the knife or binoculars (the first-person model) is held in its hand.
 bool VrKnifePose(CActor& actor, Fmatrix& pose);
+// The grenade (or other missile) in the hand that took it, as its first-
+// person idle's hand holds it: its first-person model at that pose. False
+// before it is drawn, once thrown, or without a sampled hold (the world
+// model is then drawn at the hand, as before).
+bool VrMissilePose(CActor& actor, Fmatrix& pose);
 // The first-person idle animation's right hand around the knife or
 // binoculars (hand bone in the world and every bone's local pose), for the
 // arms to draw exactly.
-bool VrKnifeBones(CActor& actor, int side, struct VrHandBones& bones);
+bool VrItemBones(CActor& actor, int side, struct VrHandBones& bones);
+// Draws the grenade in the hand, its pin out in the hand that pulled it
+// (false: draw the game's own first-person model).
+bool VrRenderGrenade(CActor& actor);
 // Places the detector or flashlight and the knife in their hands as the game
 // holds them in first person, and makes that the device's first-person
 // transform. Right after the first-person HUD's own update, each frame.
@@ -81,6 +89,10 @@ Fvector VrOnBodySurface(CActor& actor, float x, float height, float z);
 // With the body shown: the world point of an on-body place
 // (vr::BodySlotOnBody) from the body's pelvis frame, just outside the body.
 Fvector VrOnBodyPlace(CActor& actor, const Fmatrix& pelvis, float angle, float height);
+// With the body shown, how far vr_hip_height moves the belt (slots, pouch,
+// hip holsters) from the body's hips: its difference from the default
+// 0.65 m, a larger drop below the eyes lower.
+float VrBodyHipShift();
 // The hand is at the equipment (a body slot, holster or ammunition pouch),
 // where a squeeze takes from it rather than grabbing what the hand points at.
 // hand: only body slots that would act on that hand's squeeze count (-1: any).

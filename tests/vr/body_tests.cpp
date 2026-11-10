@@ -161,6 +161,16 @@ int main()
     CHECK(vr::BinocularEyepieceEnd(-0.9f)==1);                    // +Z toward the camera
     CHECK(vr::BinocularEyepieceEnd(0.1f)==0);                     // across the view: nearer end
     CHECK(vr::BinocularEyepieceEnd(0.f)==0);                      // no first-person pose
+    // Long guns: where put by hand while holstered wins (it is drawn from
+    // there); otherwise the hand's shoulder, except slot 3's second long gun,
+    // over the off-hand shoulder of the handedness setting.
+    CHECK(vr::LongGunShoulderRight(0,false,false,true,true)==false);  // put on the left, right hand
+    CHECK(vr::LongGunShoulderRight(1,true,true,false,true)==true);    // put on the right
+    CHECK(vr::LongGunShoulderRight(-1,false,true,true,true)==true);   // drawn: follows the right hand
+    CHECK(vr::LongGunShoulderRight(-1,false,false,false,true)==false);// drawn left-handed: left
+    CHECK(vr::LongGunShoulderRight(-1,true,true,true,true)==false);   // slot 3 second: off-hand
+    CHECK(vr::LongGunShoulderRight(-1,true,true,false,false)==true);  // left-handed player
+    CHECK(vr::LongGunShoulderRight(-1,true,false,false,true)==false); // slot 3 alone: the hand
     std::printf("vr body tests passed\n");
     return 0;
 }

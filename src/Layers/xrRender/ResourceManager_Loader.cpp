@@ -8,6 +8,7 @@
 void CResourceManager::OnDeviceDestroy(BOOL)
 {
 	if (RDEVICE.b_is_Ready) return;
+	BackgroundShutdown();
 	m_textures_description.UnLoad();
 
 	// Matrices

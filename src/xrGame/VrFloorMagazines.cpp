@@ -1,54 +1,12 @@
 ﻿// Magazines left in the world, and a VR hand carrying them.
 #include "stdafx.h"
-#include "VrWeaponInteraction.h"
-#include "VrWeaponPose.h"
-#include "VrReloadDerivation.h"
-#include "VrSupportAction.h"
-#include "VrWeaponNames.h"
-#include "VrBodySlots.h"
-#include "VrSaveLedger.h"
-#include "Bolt.h"
-#include "WeaponAmmo.h"
-#include "ai_object_location.h"
-#include "Weapon.h"
-#include "WeaponMagazined.h"
-#include "WeaponPistol.h"
-#include "WeaponRevolver.h"
-#include "WeaponKnife.h"
-#include "WeaponBinoculars.h"
-#include "xr_level_controller.h"
-#include "Actor.h"
-#include "inventory.h"
-#include "PhysicsShellHolder.h"
-#include "Level.h"
-#include "game_cl_base.h"
-#include "player_hud.h"
-#include "HUDManager.h"
-#include "UIGameCustom.h"
-#include "ai_space.h"
-#include "script_engine.h"
-#include "script_game_object.h"
-#include "../xrEngine/CameraBase.h"
-#include "../xrEngine/xr_input.h"
-#include "../xrEngine/Vr/vr_gameplay.h"
-#include "../xrEngine/Vr/vr_stereo.h"
-#include "../Include/xrRender/Kinematics.h"
-#include "../Include/xrRender/DrawUtils.h"
-#include "../xrEngine/Vr/vr_overlay_draw.h"
-#include "../xrEngine/bone.h"
-#include "../xrEngine/EnnumerateVertices.h"
-#include "WeaponShotgun.h"
-#include "WeaponBM16.h"
-#include "WeaponRG6.h"
-#include "WeaponRPG7.h"
-#include "../Include/xrRender/KinematicsAnimated.h"
-#include "ClimableObject.h"
-#include "../xrphysics/Extendedgeom.h"
-#include "../xrPhysics/PhysicsShell.h"
-#include "CharacterPhysicsSupport.h"
-#include "PHMovementControl.h"
-#include "xrServer_Objects_ALife_Items.h"
 #include "VrWeaponInteractionInternal.h"
+#include "Weapon.h"
+#include "Actor.h"
+#include "Level.h"
+#include "../xrEngine/Vr/vr_gameplay.h"
+#include "../Include/xrRender/RenderVisual.h"
+#include "../xrPhysics/PhysicsShell.h"
 using namespace vrwi;
 
 bool VrFloorMagazineHand(int hand)
@@ -182,7 +140,7 @@ void UpdateVrFloorMagazines(CActor& actor, bool controls_valid, const bool track
         {
             if (magazine.hand>=0) continue;
             Fmatrix world; magazine.shell->GetGlobalTransformDynamic(&world);
-            Fvector local; Fmatrix().invert(world).transform_tiny(local,hands[h].c);
+            const Fvector local=Local(world,hands[h].c);
             Fbox box; box.min.sub(magazine.box_center,magazine.box_half); box.max.add(magazine.box_center,magazine.box_half);
             const float distance=BoxDistance(local,box);
             if (distance<best) { best=distance; taken=&magazine; taken_world=world; }

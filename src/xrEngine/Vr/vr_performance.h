@@ -18,7 +18,7 @@ enum class PerfStage : unsigned
 {
     WaitFrame, BeginFrame, Tracking, Input, UiWait, Simulation, FrameWork,
     Visibility, Geometry, QueryWait, Sun, LocalLights, Post, LeftEye, RightEye,
-    // EyeMirror is nested in LeftEye; UiMirror is top level (FinishStereoFrame).
+    // EyeMirror is nested in RightEye; UiMirror is top level (FinishStereoFrame).
     Scope, EyeWait, DepthCopy, EyeMirror, UiMirror, EndFrame, Present, Tail,
     // Consecutive parts of Post (CRenderTarget::phase_combine), in order:
     // AO, sky and clouds, deferred combine, water/SSR/rain, forward

@@ -16,7 +16,7 @@
 ;             chambers | muzzle
 ; has_bolt_catch, has_bolt_release, has_slide_stop, has_slide_release,
 ; supports_last_round_hold_open, has_dust_cover, handle_notch,
-; vr_reload_supported = true | false
+; ambidextrous_handle, vr_reload_supported = true | false
 ;   (vr_reload_supported = false, or feed = none | cylinder | muzzle, leaves
 ;   the weapon on the game's own reload: its magazine, shells or barrels
 ;   are not handled by hand)
@@ -48,6 +48,11 @@
 ; spent_case_bones   bone names of a spent case, never a live round to load
 ;                    by hand (also named as a shell: cartridge, patron,
 ;                    shell, gilza or bullet)
+; bolt_bones         bone names of a bolt or carrier: cycles on each shot even
+;                    when the shots do not animate it, and is the cycling part
+;                    when no animation moves one
+; charging_handle_bones  bone names of a charging handle (not a bare
+;                    "handle": that also names carry handles)
 ; loose_rounds       ammunition : mesh : half length (m). A clip-fed model
 ;                    with no single live round shows this mesh in the hand
 ;                    for ammunition whose section contains the part (the
@@ -59,13 +64,20 @@
 ; Shader and texture parts match exactly; bone and ammunition parts ignore case.
 
 [vr_derivation]
-spent_case_bones   = gilza
+spent_case_bones   = gilza, casing
+bolt_bones         = zatvor, bolt, carrier
+charging_handle_bones = charg, cocking, rukoyat
 loose_rounds       = 7.62x39:vr\round_762x39.ogf:0.028
 red_dot_shaders    = light_dot, reflex
 red_dot_textures   = red_lens, crosshair_dot
 soft_lens_shaders  = black_soft, scope_reticle
 glass_shaders      = lfo_, scope_color, scope_lens
 glass_textures     = crosshair, _lense
+; Devices a script tunes with the mouse buttons (GAMMA's RF receiver): the
+; trigger tunes up, the upper face button down.
+mouse_tuned_devices = detector_radio
+; A grenade's pin (its ring under it): pulled out by the other hand's trigger.
+grenade_pin_bones  = eka, pin, ring
 
 ; ---------------------------------------------------------------------------
 ; Firearm knowledge the vanilla models do not show (their animations have no
@@ -280,3 +292,11 @@ handle_notch = true
 supports_last_round_hold_open = false
 has_bolt_catch = false
 handle_notch = true
+
+; A charging handle with a knob on each side; either hand racks it from its
+; own side. Needed where the model has the second knob in the receiver mesh
+; (the stock and GAMMA P90 do); a part carrying both is found by itself.
+; That hidden knob does not move: the one the model shows does.
+
+[wpn_p90]
+ambidextrous_handle = true

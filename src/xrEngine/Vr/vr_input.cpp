@@ -291,10 +291,12 @@ void VrInput::Sync(XrSession session, XrTime time, XrSpace space)
 		float f = 0.f;
 		gi.action = m_trigger_action[i];
 		XrActionStateFloat trigger{ XR_TYPE_ACTION_STATE_FLOAT };
+		m_trigger_analog[i] = false;
 		if (XR_SUCCEEDED(xrGetActionStateFloat(session, &gi, &trigger)) && trigger.isActive)
 		{
 			f = trigger.currentState;
 			m_active[i] = true;
+			m_trigger_analog[i] = true;
 		}
 		m_trigger[i] = f;
 
@@ -436,6 +438,7 @@ void VrInput::ClearState()
     {
         m_active[i] = m_have_grip_pose[i] = m_have_aim_pose[i] = false;
         m_trigger[i] = m_grip[i] = 0;
+        m_trigger_analog[i] = false;
         m_secondary_button[i]=false;
         m_select[i] = m_button[i] = false;
         m_thumbstick[i] = {0, 0};

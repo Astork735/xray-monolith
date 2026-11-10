@@ -56,8 +56,33 @@ CFontManager::CFontManager()
 	InitializeFonts();
 }
 
+// VR: the font PDA messages are drawn in (vr_message_text_size): a copy of
+// the large Letterica (the sharpest glyphs) at a height of its own, so no
+// other text changes size. Drawn with the manager's fonts (m_all_fonts,
+// which also deletes it) and initialized again with them on a reset.
+static CGameFont* s_vr_message_font = nullptr;
+static float s_vr_message_height = 0.f;
+static const char* const vr_message_font_section = "ui_font_letter_25";
+CGameFont* VrMessageFont(float height)
+{
+	CFontManager& fonts = UI().Font();
+	if (!s_vr_message_font)
+	{
+		fonts.InitializeFont(s_vr_message_font, vr_message_font_section);
+		fonts.m_all_fonts.push_back(&s_vr_message_font);
+	}
+	s_vr_message_height = height;
+	s_vr_message_font->SetHeight(height);
+	return s_vr_message_font;
+}
+
 void CFontManager::InitializeFonts()
 {
+	if (s_vr_message_font)
+	{
+		InitializeFont(s_vr_message_font, vr_message_font_section);
+		if (s_vr_message_height > 0.f) s_vr_message_font->SetHeight(s_vr_message_height);
+	}
 	InitializeFont(pFontMedium, "hud_font_medium");
 	InitializeFont(pFontDI, "hud_font_di", CGameFont::fsGradient | CGameFont::fsDeviceIndependent);
 	InitializeFont(pFontArial14, "ui_font_arial_14");
@@ -204,12 +229,8 @@ void CHUDManager::Render_Last()
 	if (auto* actor = smart_cast<CActor*>(O))
 	{
 		::Render->set_Object(O->H_Root());
-		for (auto* item:actor->inventory().m_all)
-			if (auto* weapon=item->cast_weapon())
-			{
-				weapon->VrRenderLooseMagazines();
-				weapon->VrRenderHolster();
-			}
+		extern void VrRenderWeaponProps(CActor& actor);
+		VrRenderWeaponProps(*actor);
 		RenderVrFloorMagazines();
 		RenderVrPouch(*actor);
 		RenderVrBodySlots(*actor);
@@ -257,6 +278,17 @@ void CHUDManager::Render_Last()
                     {
                         ::Render->set_Transform(&hand);
                         ::Render->add_Visual(hud->m_model->dcast_RenderVisual());
+                    }
+                    // A grenade: its first-person model as its idle's hand
+                    // holds it, firm in the fist.
+                    else if (missile && missile->HudItemData() && missile->HudItemData()->m_model &&
+                        VrMissilePose(*actor,hand))
+                    {
+                        if (!VrRenderGrenade(*actor))
+                        {
+                            ::Render->set_Transform(&hand);
+                            ::Render->add_Visual(missile->HudItemData()->m_model->dcast_RenderVisual());
+                        }
                     }
                     else if ((!missile || !missile->VrThrown()) && side>=0 && !VrBinocularsAtEyes(*actor) &&
                         VrHeldItemPose(side,hand))

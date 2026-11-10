@@ -1,54 +1,18 @@
 ﻿// The per-frame VR hands update for weapons and held items (UpdateVrWeapons).
 #include "stdafx.h"
-#include "VrWeaponInteraction.h"
-#include "VrWeaponPose.h"
-#include "VrReloadDerivation.h"
-#include "VrSupportAction.h"
-#include "VrWeaponNames.h"
+#include "VrWeaponInteractionInternal.h"
 #include "VrBodySlots.h"
-#include "VrSaveLedger.h"
 #include "Bolt.h"
-#include "WeaponAmmo.h"
-#include "ai_object_location.h"
 #include "Weapon.h"
-#include "WeaponMagazined.h"
-#include "WeaponPistol.h"
-#include "WeaponRevolver.h"
-#include "WeaponKnife.h"
-#include "WeaponBinoculars.h"
 #include "xr_level_controller.h"
 #include "Actor.h"
 #include "inventory.h"
 #include "PhysicsShellHolder.h"
 #include "Level.h"
-#include "game_cl_base.h"
-#include "player_hud.h"
-#include "HUDManager.h"
-#include "UIGameCustom.h"
-#include "ai_space.h"
-#include "script_engine.h"
-#include "script_game_object.h"
-#include "../xrEngine/CameraBase.h"
 #include "../xrEngine/xr_input.h"
+#include "../xrEngine/CameraBase.h"
 #include "../xrEngine/Vr/vr_gameplay.h"
-#include "../xrEngine/Vr/vr_stereo.h"
-#include "../Include/xrRender/Kinematics.h"
-#include "../Include/xrRender/DrawUtils.h"
-#include "../xrEngine/Vr/vr_overlay_draw.h"
-#include "../xrEngine/bone.h"
-#include "../xrEngine/EnnumerateVertices.h"
-#include "WeaponShotgun.h"
-#include "WeaponBM16.h"
-#include "WeaponRG6.h"
-#include "WeaponRPG7.h"
-#include "../Include/xrRender/KinematicsAnimated.h"
-#include "ClimableObject.h"
-#include "../xrphysics/Extendedgeom.h"
 #include "../xrPhysics/PhysicsShell.h"
-#include "CharacterPhysicsSupport.h"
-#include "PHMovementControl.h"
-#include "xrServer_Objects_ALife_Items.h"
-#include "VrWeaponInteractionInternal.h"
 using namespace vrwi;
 
 void VrSnapHeldItems(CActor& actor)
@@ -62,6 +26,8 @@ void VrSnapHeldItems(CActor& actor)
         Fmatrix hand;
         if (!held || held->getDestroy() || held->H_Parent() || !vr::HandTransform(side,false,hand)) continue;
         held->XFORM().mul_43(hand,state.grab_offset[side]);
+        // Held at the near side of a wall, as UpdateVrPickup put its body.
+        if (vr::PhysicalHands()) VrNearSide(held->XFORM().c,0.05f);
         held->spatial_move();
     }
 }
@@ -97,25 +63,37 @@ static void UpdateVrWield(CActor& actor)
     if (pickup.wield_id==u16(-1)) return;
     auto* weapon=smart_cast<CWeapon*>(Level().Objects.net_Find(pickup.wield_id));
     if (!weapon || int(Device.dwTimeGlobal-pickup.wield_expires)>0) { pickup.wield_id=u16(-1); return; }
-    PIItem active=actor.inventory().ActiveItem();
-    const vr::ActiveItem state=!active ? vr::ActiveItem::None : active==weapon ? vr::ActiveItem::ThisWeapon :
-        VrActiveItemLeaving(actor) ? vr::ActiveItem::OtherLeaving : vr::ActiveItem::OtherHeld;
+    const vr::ActiveItem state=VrActiveItemState(actor,weapon);
     const u16 base=weapon->BaseSlot();
     const bool slot_weapon=base==INV_SLOT_2 || base==INV_SLOT_3;
-    switch (vr::WieldDecision(pickup.wield_stow,weapon->H_Parent()==&actor,state))
+    const vr::WieldStep step=vr::WieldDecision(pickup.wield_stow,weapon->H_Parent()==&actor,state);
+    if (vr::ContactDebug()>0 && step!=vr::WieldStep::Wait && step!=vr::WieldStep::HoldHand)
+    {
+        static const char* const steps[]={"wait","into its holster","into its slot and drawn","drawn by the game",
+            "shown in the hand","given up (another weapon is out or on its way)"};
+        Msg("* [VR hands] %s taken by the %s hand: %s",weapon->cNameSect().c_str(),
+            pickup.wield_hand ? "right" : "left",steps[int(step)]);
+    }
+    switch (step)
     {
     case vr::WieldStep::Wait:
         return;
     case vr::WieldStep::Cancel:
+        // Its claim (set while it waited in the hand) lapses: UpdateHandClaim.
         break;
     case vr::WieldStep::HoldHand:
         weapon->VrSetWeaponHand(pickup.wield_hand);
         return;
     case vr::WieldStep::Stow:
-        // Left in its holster; the weapon in the other hand stays where it is.
-        if (weapon->CurrSlot()!=base && slot_weapon && !actor.inventory().ItemFromSlot(base))
-            actor.inventory().Slot(base,weapon,true);
-        weapon->VrSetWeaponHand(pickup.wield_hand);
+        // Left in its holster (the free one: VrFreeWeaponSlot); the weapon in
+        // the other hand stays where it is.
+        if (slot_weapon)
+        {
+            const u16 slot=VrFreeWeaponSlot(actor,*weapon);
+            if (slot!=NO_ACTIVE_SLOT && weapon->CurrSlot()!=slot) actor.inventory().Slot(slot,weapon,true);
+        }
+        // Holstered on that hand's side, not drawn: no claim on the hand.
+        if (CVrWeaponInteraction* vr=weapon->VrInteraction()) vr->SetWeaponHand(pickup.wield_hand,false);
         break;
     case vr::WieldStep::Adopt:
         // The game's own pickup already drew it (a free slot is activated,
@@ -123,10 +101,18 @@ static void UpdateVrWield(CActor& actor)
         weapon->VrSetWeaponHand(pickup.wield_hand);
         break;
     case vr::WieldStep::Activate:
-        if (weapon->CurrSlot()!=base && slot_weapon)
+        if (slot_weapon)
         {
-            if (PIItem occupant=actor.inventory().ItemFromSlot(base)) actor.inventory().Ruck(occupant);
-            actor.inventory().Slot(base,weapon,true);
+            // Into a free weapon slot, leaving a holstered weapon on its
+            // shoulder: pushing it into the backpack took it off the body.
+            // With both holding weapons, the base slot's goes to the backpack.
+            u16 slot=VrFreeWeaponSlot(actor,*weapon);
+            if (slot==NO_ACTIVE_SLOT)
+            {
+                if (PIItem occupant=actor.inventory().ItemFromSlot(base)) actor.inventory().Ruck(occupant);
+                slot=base;
+            }
+            if (weapon->CurrSlot()!=slot) actor.inventory().Slot(slot,weapon,true);
         }
         if (weapon->CurrSlot()==INV_SLOT_2 || weapon->CurrSlot()==INV_SLOT_3)
         {
@@ -139,13 +125,240 @@ static void UpdateVrWield(CActor& actor)
     pickup.wield_id=u16(-1);
 }
 
+u32 VrTextureBytes()
+{
+    // Every texture the renderer holds (lightmaps aside): walks its list, so
+    // only around rare work (a pickup, a model load), never per frame.
+    if (!g_vr_owns_present || !Device.m_pRender) return 0;
+    u32 base=0, count=0, lmaps=0, lmap_count=0;
+    Device.m_pRender->ResourcesGetMemoryUsage(base,count,lmaps,lmap_count);
+    return base;
+}
+// vr_contact_debug: the frames right after a weapon is taken into a hand log
+// every step of 2 ms or more, so what a grab costs is all accounted for.
+u32 g_vr_work_detail_until=0;
+void VrWorkDetail(u32 frames)
+{
+    g_vr_work_detail_until=Device.dwFrame+frames;
+}
+bool VrWorkDetailed()
+{
+    return vr::ContactDebug()>0 && Device.dwFrame<=g_vr_work_detail_until;
+}
+void VrNoteWorkLoaded(const char* what, const char* object, float ms, u32 textures_before)
+{
+    const float least=VrWorkDetailed() ? 2.f : vr::ContactDebug()>0 ? 20.f : 100.f;
+    if (!g_vr_owns_present || ms<least) return;
+    // What it loaded: a first HUD model's textures are what stall a grab.
+    const u32 textures_after=textures_before ? VrTextureBytes() : 0;
+    if (textures_after>textures_before)
+        Msg("* [VR work] %s: %s took %.0f ms, loading %.1f MB of textures (frame %u)",object && *object ? object : "-",
+            what,ms,float(textures_after-textures_before)/(1024.f*1024.f),Device.dwFrame);
+    else
+        Msg("* [VR work] %s: %s took %.0f ms (frame %u)",object && *object ? object : "-",what,ms,Device.dwFrame);
+}
+void VrNoteWork(const char* what, const char* object, float ms)
+{
+    VrNoteWorkLoaded(what,object,ms,0);
+}
+
+namespace
+{
+// A HUD model made ahead of a grab, held until it is no longer wanted.
+struct VrPrewarmed
+{
+    shared_str visual;
+    IRenderVisual* model=nullptr;
+    u32 ticket=0;     // its textures on the renderer's worker (0: none to load)
+    u32 started=0;    // Device.dwTimeContinual when made
+    u32 wanted=0;     // Device.dwTimeGlobal when last wanted
+    bool ready=false;
+};
+xr_vector<VrPrewarmed> g_vr_prewarmed;
+u32 g_vr_prewarm_frame=u32(-1);
+// Two models at most (a GAMMA rifle's textures are 10-90 MB), each kept
+// 10 s after the last frame a hand or the pointer was on it.
+constexpr size_t vr_prewarm_max=2;
+constexpr u32 vr_prewarm_keep_ms=10000;
+// The pointer must rest on a weapon this long before it counts as intent.
+constexpr u32 vr_prewarm_dwell_ms=200;
+// An empty hand this near a weapon is reaching for it.
+constexpr float vr_prewarm_reach=0.4f;
+// One step of preparing (a model made, a measurement) a frame, so each
+// costs one frame at most a few tens of ms while the hand is on its way.
+bool VrPrewarmTakeStep()
+{
+    if (g_vr_prewarm_frame==Device.dwFrame) return false;
+    g_vr_prewarm_frame=Device.dwFrame;
+    return true;
+}
+VrPrewarmed* VrPrewarmFind(LPCSTR visual)
+{
+    for (VrPrewarmed& entry:g_vr_prewarmed)
+        if (!xr_strcmp(entry.visual.c_str(),visual)) return &entry;
+    return nullptr;
+}
+void VrPrewarmDrop(size_t index)
+{
+    // Textures still loading stay referenced by the renderer's batch.
+    if (g_vr_prewarmed[index].model) ::Render->model_Delete(g_vr_prewarmed[index].model);
+    g_vr_prewarmed.erase(g_vr_prewarmed.begin()+index);
+}
+// Notes the models whose textures came in, and lets go of unwanted ones.
+void VrPrewarmUpdate()
+{
+    for (size_t n=0;n<g_vr_prewarmed.size();)
+    {
+        VrPrewarmed& entry=g_vr_prewarmed[n];
+        if (!entry.ready && Device.m_pRender->ResourcesBackgroundDone(entry.ticket))
+        {
+            entry.ready=true;
+            if (vr::ContactDebug()>0)
+                Msg("* [VR prewarm] %s: textures in after %u ms",entry.visual.c_str(),
+                    Device.dwTimeContinual-entry.started);
+        }
+        if (Device.dwTimeGlobal-entry.wanted>vr_prewarm_keep_ms) VrPrewarmDrop(n);
+        else ++n;
+    }
+}
+}
+bool VrPrewarmVisual(const shared_str& visual, LPCSTR object)
+{
+    if (!g_vr_owns_present || !visual.size() || !Device.m_pRender) return true;
+    if (VrPrewarmed* entry=VrPrewarmFind(visual.c_str()))
+    {
+        entry->wanted=Device.dwTimeGlobal;
+        if (!entry->ready && Device.m_pRender->ResourcesBackgroundDone(entry->ticket)) entry->ready=true;
+        return entry->ready;
+    }
+    if (!VrPrewarmTakeStep()) return false;
+    if (g_vr_prewarmed.size()>=vr_prewarm_max)
+    {
+        size_t oldest=0;
+        for (size_t n=1;n<g_vr_prewarmed.size();++n)
+            if (g_vr_prewarmed[n].wanted<g_vr_prewarmed[oldest].wanted) oldest=n;
+        VrPrewarmDrop(oldest);
+    }
+    // As the VR copy makes it (EnsureVisual), which has always made it first,
+    // before the game's own HUD model: no hud_loading, so its shaders are the
+    // ones the copy had.
+    // A section the game never spawns may name a missing file (fatal to
+    // load): remembered as having nothing to prepare.
+    CTimer timer; timer.Start();
+    IRenderVisual* model=nullptr;
+    u32 ticket=0;
+    if (VrHudModelLoadable(visual.c_str()))
+    {
+        Device.m_pRender->ResourcesBackgroundBegin();
+        model=::Render->model_Create(visual.c_str());
+        ticket=Device.m_pRender->ResourcesBackgroundEnd();
+    }
+    VrNoteWork("prepared ahead: HUD model (textures load in the background)",object,timer.GetElapsed_sec()*1000.f);
+    VrPrewarmed entry;
+    entry.visual=visual;
+    entry.model=model;
+    entry.ticket=ticket;
+    entry.started=Device.dwTimeContinual;
+    entry.wanted=Device.dwTimeGlobal;
+    entry.ready=!ticket;
+    if (vr::ContactDebug()>0)
+        Msg("* [VR prewarm] %s: %s prepared in %.0f ms, %s",object && *object ? object : "-",visual.c_str(),
+            timer.GetElapsed_sec()*1000.f,ticket ? "textures loading in the background" : "textures already in");
+    g_vr_prewarmed.push_back(entry);
+    return entry.ready;
+}
+void VrPrewarmWait(LPCSTR visual, LPCSTR object)
+{
+    VrPrewarmed* entry=visual ? VrPrewarmFind(visual) : nullptr;
+    if (!entry || entry->ready || !Device.m_pRender) return;
+    CTimer timer; timer.Start();
+    Device.m_pRender->ResourcesBackgroundWait(entry->ticket);
+    entry->ready=true;
+    VrNoteWork("waited for its textures, still loading in the background",object,timer.GetElapsed_sec()*1000.f);
+}
+void VrPrewarmNear(CActor& actor, bool controls, const bool tracked[2], const Fmatrix hands[2])
+{
+    VrPrewarmUpdate();
+    // The search every 4th frame (about 20 a second): the pointer must rest
+    // 200 ms anyway, and a hand reaching 40 cm takes longer.
+    if (!controls || Device.dwFrame%4) return;
+    // Only on intent: the weapon the pointer has rested on, and the one an
+    // empty hand is closing in on; nothing merely nearby. Nearest first.
+    struct Candidate { CWeapon* weapon; float distance; };
+    constexpr int most=int(vr_prewarm_max)+1;
+    Candidate found[most];
+    int count=0;
+    const auto consider=[&](CObject* object, float distance)
+    {
+        auto* weapon=smart_cast<CWeapon*>(object);
+        if (!weapon || weapon->H_Parent() || weapon->getDestroy() || !weapon->HudSection().size()) return;
+        for (int n=0;n<count;++n)
+            if (found[n].weapon==weapon) { found[n].distance=std::min(found[n].distance,distance); return; }
+        if (count<most) found[count++]={weapon,distance};
+        else
+        {
+            int far_one=0;
+            for (int n=1;n<count;++n) if (found[n].distance>found[far_one].distance) far_one=n;
+            if (distance<found[far_one].distance) found[far_one]={weapon,distance};
+        }
+    };
+    const auto& pickup=actor.m_vr_pickup;
+    // The pointer's target, once it has rested on it.
+    static u16 dwell_id=u16(-1);
+    static u32 dwell_since=0;
+    if (pickup.pick_id!=dwell_id) { dwell_id=pickup.pick_id; dwell_since=Device.dwTimeGlobal; }
+    if (dwell_id!=u16(-1) && Device.dwTimeGlobal-dwell_since>=vr_prewarm_dwell_ms)
+        consider(Level().Objects.net_Find(dwell_id),0.f);
+    // The weapon nearest each empty tracked hand, within reach of it.
+    static xr_vector<ISpatial*> nearby;
+    for (int h=0;h<2;++h)
+    {
+        if (!tracked[h] || pickup.grabbed_id[h]!=u16(-1)) continue;
+        nearby.clear();
+        g_SpatialSpace->q_sphere(nearby,0,STYPE_COLLIDEABLE,hands[h].c,vr_prewarm_reach);
+        CObject* nearest=nullptr;
+        float best=flt_max;
+        for (ISpatial* spatial:nearby)
+            if (CObject* object=spatial->dcast_CObject(); object && smart_cast<CWeapon*>(object))
+            {
+                const float distance=object->Position().distance_to(hands[h].c);
+                if (distance<best) { best=distance; nearest=object; }
+            }
+        if (nearest) consider(nearest,best);
+    }
+    std::sort(found,found+count,[](const Candidate& a, const Candidate& b) { return a.distance<b.distance; });
+    for (int n=0;n<count;++n)
+    {
+        CWeapon& weapon=*found[n].weapon;
+        const shared_str& hud=weapon.HudSection();
+        if (!pSettings->section_exist(hud) || !pSettings->line_exist(hud,"item_visual")) continue;
+        VrPrewarmVisual(pSettings->r_string(hud,"item_visual"),weapon.cNameSect().c_str());
+    }
+}
+void VrPrewarmRelease()
+{
+    while (!g_vr_prewarmed.empty()) VrPrewarmDrop(g_vr_prewarmed.size()-1);
+}
 void UpdateVrWeapons(CActor& actor)
 {
     if (&actor != Level().CurrentControlEntity() || !IsGameTypeSingle()) return;
+    {
+        // A long frame (real time, not the clamped frame delta), for the
+        // [VR work] lines logged before it.
+        static u32 last_frame=0, last_time=0;
+        const u32 now=Device.dwTimeContinual;
+        if (vr::ContactDebug()>0 && last_time && Device.dwFrame==last_frame+1 &&
+            now-last_time>=(VrWorkDetailed() ? 20u : 100u))
+            Msg("* [VR frame] frame %u took %u ms",last_frame,now-last_time);
+        last_frame=Device.dwFrame; last_time=now;
+    }
     // Inventory weapons can stop receiving UpdateCL while holstered. Their
     // temporary physics props still need their lifetime serviced every frame.
     for (auto* item : actor.inventory().m_all)
         if (auto* weapon=item->cast_weapon()) weapon->VrUpdateProps();
+    // Every weapon's interaction, the backpack's included (they get no
+    // VrInteract): a hand's claim lapses once it is no longer on its way.
+    VrUpdateHandClaims(actor);
     auto& pickup=actor.m_vr_pickup;
     if (!g_vr_owns_present)
     {
@@ -166,6 +379,7 @@ void UpdateVrWeapons(CActor& actor)
         UpdateVrFloorMagazines(actor,false,none,idle,none,none,nullptr);
         for (auto* item : actor.inventory().m_all)
             if (auto* weapon=item->cast_weapon()) weapon->VrInteract(actor);
+        VrPrewarmRelease();
         return;
     }
     VrPdaUpdate(actor);
@@ -255,8 +469,11 @@ void UpdateVrWeapons(CActor& actor)
     for (int h=1; h>=0; --h)
     {
         // Activation is deferred: one draw per frame, or both hands could
-        // claim a holster in the same frame and one would come up empty.
-        const bool active=drawn || smart_cast<CWeapon*>(actor.inventory().ActiveItem())!=nullptr;
+        // claim a holster in the same frame and one would come up empty. A
+        // weapon still on its way (a queued draw, a pending wield) counts as
+        // out: the other hand's draw replaced it, and it kept its claim.
+        const bool coming=VrWeaponComing(actor);
+        const bool active=drawn || coming || smart_cast<CWeapon*>(actor.inventory().ActiveItem())!=nullptr;
         CWeapon* closest=nullptr;
         // A squeeze that starts within a holster's reach draws; a hand
         // arriving there already squeezed does not.
@@ -286,12 +503,18 @@ void UpdateVrWeapons(CActor& actor)
             if (VrBodySlotTake(actor,body,h)) drawn=true;
             continue;
         }
+        if (fresh_squeeze && coming && !drawn && vr::ContactDebug()>0)
+            Msg("* [VR hands] hand %d: no draw, a weapon is already on its way to a hand",h);
         if (vr::HolsterGrab(pickup.weapon_grip_armed[h],tracked[h],grip[h],active,closest!=nullptr))
         {
             closest->VrSetWeaponHand(h);
             actor.inventory().Activate(closest->CurrSlot(),true);
+            VrWorkDetail(12);
             drawn=true;
             vr::HandHaptic(h,0.2f);
+            if (vr::ContactDebug()>0)
+                Msg("* [VR hands] %s hand draws %s from slot %u",h ? "right" : "left",
+                    closest->cNameSect().c_str(),unsigned(closest->CurrSlot()));
         }
     }
     // Quick-use items taken from the chest pockets; grenades and bolts.
@@ -330,7 +553,8 @@ void UpdateVrWeapons(CActor& actor)
     if (!support_button) pickup.pouch_swap_down=false;
     // Weapons reloaded by hand (magazines, shells) have no button reload.
     // A hand at the helmet uses its button for night vision instead.
-    const auto button_free=[&](int h){ return h>=0 && h!=pickup.device_hand && !(tracked[h] && VrHandAtHead(hands[h].c)); };
+    const int device_hand=VrDetectorHand(actor);
+    const auto button_free=[&](int h){ return h>=0 && h!=device_hand && !(tracked[h] && VrHandAtHead(hands[h].c)); };
     const bool reload_button=controls_valid && !(held_weapon && held_weapon->VrPhysicalReload()) &&
         ((vr::HandSecondaryButton(support_hand) && button_free(support_hand) && !pickup.pouch_swap_down) ||
         (held_weapon && vr::HandSecondaryButton(weapon_hand) && button_free(weapon_hand) &&
@@ -374,7 +598,9 @@ void UpdateVrWeapons(CActor& actor)
         weapon->VrReleaseInactiveHeld();
         // Both slot weapons need the grip check even when the other is active.
         // Each interaction owns its state; only the equipped one can fire.
+        CTimer interact_timer; interact_timer.Start();
         weapon->VrInteract(actor);
+        VrNoteWork("interaction update",weapon->cNameSect().c_str(),interact_timer.GetElapsed_sec()*1000.f);
     }
     // A weapon drawn without a grip (inventory, keyboard, a loaded save, a
     // pickup) stays in its hand; letting go of a held grip releases it (see
@@ -403,7 +629,7 @@ void UpdateVrWeapons(CActor& actor)
         const char* refused=
             !available[h] ? (actor.IsTalking() ? "talking" : h==held_hand ? "it holds the weapon" : "it supports the weapon") :
             VrPocketHeld(actor,h) ? "it holds a pocket item" : h==VrMissileHand(actor) ? "it holds a grenade" :
-            h==pickup.device_hand ? "it holds the detector or flashlight" : h==pickup.slot_hold_hand ? "it holds a slot item" :
+            h==device_hand ? "it holds the detector or flashlight" : h==pickup.slot_hold_hand ? "it holds a slot item" :
             h==pickup.bolt_hand ? "it holds a bolt" :
             pickup.grabbed_id[h]==u16(-1) && VrHandAtEquipment(actor,hands[h].c,h) ?
                 "it is at the equipment (body slot, holster or pouch)" : nullptr;
@@ -473,7 +699,13 @@ void UpdateVrWeapons(CActor& actor)
     { VrUseKey(actor,false); pickup.use_pressed=false; }
     const bool pending_use=use_trigger && !pickup.use_trigger_down[pointer];
     for (int h=0; h<2; ++h) pickup.use_trigger_down[h]=trigger[h];
+    const u16 wield_before=pickup.wield_id;
     for (int h=0; h<2; ++h) UpdateVrPickup(actor,h,available[h],grip[h],grab[h] && trigger[h],grab[h],at_weapon[h]);
+    // A trigger that just took a weapon into its hand (a wield sets no
+    // grabbed item) is not also the use key: it pressed F on what lay behind.
+    const bool took_weapon=pointer>=0 && pickup.wield_id!=u16(-1) && pickup.wield_id!=wield_before &&
+        pickup.wield_hand==pointer;
+    if (pickup.wield_id!=u16(-1) && pickup.wield_id!=wield_before) VrWorkDetail(12);
     // A pulled trigger grabs a pointed physical item first. When nothing can
     // be grabbed it retains the ordinary F/use action (doors, people, bodies,
     // stashes). A loose item is never sent there: F put it straight in the
@@ -482,7 +714,7 @@ void UpdateVrWeapons(CActor& actor)
     auto* loose=smart_cast<CPhysicsShellHolder*>(use_target);
     const bool loose_item=loose && loose->cast_inventory_item() && !loose->H_Parent() &&
         loose->PPhysicsShell() && loose->PPhysicsShell()->isActive();
-    if (pending_use && pickup.grabbed_id[pointer]==u16(-1) && !loose_item)
+    if (pending_use && pickup.grabbed_id[pointer]==u16(-1) && !loose_item && !took_weapon)
     {
         if (vr::ContactDebug()>0)
         {
@@ -492,4 +724,6 @@ void UpdateVrWeapons(CActor& actor)
         }
         VrUseKey(actor,true); pickup.use_pressed=true;
     }
+    // HUD models of weapons a hand is reaching for, loaded ahead.
+    VrPrewarmNear(actor,controls_valid,tracked,hands);
 }

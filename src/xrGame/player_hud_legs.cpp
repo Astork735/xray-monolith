@@ -13,6 +13,7 @@
 #include "../xrEngine/FDemoRecord.h"
 #include "../xrEngine/CameraBase.h"
 #include "../xrEngine/Vr/vr_gameplay.h"
+#include "../xrEngine/Vr/vr_body_tracking_policy.h"
 #include "ai_space.h"
 #include "script_engine.h"
 
@@ -570,8 +571,44 @@ void player_legs_controller::anchor_vr_arms()
     m_vr_arms_transform.c=head.c;
     m_vr_arms_transform.c.mad(head.k,-0.09f).mad(head.j,-0.10f);
     m_vr_arms_transform.c.y-=0.09f;
+    // Meta body tracking: the shoulder line where the real one is, facing
+    // as the real torso does (vr::TorsoForward follows the shoulders).
+    const float weight=vr::BodyTrackingWeight();
+    Fvector left,right;
+    if (weight>0.f && vr::BodyJointPosition(vr::BodyJointShoulder,0,left) &&
+        vr::BodyJointPosition(vr::BodyJointShoulder,1,right))
+    {
+        Fvector middle; middle.add(left,right).mul(0.5f);
+        m_vr_arms_transform.c.lerp(Fvector(m_vr_arms_transform.c),middle,weight);
+        Fvector forward;
+        if (vr::TorsoForward(forward))
+        {
+            Fvector k=m_vr_arms_transform.k; k.y=0.f;
+            if (k.square_magnitude()>EPS_S)
+            {
+                k.normalize();
+                k.lerp(Fvector(k),forward,weight);
+                k.y=0.f;
+                if (k.square_magnitude()>EPS_S)
+                {
+                    m_vr_arms_transform.k=k.normalize();
+                    m_vr_arms_transform.j.set(0.f,1.f,0.f);
+                    m_vr_arms_transform.i.crossproduct(m_vr_arms_transform.j,m_vr_arms_transform.k);
+                }
+            }
+        }
+    }
 }
 
+namespace
+{
+// vr_contact_debug: what posed each tracked hand last ([VR hands] logs a
+// change) and whether both were solved within a few cm of each other. The
+// local player's arms only; kept here, not in the class (Actor.h).
+const char* g_vr_arm_source[2]{};
+const CObject* g_vr_arm_holder[2]{};
+bool g_vr_hands_together=false;
+}
 void player_legs_controller::pose_vr_arms(CActor* actor)
 {
     if (!actor || !m_model || !vr::GameplayActive()) return;
@@ -580,6 +617,8 @@ void player_legs_controller::pose_vr_arms(CActor* actor)
     // weapon's NPC-style attachment follow it.
     auto* held_weapon=smart_cast<CWeapon*>(actor->inventory().ActiveItem());
     const int first=held_weapon && held_weapon->VrWeaponHand()==0 ? 0 : 1;
+    Fvector solved_wrist[2]{};
+    bool solved[2]{};
     for (int pass=0;pass<2;++pass)
     {
         const int side=pass ? 1-first : first;
@@ -626,9 +665,11 @@ void player_legs_controller::pose_vr_arms(CActor* actor)
         // On the same first-person hands skeleton, the animation's own hand:
         // the hand bone where the animation has it, the fingers as posed.
         VrHandBones exact_bones;
-        // The knife has no VR profile: its hand comes from its idle too.
-        const bool exact=active && (side==weapon_side || support_side) &&
-            (active->VrAuthoredBones(side,exact_bones) || VrKnifeBones(*actor,side,exact_bones)) &&
+        // An item without a VR profile (knife, grenade, detector,
+        // flashlight): its hand comes from its idle too, first, as a hand
+        // holding a device does not support the weapon.
+        const bool exact=(VrItemBones(*actor,side,exact_bones) ||
+            (active && (side==weapon_side || support_side) && active->VrAuthoredBones(side,exact_bones))) &&
             exact_bones.visual==m_visual_name &&
             exact_bones.locals && exact_bones.locals->size()==m_model->LL_BoneCount();
         VrHandPose authored;
@@ -649,6 +690,21 @@ void player_legs_controller::pose_vr_arms(CActor* actor)
             // Arms space to the object's model space.
             to_object.invert(contact_world);
             to_object.mulB_43(m_vr_arms_transform);
+        }
+        if (vr::ContactDebug()>0)
+        {
+            // What places this hand, logged when it changes: a hand drawn
+            // where it should not be names its source.
+            const char* source=guided ? "guided onto a part of the weapon" : exact ? "the animation's bones" :
+                animated ? "the animation's hand" : framed ? "the weapon's grip frame" :
+                holding ? "holding the weapon (arm IK)" : "free, at its controller";
+            const CObject* held=holder ? static_cast<const CObject*>(holder) : (active ? static_cast<const CObject*>(active) : nullptr);
+            if (source!=g_vr_arm_source[side] || held!=g_vr_arm_holder[side])
+            {
+                g_vr_arm_source[side]=source; g_vr_arm_holder[side]=held;
+                Msg("* [VR hands] arms: %s hand %s%s%s (weapon hand %d)",side ? "right" : "left",source,
+                    held ? ", " : "",held ? held->cNameSect().c_str() : "",weapon_side);
+            }
         }
         if (animated)
             for (int axis=0;axis<3;++axis) inverse.transform_dir(frame[axis],authored.basis[axis]);
@@ -685,7 +741,7 @@ void player_legs_controller::pose_vr_arms(CActor* actor)
         // weapon grip the palm rests on its surface.
         const float grip_radius=framed ? weapon->VrHandGripRadius() : 0.015f;
         Fvector wrist_goal=grip.c;
-        wrist_goal.mad(palm,-(grip_radius+0.015f)).mad(frame[0],-0.065f);
+        wrist_goal.mad(palm,-(grip_radius+0.015f)).mad(frame[0],-vr_wrist_behind_grip);
         // With a known trigger, place the hand by its index knuckle instead:
         // just behind and above the trigger blade on the hand's own side, as
         // in a firing grip. The index then reaches the trigger and the other
@@ -703,6 +759,50 @@ void player_legs_controller::pose_vr_arms(CActor* actor)
             hand_rotation.transform_dir(knuckle_offset,m_vr_bind_local[m_vr_index[side]].c);
             wrist_goal.sub(knuckle,knuckle_offset);
         }
+        // The palm pressed onto the surface (8 mm off), along its own
+        // normal: outside the surface only, by the smallest move that
+        // reaches it. push_out: also out of the surface, for the support
+        // hand moved along the bore to where the real hand closed
+        // (VrHandPose::slid), which met a fore-end of another shape there
+        // and floated off it or sank into it. A hand where the animator put
+        // it only closes a gap: pushed out of a vertical grip (its palm
+        // facing sideways) it sat a few cm beside it, and the old press of
+        // a mirrored weapon hand sank it into the grip.
+        const auto press_palm=[&](bool push_out)
+        {
+            Fvector normal=m_vr_hand_basis[side][2];
+            if (!side) normal.invert();
+            Fvector palm_dir; hand_rotation.transform_dir(palm_dir,normal);
+            palm_dir.normalize_safe();
+            Fvector palm_local=m_vr_knuckle_local[side];
+            palm_local.mad(m_vr_hand_basis[side][0],-0.045f).mad(normal,0.012f);
+            Fvector centre; hand_rotation.transform_dir(centre,palm_local);
+            centre.add(wrist_goal);
+            // Steps of 2 mm along the palm's normal, on one line in the
+            // object's space too: each distance is looked up once, and the
+            // point 6 mm back is three steps before.
+            Fvector line_origin, line_dir;
+            to_object.transform_tiny(line_origin,centre);
+            to_object.transform_dir(line_dir,palm_dir);
+            constexpr int out_steps=15, in_steps=20, back_steps=3;
+            const int start=push_out ? -out_steps : 0;
+            float distances[out_steps+back_steps+in_steps+1];
+            for (int step=start-back_steps;step<=in_steps;++step)
+                distances[step-start+back_steps]=contact.Distance(V(Fvector().mad(line_origin,line_dir,0.002f*float(step))));
+            float best=flt_max, shift=0.f;
+            for (int step=start;step<=in_steps;++step)
+            {
+                const float s=0.002f*float(step);
+                // The distance grows as the palm backs away from the weapon;
+                // inside it shrinks.
+                const float d=distances[step-start+back_steps];
+                if (distances[step-start]+0.0005f<d) continue;
+                const float error=_abs(d-0.008f)+0.05f*_abs(s);
+                if (error<best) { best=error; shift=s; }
+            }
+            wrist_goal.mad(palm_dir,shift);
+        };
+        const bool press_on_weapon=has_contact && grip_kind!=vr::GripKind::Magazine;
         if (animated)
         {
             // The animation's knuckles: hand sizes differ, so the knuckles,
@@ -711,27 +811,15 @@ void player_legs_controller::pose_vr_arms(CActor* actor)
             Fvector knuckle_offset;
             hand_rotation.transform_dir(knuckle_offset,m_vr_knuckle_local[side]);
             wrist_goal.sub(knuckles,knuckle_offset);
-            // Press the palm onto the weapon: the animation's hand is not
-            // this one, so its knuckles alone can leave a gap at the palm.
-            if (has_contact && grip_kind!=vr::GripKind::Magazine)
-            {
-                Fvector normal=m_vr_hand_basis[side][2];
-                if (!side) normal.invert();
-                Fvector palm_local=m_vr_knuckle_local[side];
-                palm_local.mad(m_vr_hand_basis[side][0],-0.045f).mad(normal,0.012f);
-                Fvector centre; hand_rotation.transform_dir(centre,palm_local);
-                centre.add(wrist_goal);
-                float best=flt_max, shift=0.f;
-                for (int step=-5;step<=15;++step)
-                {
-                    const float s=0.002f*float(step);
-                    Fvector p=centre; p.mad(palm,s);
-                    to_object.transform_tiny(p);
-                    const float error=_abs(contact.Distance(V(p))-0.008f);
-                    if (error<best) { best=error; shift=s; }
-                }
-                wrist_goal.mad(palm,shift);
-            }
+            // Sampled on another hands model (an outfit's arms), the
+            // animation's hand is not this one and its knuckles alone can
+            // leave a gap at the palm: closed onto the weapon. This hand
+            // mirrored (a left-handed hold) is the animator's own: pressed
+            // only once moved along the bore. Pressed regardless, a mirrored
+            // hand on a grip moved a few cm toward its palm, off centre.
+            const bool other_hand=authored.visual!=m_visual_name;
+            if (press_on_weapon && m_vr_hand_basis_valid[side] && (other_hand || (support_side && authored.slid)))
+                press_palm(support_side && authored.slid);
         }
         if (exact)
         {
@@ -739,6 +827,10 @@ void player_legs_controller::pose_vr_arms(CActor* actor)
             hand_rotation=target;
             hand_rotation.c.set(0,0,0);
             wrist_goal=target.c;
+            // The animator's own hand bones: pressed only once moved along
+            // the bore; where the animator put them they already hold it.
+            if (support_side && exact_bones.slid && press_on_weapon && m_vr_hand_basis_valid[side])
+                press_palm(true);
         }
         // The palm rests on what it holds, never inside it: pushed out along
         // the surface before the arm is solved, so the arm reaches for where
@@ -759,26 +851,75 @@ void player_legs_controller::pose_vr_arms(CActor* actor)
             wrist_goal.add(offset);
         }
         Fvector shoulder=shoulder_pose.c;
-        const float a=shoulder.distance_to(elbow_pose.c);
-        const float b=elbow_pose.c.distance_to(hand_pose.c);
+        float a=shoulder.distance_to(elbow_pose.c);
+        float b=elbow_pose.c.distance_to(hand_pose.c);
         if (a<0.04f || b<0.04f || a>0.7f || b>0.7f) continue;
+        // Meta body tracking (in the arms' space): the real shoulder's shrug
+        // and reach forward, up to 8 cm (the spread stays the model's), and
+        // below, the way the real elbow bends.
+        const float body_weight=vr::BodyTrackingWeight();
+        Fvector body_shoulder,body_other,body_elbow;
+        const bool body_tracked=body_weight>0.f &&
+            vr::BodyJointPosition(vr::BodyJointShoulder,side,body_shoulder) &&
+            vr::BodyJointPosition(vr::BodyJointShoulder,1-side,body_other);
+        const bool elbow_tracked=body_tracked && vr::BodyJointPosition(vr::BodyJointElbow,side,body_elbow);
+        if (body_tracked)
+        {
+            inverse.transform_tiny(body_shoulder); inverse.transform_tiny(body_other);
+            if (elbow_tracked) inverse.transform_tiny(body_elbow);
+            Fvector tracked_middle; tracked_middle.add(body_shoulder,body_other).mul(0.5f);
+            Fvector rest_middle; rest_middle.add(m_vr_rest[0][0].c,m_vr_rest[1][0].c).mul(0.5f);
+            Fvector offset; offset.sub(body_shoulder,tracked_middle);
+            offset.sub(Fvector().sub(shoulder_pose.c,rest_middle));
+            offset.x=0.f;
+            const float length=offset.magnitude();
+            if (length>0.08f) offset.mul(0.08f/length);
+            shoulder.mad(offset,body_weight);
+        }
+        // The player's own arm (vr_arm_length, or measured by body
+        // tracking): the model's is lengthened or shortened to it, by no
+        // more than 15% shorter or 20% longer.
+        const float player_arm=vr::ArmLength();
+        const float size=player_arm>0.f ? clampr(player_arm/(a+b),0.85f,1.20f) : 1.f;
+        a*=size; b*=size;
         Fvector direction; direction.sub(wrist_goal,shoulder);
         float distance=direction.magnitude();
         if (distance<0.01f) continue;
         direction.div(distance);
         // A hand beyond the arm's reach (a fore-end held at full extension,
         // a player's arm longer than the outfit's, a shoulder estimated from
-        // the headset) draws the shoulder forward by all of it: the hand stays
-        // where it holds. Capped at 8 cm, the hand was left short, pulled back
-        // off the fore-end along the arm, floating.
-        const float excess=distance-(a+b-0.002f);
+        // the headset) stays where it holds. The shoulder comes forward up to
+        // 8 cm, as a real one does; past that the arm stretches (up to a
+        // third), so it stays joined to the shoulder. Moving the shoulder by
+        // all of it opened a gap there (the arm looked cut off); leaving the
+        // hand short pulled it off the fore-end, floating.
+        float stretch=1.f;
+        float excess=distance-(a+b-0.002f);
         if (excess>0.f)
         {
-            shoulder.mad(direction,excess);
-            distance=std::max(0.01f,distance-excess);
+            const float shift=std::min(excess,0.08f);
+            shoulder.mad(direction,shift);
+            distance-=shift;
+            stretch=std::min(distance/(a+b-0.002f),1.33f);
+            a*=stretch; b*=stretch;
+            // Beyond even that, the shoulder takes the rest: the hand never
+            // leaves what it holds.
+            excess=distance-(a+b-0.002f);
+            if (excess>0.f) { shoulder.mad(direction,excess); distance-=excess; }
+            distance=std::max(0.01f,distance);
         }
         const float reach=clampr(distance,std::abs(a-b)+0.002f,a+b-0.002f);
         Fvector pole; pole.set(side ? 1.f : -1.f,-0.2f,-0.45f);
+        // Bent out of the line from the real shoulder to the hand as drawn
+        // (the controller, or where the weapon holds it).
+        vr::BodyVec tracked_pole;
+        if (elbow_tracked && vr::ElbowPole(vr::BodyVec(body_shoulder.x,body_shoulder.y,body_shoulder.z),
+            vr::BodyVec(wrist_goal.x,wrist_goal.y,wrist_goal.z),vr::BodyVec(body_elbow.x,body_elbow.y,body_elbow.z),
+            tracked_pole))
+        {
+            pole.normalize();
+            pole.lerp(Fvector(pole),Fvector().set(tracked_pole.x,tracked_pole.y,tracked_pole.z),body_weight);
+        }
         pole.mad(direction,-pole.dotproduct(direction));
         if (pole.square_magnitude()<EPS_S) pole.set(0,1,0);
         pole.normalize_safe();
@@ -794,6 +935,7 @@ void player_legs_controller::pose_vr_arms(CActor* actor)
         Fmatrix& hand=poses[wrist];
         hand=hand_rotation;
         hand.c=wrist_target;
+        solved_wrist[side]=wrist_target; solved[side]=true;
         // Roll the forearm most of the way toward the hand so the wrist skin
         // does not wrap when the controller is turned.
         {
@@ -814,6 +956,19 @@ void player_legs_controller::pose_vr_arms(CActor* actor)
                 const float angle=atan2f(axis.dotproduct(Fvector().crossproduct(a,b)),a.dotproduct(b));
                 RotateAbout(poses[lower],axis,0.6f*angle);
             }
+        }
+        // The stretched (or resized) arm's bones, longer or shorter along
+        // their own length only.
+        const float lengthening=size*stretch;
+        if (_abs(lengthening-1.f)>0.0001f)
+        {
+            const auto lengthen=[&](Fmatrix& bone, Fvector along)
+            {
+                along.normalize_safe();
+                for (Fvector* axis:{&bone.i,&bone.j,&bone.k}) axis->mad(along,(lengthening-1.f)*axis->dotproduct(along));
+            };
+            lengthen(poses[upper],Fvector().sub(elbow,shoulder));
+            lengthen(poses[lower],Fvector().sub(wrist_target,elbow));
         }
         // Fingers start from the open bind pose and curl toward the palm with
         // the analog trigger (index) and grip (other fingers, thumb), or
@@ -1024,6 +1179,20 @@ void player_legs_controller::pose_vr_arms(CActor* actor)
             m_model->LL_GetBoneInstance(id).set_callback(bctCustom,VrArmBonePose,&poses[id],true);
         for (u16 id:m_vr_arm_order[side])
             m_model->LL_GetBoneInstance(id).set_callback(bctCustom,VrArmBonePose,&poses[id],true);
+    }
+    // Both hands drawn at one place (a duplicate hand at one controller):
+    // logged with what placed each.
+    if (vr::ContactDebug()>0)
+    {
+        const bool together=solved[0] && solved[1] && solved_wrist[0].distance_to(solved_wrist[1])<0.06f;
+        if (together!=g_vr_hands_together)
+        {
+            g_vr_hands_together=together;
+            if (together)
+                Msg("! [VR hands] arms: both hands drawn within %.0f mm of each other (left: %s, right: %s)",
+                    solved_wrist[0].distance_to(solved_wrist[1])*1000.f,
+                    g_vr_arm_source[0] ? g_vr_arm_source[0] : "?",g_vr_arm_source[1] ? g_vr_arm_source[1] : "?");
+        }
     }
     apply_vr_arm_bones();
 }
@@ -1330,7 +1499,10 @@ void player_legs_controller::solve_vr_body(CActor* actor)
         Fmatrix hand;
         if (vr::HandTransform(side,false,hand)) hands[tracked++]=vr::V3(hand.c.x,hand.c.y,hand.c.z);
     }
-    yaw=vr::TorsoFacing(yaw,vr::V3(neck_target.x,neck_target.y,neck_target.z),hands,tracked);
+    // A tracked body already faces as the real torso (VrTorsoFrame): the
+    // hands do not turn it as well.
+    const float facing=vr::TorsoFacing(yaw,vr::V3(neck_target.x,neck_target.y,neck_target.z),hands,tracked);
+    yaw=vr::BlendYaw(facing,yaw,vr::BodyTrackingWeight());
     const float ease=clampr(Device.fTimeDelta*8.f,0.f,1.f);
     m_vr_body_yaw=m_vr_body_yaw_valid ? vr::BlendYaw(m_vr_body_yaw,yaw,ease) : yaw;
     m_vr_body_yaw_valid=true;
@@ -1367,6 +1539,30 @@ void player_legs_controller::solve_vr_body(CActor* actor)
         if (vr_body_descends(id,spine_root)) local=m_vr_body_bind_local[id];
         else local.mul_43(Fmatrix().invert(anim->LL_GetTransform(parent)),anim->LL_GetTransform(id));
         poses[id].mul_43(poses[parent],local);
+    }
+    // The body at the player's height: scaled so its standing neck is at
+    // the standing neck (the eyes' standing height, less the neck's 20 cm).
+    // A model taller than that crouched all the time to bring its neck down.
+    // The standing eye height is the actor's standing camera height, which
+    // the headset's eye height is calibrated to; measured from the head it
+    // only crept up with every spike (stairs: 1.70 to 1.96 m).
+    {
+        const float standing=actor->m_vr_stand_height>0.5f ? actor->m_vr_stand_height : head.c.y-frame.c.y;
+        const float model_neck=m_vr_neck<m_vr_body_bind.size() ? m_vr_body_bind[m_vr_neck].c.y : 0.f;
+        float scale=1.f;
+        if (model_neck>0.5f) scale=clampr((standing-lean.pivot_down-lean.neck_down)/model_neck,0.75f,1.25f);
+        if (_abs(scale-m_vr_body_scale_logged)>0.02f)
+        {
+            m_vr_body_scale_logged=scale;
+            Msg("* [VR body] standing eyes %.2f m above the feet; body scaled %.2f (its neck %.2f m)",
+                standing,scale,model_neck);
+        }
+        if (scale!=1.f)
+            for (u16 id=0;id<count && id<poses.size();++id)
+            {
+                Fmatrix& pose=poses[id];
+                pose.i.mul(scale); pose.j.mul(scale); pose.k.mul(scale); pose.c.mul(scale);
+            }
     }
     // Placed under the head: the body moves so its neck is right below the
     // tracked one, wherever the player stands in the room (the actor's own
@@ -1446,6 +1642,30 @@ void player_legs_controller::solve_vr_body(CActor* actor)
             poses[id]=moved;
         }
     }
+    // Diagnostic (vr_contact_debug): where the body is against the eyes, in
+    // the body's frame (+z ahead, +x right, cm), every 3 s.
+    if (vr::ContactDebug()>0)
+    {
+        static u32 logged=0;
+        if (Device.dwTimeGlobal-logged>3000)
+        {
+            logged=Device.dwTimeGlobal;
+            Fvector eye; inverse.transform_tiny(eye,head.c);
+            const auto at=[&](u16 id, char axis)
+            {
+                if (id>=poses.size()) return 0.f;
+                const Fvector& p=poses[id].c;
+                return 100.f*(axis=='z' ? p.z-eye.z : axis=='x' ? p.x-eye.x : p.y-eye.y);
+            };
+            Msg("* [VR body] against the eyes (cm ahead/right/up): neck %.0f/%.0f/%.0f, pelvis %.0f/%.0f/%.0f, "
+                "knees %.0f %.0f, feet %.0f/%.0f and %.0f/%.0f; facing %.0f deg from the head",
+                at(m_vr_neck,'z'),at(m_vr_neck,'x'),at(m_vr_neck,'y'),
+                at(m_vr_pelvis,'z'),at(m_vr_pelvis,'x'),at(m_vr_pelvis,'y'),
+                at(m_vr_leg[0][1],'z'),at(m_vr_leg[1][1],'z'),
+                at(m_vr_leg[0][2],'z'),at(m_vr_leg[0][2],'x'),at(m_vr_leg[1][2],'z'),at(m_vr_leg[1][2],'x'),
+                rad2deg(angle_difference_signed(vr::YawOf(vr::V3(head.k.x,0.f,head.k.z)),m_vr_body_yaw)));
+        }
+    }
     // The view guard: an upper chest bent within 20 cm in front of the eyes
     // is hidden, so a deep forward bend never fills the view with it.
     {
@@ -1514,6 +1734,11 @@ void player_legs_controller::measure_vr_body_profile()
 float player_legs_controller::vr_body_surface(float height, float x, float z) const
 {
     if (m_vr_body_profile.empty()) return 0.f;
+    // The profile is the bind shape; the body is drawn scaled to the
+    // player's height (solve_vr_body, within 2% of the logged scale): the
+    // height looked up and the reach returned are at the drawn size.
+    const float scale=m_vr_body_scale_logged>0.1f ? m_vr_body_scale_logged : 1.f;
+    height/=scale;
     const int band=int(floorf((height+0.30f)/0.05f));
     float angle=atan2f(x,z);
     if (angle<0.f) angle+=PI_MUL_2;
@@ -1525,5 +1750,34 @@ float player_legs_controller::vr_body_surface(float height, float x, float z) co
         for (int s=sector-1;s<=sector+1;++s)
             if (b>=0 && b<kBodyBands)
                 reach=std::max(reach,m_vr_body_profile[size_t(b)*kBodySectors+(s+kBodySectors)%kBodySectors]);
-    return reach;
+    return reach*scale;
+}
+
+float player_legs_controller::vr_body_contact(float low, float high, float x, float z, float half_width) const
+{
+    if (m_vr_body_profile.empty()) return 0.f;
+    const float scale=m_vr_body_scale_logged>0.1f ? m_vr_body_scale_logged : 1.f;
+    low/=scale; high/=scale; half_width/=scale;
+    const int first=std::max(0,int(floorf((low+0.30f)/0.05f)));
+    const int last=std::min(kBodyBands-1,int(floorf((high+0.30f)/0.05f)));
+    const float facing=atan2f(x,z), width=PI_MUL_2/kBodySectors;
+    // Each sector's furthest point taken at the sector's angle nearest the
+    // item's facing: never closer to the item than it may be, and inside
+    // the footprint whenever any of the sector could be. Not the radial
+    // reach: the torso's flanks reach further than its front but beside a
+    // flat item on the chest, not under it.
+    float contact=0.f;
+    for (int s=0;s<kBodySectors;++s)
+    {
+        const float from=angle_difference_signed(s*width,facing), to=from+width;
+        const float nearest=from>0.f ? from : to<0.f ? to : 0.f;
+        if (_abs(nearest)>=PI_DIV_2) continue;
+        const float along=_cos(nearest), across=_abs(_sin(nearest));
+        for (int b=first;b<=last;++b)
+        {
+            const float reach=m_vr_body_profile[size_t(b)*kBodySectors+s];
+            if (reach>0.f && reach*across<=half_width) contact=std::max(contact,reach*along);
+        }
+    }
+    return contact*scale;
 }

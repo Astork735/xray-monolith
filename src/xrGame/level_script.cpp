@@ -10,6 +10,7 @@
 #include "level.h"
 #include "actor.h"
 #include "script_game_object.h"
+#include "../xrEngine/Vr/vr_gameplay.h"
 #include "patrol_path_storage.h"
 #include "xrServer.h"
 #include "client_spawn_manager.h"
@@ -1857,6 +1858,27 @@ void AddBullet(::luabind::object t)
 
 const Fvector3 world2ui_with_depth(Fvector pos, bool hud = false, bool allow_offscreen = false)
 {
+	// VR: the in-game HUD is a panel locked ahead of the head, not the screen.
+	// A point goes where the line from the eyes to it crosses that panel, so
+	// a script's marker (GAMMA's interaction dots) lies over its object.
+	// Through the flat-screen camera they landed elsewhere on the panel.
+	if (!hud && g_vr_owns_present && vr::GameplayActive())
+	{
+		float u, v, depth;
+		bool inside;
+		if (!vr::WorldToHud(pos, u, v, depth, inside) || (!allow_offscreen && !inside)) return { -9999,0,0 };
+		float x = u * UI_BASE_WIDTH, y = v * UI_BASE_HEIGHT;
+		// A magnified HUD draws each piece closer to the centre by its
+		// magnification (vr::HudInsetOffset, CUIGameCustom::Render): a small
+		// marker placed this much further out lands back on the point.
+		const float k = Level().VrUiPointerActive() ? 1.f : vr::HudMagnification();
+		if (k > 1.f)
+		{
+			x = 0.5f * UI_BASE_WIDTH + (x - 0.5f * UI_BASE_WIDTH) * k;
+			y = 0.5f * UI_BASE_HEIGHT + (y - 0.5f * UI_BASE_HEIGHT) * k;
+		}
+		return { x, y, depth };
+	}
 	Fmatrix world, res;
 	world.identity();
 	world.c = pos;

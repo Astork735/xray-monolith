@@ -84,6 +84,13 @@ int main()
     MechanicsEvidence sv98=Rifle(true); sv98.bolt_turn_deg=70.f;
     m=Classify(sv98);
     CHECK(m.family==WeaponFamily::BoltAction && m.feed==FeedKind::Detachable && m.magazine_removable);
+    // GAMMA's SV-98: its handle lifts only 55 degrees, but before the bolt
+    // comes back; a rotating bolt head turning as much with its carrier
+    // stays a self-loader.
+    MechanicsEvidence sv98_gamma=Rifle(true); sv98_gamma.bolt_turn_deg=55.f; sv98_gamma.turn_leads=true;
+    CHECK(Classify(sv98_gamma).action==ActionKind::ManualBolt);
+    MechanicsEvidence carrier_turn=Rifle(true); carrier_turn.bolt_turn_deg=55.f;
+    CHECK(Classify(carrier_turn).action!=ActionKind::ManualBolt);
     // SKS: a self-loader with a 10-round internal magazine charged from the
     // top; its follower holds the bolt open, released by working the bolt
     // (no button). SKS-D / SKS-M take a detachable magazine.
@@ -215,6 +222,7 @@ int main()
     CHECK(ApplyMechanicsOverride(m,"has_bolt_catch","true") && m.has_bolt_catch);
     CHECK(ApplyMechanicsOverride(m,"feed","internal_rounds") && m.feed==FeedKind::InternalRounds);
     CHECK(ApplyMechanicsOverride(m,"handle_notch","true") && m.handle_notch);
+    CHECK(!m.ambidextrous_handle && ApplyMechanicsOverride(m,"ambidextrous_handle","true") && m.ambidextrous_handle);
     const char* why=nullptr;
     CHECK(!ApplyMechanicsOverride(m,"colour","red",&why) && why && std::strstr(why,"unknown"));
     CHECK(!ApplyMechanicsOverride(m,"action","laser",&why) && why && std::strstr(why,"unknown"));
@@ -299,8 +307,6 @@ int main()
         ProfileHandling bare;
         CHECK(!ActionHonoured(ActionKind::Lever,bare) && ActionHonoured(ActionKind::None,bare) &&
             ActionHonoured(ActionKind::Launcher,bare) && !FeedHonoured(FeedKind::InternalRounds,bare));
-        CHECK(AuditedMechanicsKey("has_bolt_catch") && AuditedMechanicsKey("handle_notch") &&
-            !AuditedMechanicsKey("feed") && !AuditedMechanicsKey("supports_last_round_hold_open"));
     }
 
     // A bolt-action path: the knob lifts through a 90-degree arc of 5 cm

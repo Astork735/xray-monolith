@@ -1,0 +1,81 @@
+// VR "Simple Water" (vr_legacy_water): stock Anomaly water (water.ps with
+// water_regular's specular, reflections and soft edge) that keeps to its own
+// helpers. With Screen Space Shaders installed, the shared lmodel.h's
+// specular_phong becomes a GGX term that divides by zero for water seen from
+// above with the sun overhead (white water), and the material scripts no
+// longer bind the stock sky textures; the engine binds those for this shader.
+#include "common.h"
+
+struct vf
+{
+	float2 tbase      : TEXCOORD0; // base
+	float4 tnorm0     : TEXCOORD1; // nm0
+	float3 position_w : TEXCOORD2; // nm1
+	float3 M1         : TEXCOORD3;
+	float3 M2         : TEXCOORD4;
+	float3 M3         : TEXCOORD5;
+	float3 v2point_w  : TEXCOORD6;
+	float4 tctexgen   : TEXCOORD7;
+	float4 c0         : COLOR0;
+	float  fog        : FOG;
+	float4 hpos       : SV_Position;
+};
+
+Texture2D   s_nmap;
+TextureCube s_env0;
+TextureCube s_env1;
+float3      water_intensity;
+
+float3 vr_water_envmap(float3 vreflect)
+{
+	vreflect.y = vreflect.y * 2 - 1;
+	float3 env0 = s_env0.SampleLevel(smp_base, vreflect.xyz, 0).xyz;
+	float3 env1 = s_env1.SampleLevel(smp_base, vreflect.xyz, 0).xyz;
+	return lerp(env0, env1, L_ambient.w);
+}
+
+// Stock Anomaly's specular_phong.
+float3 vr_water_specular(float3 pnt, float3 normal, float3 light_direction)
+{
+	return L_sun_color.rgb * pow(abs(dot(normalize(pnt + light_direction), normal)), 256.0);
+}
+
+float4 main(vf I) : SV_Target
+{
+	float4 base = s_base.Sample(smp_base, I.tbase);
+
+	float3 n0 = s_nmap.Sample(smp_base, I.tnorm0.xy).xyz;
+	float3 n1 = s_nmap.Sample(smp_base, I.tnorm0.zw).xyz;
+	float3 Navg = n0 + n1 - 1.0;
+
+	float3 Nw = normalize(mul(float3x3(I.M1, I.M2, I.M3), Navg));
+	float3 v2point = normalize(I.v2point_w);
+
+	float2 PosTc = I.tctexgen.xy / I.tctexgen.z;
+	gbuffer_data gbd = gbuffer_load_data(PosTc, I.hpos.xy);
+	float4 _P = float4(gbd.P, gbd.mtl);
+
+	float3 vreflect = reflect(v2point, Nw);
+	float fresnel = saturate(dot(vreflect, v2point));
+	float power = pow(fresnel, 9.0);
+
+	float3 env = vr_water_envmap(vreflect);
+	float3 final = lerp(env, base.rgb, base.a);
+	final += vr_water_specular(v2point, Nw, L_sun_dir_w) * 4.0;
+	final *= I.c0.rgb * 2.0;
+
+	float alpha = 0.55 + 0.25 * power; // 1 = full env, 0 = no env
+
+	// Soft edge against the scene behind the water, and its murk.
+	float waterDepth = _P.z - I.tctexgen.z;
+	float fog = 1.0 - exp(-4.0 * waterDepth);
+	final = lerp(float3(0.1, 0.1, 0.1) * water_intensity.r, final, alpha);
+	alpha = min(alpha, saturate(waterDepth));
+	alpha = max(fog, alpha);
+
+	// Fogging
+	final = lerp(fog_color.rgb, final, I.fog);
+	alpha *= I.fog * I.fog;
+
+	return float4(final, alpha);
+}

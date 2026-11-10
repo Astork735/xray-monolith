@@ -90,15 +90,35 @@ void CUIGameCustom::Render()
 	const float inset = g_vr_owns_present && g_vr_ui_pass && !Level().VrUiPointerActive() ?
 		vr::HudMagnification() : 1.f;
 	CUIWindow::s_vr_hud_inset = inset;
-	const auto root = [inset](CUIWindow* wnd, bool on) { if (wnd && inset > 1.f) wnd->m_vr_hud_root = on; };
-	for (StaticDrawableWrapper* item : CustomStatics)
+	const bool hud = inset > 1.f;
+	CEntity* pEntity = smart_cast<CEntity*>(Level().CurrentEntity());
+	// The status indicators are drawn (below) for a current entity. VR can
+	// show status on the wrist instead (vr_hide_hud).
+	const bool indicators = pEntity && GameIndicatorsShown() && psHUD_Flags.is(HUD_DRAW | HUD_DRAW_RT) &&
+		!(g_vr_owns_present && vr::HideHud());
+	if (hud)
 	{
-		if (inset > 1.f && item->wnd()->IsShown()) CUIWindow::DrawHudElement(*item->wnd(), inset);
-		else item->Draw();
+		// Every piece drawn below laid out together, so pieces that touch
+		// move as one whoever draws them: GAMMA's body health HUD is a frame
+		// of its own with a dozen bars and a figure laid on it as separate
+		// custom statics, and the engine's psy bar over it. Moved one by
+		// one, the bars and the figure slid off the frame and the figure
+		// showed twice.
+		xr_vector<CUIWindow*> statics;
+		for (StaticDrawableWrapper* item : CustomStatics)
+			if (item->wnd()->IsShown()) statics.push_back(item->wnd());
+		xr_vector<CUIWindow*> pieces = statics;
+		CUIWindow::CollectHudPieces(*Window, pieces);
+		if (indicators) CUIWindow::CollectHudPieces(*UIMainIngameWnd, pieces);
+		CUIWindow::CollectHudPieces(*m_pMessagesWnd, pieces);
+		CollectHudDialogPieces(pieces);
+		CUIWindow::LayoutHudPieces(pieces, inset);
+		CUIWindow::DrawHudPieces(statics, inset);
 	}
+	else for (StaticDrawableWrapper* item : CustomStatics) item->Draw();
+	const auto root = [hud](CUIWindow* wnd, bool on) { if (wnd && hud) wnd->m_vr_hud_root = on; };
 	root(Window, true); root(UIMainIngameWnd, true); root(m_pMessagesWnd, true);
 	Window->Draw();
-	CEntity* pEntity = smart_cast<CEntity*>(Level().CurrentEntity());
 	if (pEntity)
 	{
 		CActor* pActor = smart_cast<CActor*>(pEntity);
@@ -114,14 +134,13 @@ void CUIGameCustom::Render()
 					item->render_item_ui();
 			}
 		}
-		// VR can show status on the wrist instead (vr_hide_hud).
-		if (GameIndicatorsShown() && psHUD_Flags.is(HUD_DRAW | HUD_DRAW_RT) &&
-			!(g_vr_owns_present && vr::HideHud()))
+		if (indicators)
 			UIMainIngameWnd->Draw();
 	}
 	m_pMessagesWnd->Draw();
 	DoRenderDialogs();
 	root(Window, false); root(UIMainIngameWnd, false); root(m_pMessagesWnd, false);
+	CUIWindow::ClearHudLayout();
 	CUIWindow::s_vr_hud_inset = 1.f;
 }
 

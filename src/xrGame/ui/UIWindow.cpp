@@ -242,38 +242,37 @@ void DrawAsRoot(CUIWindow& wnd)
 	wnd.Draw();
 	wnd.m_vr_hud_root = root;
 }
+// A child its parent's Draw draws: shown and not custom-drawn.
+bool DrawnChild(CUIWindow* wnd) { return wnd && wnd->IsShown() && !wnd->GetCustomDraw(); }
 }
 
-void CUIWindow::DrawHudElement(CUIWindow& element, float k)
-{
-	Frect r;
-	element.GetAbsoluteRect(r);
-	if (FullScreen(r)) { DrawAsRoot(element); return; }
-	float dx, dy;
-	vr::HudInsetOffset(r.x1, r.y1, r.width(), r.height(), UI_BASE_WIDTH, UI_BASE_HEIGHT, k, dx, dy);
-	DrawMoved(element, dx, dy);
-}
+u32 CUIWindow::s_vr_hud_layout = 1;
 
-void CUIWindow::DrawHudChildren(float k)
+namespace
 {
-	struct Piece { CUIWindow* wnd; Frect r; int group; float dx, dy; };
+// How far each of the windows moves (none full-screen): those within 12 units
+// of each other as one group, anchored on the group's outline.
+void GroupOffsets(const xr_vector<CUIWindow*>& windows, float k, xr_vector<Fvector2>& offsets)
+{
+	struct Piece { Frect r; int group; float dx, dy; };
 	xr_vector<Piece> pieces;
-	for (CUIWindow* child : m_ChildWndList)
+	for (CUIWindow* wnd : windows)
 	{
-		if (!child || !child->IsShown() || child->GetCustomDraw()) continue;
-		Piece piece{child, {}, int(pieces.size()), 0.f, 0.f};
-		child->GetAbsoluteRect(piece.r);
+		Piece piece{{}, int(pieces.size()), 0.f, 0.f};
+		wnd->GetAbsoluteRect(piece.r);
 		pieces.push_back(piece);
 	}
-	// Group pieces within 12 units of each other (repeat until stable).
+	// Group pieces within 12 units of each other (repeat until stable). An
+	// empty one (a script's placeholder at the corner) joins none.
 	const auto group_of = [&](int i) { while (pieces[i].group != i) i = pieces[i].group; return i; };
+	const auto empty = [](const Frect& r) { return r.width() <= 0.f || r.height() <= 0.f; };
 	constexpr float gap = 12.f;
 	for (size_t a = 0; a < pieces.size(); ++a)
 		for (size_t b = a + 1; b < pieces.size(); ++b)
 		{
 			const Frect& p = pieces[a].r;
 			const Frect& q = pieces[b].r;
-			if (FullScreen(p) || FullScreen(q)) continue;
+			if (FullScreen(p) || FullScreen(q) || empty(p) || empty(q)) continue;
 			if (p.x1 - gap > q.x2 || q.x1 - gap > p.x2 || p.y1 - gap > q.y2 || q.y1 - gap > p.y2) continue;
 			const int ga = group_of(int(a)), gb = group_of(int(b));
 			if (ga != gb) pieces[std::max(ga, gb)].group = std::min(ga, gb);
@@ -294,11 +293,71 @@ void CUIWindow::DrawHudChildren(float k)
 		vr::HudInsetOffset(outline.x1, outline.y1, outline.width(), outline.height(),
 			UI_BASE_WIDTH, UI_BASE_HEIGHT, k, pieces[i].dx, pieces[i].dy);
 	}
-	for (Piece& piece : pieces)
+	offsets.resize(pieces.size());
+	for (size_t i = 0; i < pieces.size(); ++i)
 	{
-		if (FullScreen(piece.r)) { DrawAsRoot(*piece.wnd); continue; }
-		const Piece& lead = pieces[group_of(int(&piece - pieces.data()))];
-		DrawMoved(*piece.wnd, lead.dx, lead.dy);
+		const Piece& lead = pieces[group_of(int(i))];
+		offsets[i].set(lead.dx, lead.dy);
+	}
+}
+}
+
+void CUIWindow::CollectHudPieces(CUIWindow& root, xr_vector<CUIWindow*>& out)
+{
+	// As DrawHudChildren draws them: a full-screen child's own children.
+	for (CUIWindow* child : root.m_ChildWndList)
+	{
+		if (!DrawnChild(child)) continue;
+		Frect r;
+		child->GetAbsoluteRect(r);
+		if (FullScreen(r)) CollectHudPieces(*child, out);
+		else out.push_back(child);
+	}
+}
+
+void CUIWindow::LayoutHudPieces(const xr_vector<CUIWindow*>& windows, float k)
+{
+	++s_vr_hud_layout;
+	xr_vector<Fvector2> offsets;
+	GroupOffsets(windows, k, offsets);
+	for (size_t i = 0; i < windows.size(); ++i)
+	{
+		windows[i]->m_vr_hud_layout = s_vr_hud_layout;
+		windows[i]->m_vr_hud_offset = offsets[i];
+	}
+}
+
+void CUIWindow::ClearHudLayout() { ++s_vr_hud_layout; }
+
+void CUIWindow::DrawHudChildren(float k)
+{
+	xr_vector<CUIWindow*> shown;
+	for (CUIWindow* child : m_ChildWndList)
+		if (DrawnChild(child)) shown.push_back(child);
+	DrawHudPieces(shown, k);
+}
+
+void CUIWindow::DrawHudPieces(const xr_vector<CUIWindow*>& windows, float k)
+{
+	// Moved as this frame's layout has it (LayoutHudPieces); a piece it does
+	// not have (a window shown since) is grouped with the others it lacks.
+	xr_vector<CUIWindow*> unplaced;
+	for (CUIWindow* wnd : windows)
+	{
+		Frect r;
+		wnd->GetAbsoluteRect(r);
+		if (!FullScreen(r) && wnd->m_vr_hud_layout != s_vr_hud_layout) unplaced.push_back(wnd);
+	}
+	xr_vector<Fvector2> offsets;
+	GroupOffsets(unplaced, k, offsets);
+	size_t next = 0;
+	for (CUIWindow* wnd : windows)
+	{
+		Frect r;
+		wnd->GetAbsoluteRect(r);
+		if (FullScreen(r)) { DrawAsRoot(*wnd); continue; }
+		const Fvector2 offset = wnd->m_vr_hud_layout == s_vr_hud_layout ? wnd->m_vr_hud_offset : offsets[next++];
+		DrawMoved(*wnd, offset.x, offset.y);
 	}
 }
 

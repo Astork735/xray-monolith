@@ -14,10 +14,22 @@ namespace collide { struct rq_result; }
 
 namespace vrwi
 {
+// The contact surface of a weapon's world model (held without a measured
+// HUD model), named `name`: built on a worker thread once per model for the
+// session, null until it is ready. Built on the game thread, a first grab of
+// each GAMMA weapon froze the game for a moment.
+std::shared_ptr<const VrWeaponContact> WorldModelContact(IRenderVisual* visual, const shared_str& name);
 inline Fvector Point(const Fmatrix& transform, const Fvector& local)
 {
     Fvector result=local;
     transform.transform_tiny(result);
+    return result;
+}
+// Point's inverse: a world point in the transform's own space.
+inline Fvector Local(const Fmatrix& transform, const Fvector& world)
+{
+    Fvector result;
+    Fmatrix().invert(transform).transform_tiny(result,world);
     return result;
 }
 inline bool Near(const Fvector& a, const Fvector& b, float radius)
@@ -60,9 +72,18 @@ VrFloorMagazine* FloorMagazineIn(int hand);
 void ReturnRoundsToActor(CActor& actor, const xr_vector<CCartridge>& rounds);
 }
 
+// Every weapon interaction in existence: claims that are no longer on their
+// way lapse (CVrWeaponInteraction::UpdateHandClaim).
+void VrUpdateHandClaims(CActor& actor);
+
 // --- VrPickup.cpp -----------------------------------------------------------
 // The active item is being put away (its hide runs, or another is queued).
 bool VrActiveItemLeaving(CActor& actor);
+// No item is out yet, but a weapon other than `except` is on its way to a
+// hand: its slot's draw is queued, or a wield (not a stow) is pending.
+bool VrWeaponComing(CActor& actor, const CObject* except=nullptr);
+// What the hands have out, seen by a weapon taken by hand (`self`).
+vr::ActiveItem VrActiveItemState(CActor& actor, const CObject* self);
 inline vr::V3 Pick(const Fvector& v) { return {v.x,v.y,v.z}; }
 // The eyes see the hand: within 2 m, nothing of the static world between.
 bool VrHandReachable(CActor& actor, const Fvector& hand);
@@ -73,8 +94,10 @@ bool VrTakeable(CActor& actor, int side, CPhysicsShellHolder* object);
 float BoxDistance(const Fvector& local, const Fbox& box);
 // What a free hand takes on a squeeze, and what its pointer names (see the
 // definition for the order they are tried in).
+// hand_pose/aim_pose: the hand's grip and aim this frame when the caller
+// already has them (otherwise they are read here).
 CPhysicsShellHolder* VrGrabTarget(CActor& actor, int side, bool near_only, bool& touching, const char*& why,
-    bool pointer_missed=false);
+    bool pointer_missed=false, const Fmatrix* hand_pose=nullptr, const Fmatrix* aim_pose=nullptr);
 void UpdateVrPickup(CActor& actor, int side, bool available, bool grip, bool trigger, bool may_grab,
     bool at_weapon);
 

@@ -15,5 +15,7 @@ void SubmitPendingStereoFrame();
 bool RenderStereoScene();
 void FinishStereoFrame();
 void Recenter();
+// Takes the head's height now as the eye height (vr_calibrate_height).
+void CalibrateHeight();
 }
 #endif

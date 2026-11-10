@@ -51,6 +51,9 @@ bool g_vr_owns_present = false;
 bool g_vr_rendering_eye = false;
 bool g_vr_eye_rendered = false;
 int g_vr_shadow_share = 0;
+// vr_legacy_water: the eyes draw water with its material's own (stock
+// Anomaly) shader instead of SSFX water. Read by R4's CRender::Render.
+ENGINE_API int vr_legacy_water = 0;
 int g_vr_eye_index = -1;
 bool g_vr_ui_pass = false;
 Fmatrix g_vr_shadow_view = Fidentity, g_vr_shadow_project = Fidentity;

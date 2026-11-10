@@ -153,7 +153,10 @@ void CWeapon::StopShooting()
 	if (m_pFlameParticles && m_pFlameParticles->IsLooped())
 		StopFlameParticles();
 
-	if (!m_current_motion_def || !m_playFullShotAnim)
+	// VR: a hand-worked action (a bolt-action) is not cycled by its shot
+	// animation, which works the bolt too. Waiting for it kept the weapon
+	// firing 1.5-2 s, and the grip hand could not let go to work the bolt.
+	if (!m_current_motion_def || !m_playFullShotAnim || VrHandWorkedShot())
 		SwitchState(eIdle);
 
 	FireEnd();

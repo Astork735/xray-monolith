@@ -299,11 +299,29 @@ bool CWeapon::VrCanFire() const
 }
 float CWeapon::VrShotTime(float native)
 {
-    if (!m_vr_interaction || !m_vr_interaction->Mode() || !vr::MechanicalFireRate() || GetCurrentFireMode()!=1)
-        return native;
-    // The trigger is released and pulled again between single shots, and
-    // the action cycles (VR cycle 30-90 ms) or is worked by hand first.
-    return std::min(native,0.06f);
+    // Worked by hand (a bolt-action): the native interval is the shot
+    // animation's own bolt cycle, which the hand does in VR. Kept, the
+    // weapon stayed firing 1.5-2 s after each shot (a Mosin's) and the
+    // grip hand could not let go to work the bolt. With
+    // vr_mechanical_fire_rate, single shots: the trigger is released and
+    // pulled again between them, and the action cycles (VR cycle 30-90 ms)
+    // or is worked by hand first.
+    const bool mechanical=m_vr_interaction && m_vr_interaction->Mode() && vr::MechanicalFireRate() &&
+        GetCurrentFireMode()==1;
+    if (VrHandWorkedShot()) return std::min(native,0.06f);
+    // A weapon with an automatic mode: its rpm is the action's real cycle,
+    // which no single shot outpaces (the trigger pulled fast in single fired
+    // faster than full auto). Semi-only weapons' rpm stands in for the
+    // trigger finger (GAMMA: 45-100 rpm) and gives way to the hand.
+    if (mechanical)
+    {
+        return m_vr_interaction->AutomaticMode() ? native : std::min(native,0.06f);
+    }
+    return native;
+}
+bool CWeapon::VrHandWorkedShot() const
+{
+    return m_vr_interaction && m_vr_interaction->Mode() && m_vr_interaction->WorkedByHand();
 }
 bool CWeapon::VrCycling() const
 {

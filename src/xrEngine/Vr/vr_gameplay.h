@@ -15,6 +15,31 @@ ENGINE_API bool HeadPosition(Fvector& position);
 // head's turning beyond vr_torso_deadband degrees, so belt, holsters and
 // pockets stay at the real body when the player turns round in the room.
 ENGINE_API bool TorsoForward(Fvector& forward);
+// Meta body tracking (vr_body_tracking: XR_FB_body_tracking, which Virtual
+// Desktop's own runtime forwards). The controllers still place the hands:
+// the tracked body bends the elbows, moves the shoulders and turns the
+// torso (TorsoForward), and measures the player.
+enum BodyJoint { BodyJointChest, BodyJointShoulder, BodyJointElbow, BodyJointWrist };
+// A tracked joint's world position (side 0 left, 1 right; the chest takes
+// either), smoothed; kept from the last tracked frame while
+// BodyTrackingWeight eases out. False when there is none.
+ENGINE_API bool BodyJointPosition(BodyJoint joint, int side, Fvector& world);
+// How far the tracked body is used this frame: 0..1, eased over 0.2 s.
+ENGINE_API float BodyTrackingWeight();
+// Reads this frame's tracked body (the engine calls it every frame; the
+// readers above call it too).
+ENGINE_API void UpdateBodyTracking();
+// The player's shoulder width (vr_shoulder_width, else measured) over the
+// average's: 0.85..1.20, 1 when neither is known. Spreads the places on
+// the shoulders and chest.
+ENGINE_API float ShoulderWidthScale();
+// The player's arm, shoulder joint to wrist (vr_arm_length, else measured),
+// in engine units; 0 when neither is known.
+ENGINE_API float ArmLength();
+// The game's floor under the actor (world y), as the game places the body:
+// seated reach (vr_seated_reach) takes hands reaching for the real floor
+// down to it.
+ENGINE_API void SetGameFloor(float world_y);
 // Places the tracked body at the actor's camera for this frame. The actor
 // calls it after updating its camera, before anything uses hand poses.
 ENGINE_API void UpdateGameplayBody();
@@ -109,6 +134,9 @@ ENGINE_API float LowCrouchDepth();
 ENGINE_API bool BodySlots();
 ENGINE_API bool BodySlotRings();
 ENGINE_API float BodySlotRadius();
+// vr_hip_height's default: the shown body's belt is moved by the setting's
+// difference from it (VrBodyHipShift).
+constexpr float default_hip_height = 0.65f;
 ENGINE_API float HipHeight();
 ENGINE_API float HipWidth();
 // vr_left_handed: the left hand is the weapon/pointer hand; sticks and body
@@ -119,11 +147,21 @@ ENGINE_API int DominantHand();
 // Status display on the other wrist (vr_wrist_display); flat HUD hidden
 // (vr_hide_hud).
 ENGINE_API bool WristDisplay();
+// PDA message text on the HUD, times the usual size (vr_message_text_size).
+ENGINE_API float MessageTextSize();
 ENGINE_API bool HideHud();
 // How much larger the in-game HUD panel looks than at its default size
 // (vr_hud_scale over vr_hud_distance): HUD elements are drawn this much
 // closer to the centre so they grow inward (vr::HudInsetOffset).
 ENGINE_API float HudMagnification();
+// A world point on the head-locked in-game HUD panel: where the line from
+// the eyes to it crosses the panel, as u, v across it (0..1, v down;
+// unclamped, mirrored through the centre behind the head, as a flat-screen
+// projection is), and its distance ahead of the eyes (negative behind).
+// A marker drawn there on the HUD lies over the point (game.world2ui).
+// `inside`: ahead of the eyes and on the panel. False without gameplay
+// tracking or while a menu's panel is anchored in the room.
+ENGINE_API bool WorldToHud(const Fvector& world, float& u, float& v, float& depth, bool& inside);
 // A thrown grenade or bolt leaves at the hand's speed times this
 // (vr_throw_scale): an arm without a weight to swing throws short.
 ENGINE_API float ThrowScale();

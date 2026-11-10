@@ -7,6 +7,7 @@ add_executable(vr_tests tests.cpp
     ../../src/xrEngine/Vr/vr_input.cpp
     ../../src/xrEngine/Vr/vr_graphics_d3d11.cpp
     ../../src/xrEngine/Vr/vr_system.cpp
+    ../../src/xrEngine/Vr/vr_body_tracking.cpp
     ../../src/xrEngine/Vr/vr_performance.cpp)
 target_compile_features(vr_tests PRIVATE cxx_std_17)
 target_compile_definitions(vr_tests PRIVATE VR_ENABLED XR_VR_TEST NOMINMAX)
@@ -56,9 +57,17 @@ add_test(NAME vr_contact COMMAND vr_contact_tests)
 add_executable(vr_contact_bench contact_bench.cpp)
 target_compile_features(vr_contact_bench PRIVATE cxx_std_17)
 
+# Synthetic pose preparation only; not a headset/frame-time measurement.
+add_executable(vr_pose_bench pose_bench.cpp)
+target_compile_features(vr_pose_bench PRIVATE cxx_std_17)
+
 add_executable(vr_body_pose_tests body_pose_tests.cpp)
 target_compile_features(vr_body_pose_tests PRIVATE cxx_std_17)
 add_test(NAME vr_body_pose COMMAND vr_body_pose_tests)
+
+add_executable(vr_body_tracking_tests body_tracking_tests.cpp)
+target_compile_features(vr_body_tracking_tests PRIVATE cxx_std_17)
+add_test(NAME vr_body_tracking COMMAND vr_body_tracking_tests)
 
 add_executable(vr_mechanics_kind_tests mechanics_tests.cpp)
 target_compile_features(vr_mechanics_kind_tests PRIVATE cxx_std_17)

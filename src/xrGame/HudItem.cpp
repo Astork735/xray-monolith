@@ -711,10 +711,13 @@ void CHudItem::render_item_3d_ui()
 }
 
 extern float g_end_modif;
+// Set around a motion the scripts must not see (CWeaponMagazined::
+// PlayAnimShoot, a hand-worked action in VR).
+bool g_hud_motion_without_scripts = false;
 
 u32 CHudItem::PlayHUDMotion(shared_str M, BOOL bMixIn, CHudItem* W, u32 state, float speed, float end, bool bMixIn2)
 {
-	if (IsAttachedToHUD())
+	if (IsAttachedToHUD() && !g_hud_motion_without_scripts)
 	{
 		::luabind::functor<::luabind::object> funct;
 		if (ai().script_engine().functor("_G.CHudItem__PlayHUDMotion", funct))
@@ -886,7 +889,7 @@ bool CHudItem::HudAnimationExist(LPCSTR anim_name)
 	if (IsAttachedToHUD()) // First person
 	{
 		string256 anim_name_r;
-		bool is_16x9 = UI().is_widescreen();
+		bool is_16x9 = UI().hud_widescreen();
 		u16 attach_place_idx = pSettings->r_u16(HudItemData()->m_sect_name, "attach_place_idx");
 		xr_sprintf(anim_name_r, "%s%s", anim_name, ((attach_place_idx == 1) && is_16x9) ? "_16x9" : "");
 		player_hud_motion* anm = HudItemData()->m_hand_motions->find_motion(anim_name_r);

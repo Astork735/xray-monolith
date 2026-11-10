@@ -6,6 +6,7 @@
 // ltx file can override any property per weapon section. Engine-free, so the
 // rules are unit tested.
 #include <cstring>
+#include <cctype>
 #include <cstdlib>
 #include <type_traits>
 #include <algorithm>
@@ -35,6 +36,10 @@ struct WeaponMechanics
     // An HK roller-delayed weapon (MP5, G3): the charging handle hooks into
     // a notch to hold the bolt back, and a slap down releases it.
     bool handle_notch = false;
+    // A charging handle with a knob on each side (a P90's): either hand
+    // takes it from its own side. Models that put the second knob in the
+    // receiver mesh only show one; one part with both is found by itself.
+    bool ambidextrous_handle = false;
     bool magazine_removable = false;
     // False: the game's own reload (no VR reload is offered).
     bool vr_reload_supported = false;
@@ -73,6 +78,14 @@ struct MechanicsEvidence
 };
 
 constexpr float bolt_action_turn_deg = 60.f;
+// A bolt handle that lifts before the bolt comes back is a bolt-action from
+// a smaller turn: GAMMA's SV-98 lifts 55 degrees. A self-loader's rotating
+// bolt head (about 35 degrees) turns with its carrier, not before it.
+constexpr float leading_bolt_turn_deg = 45.f;
+inline bool BoltActionTurn(float turn_deg, bool turn_leads)
+{
+    return turn_deg >= bolt_action_turn_deg || (turn_leads && turn_deg >= leading_bolt_turn_deg);
+}
 
 // Native fire_modes uses -1 for continuous fire and positive queue sizes
 // for bursts. Capability, not the currently selected mode or rate of fire,
@@ -106,7 +119,7 @@ inline WeaponMechanics Classify(const MechanicsEvidence& e)
     // A self-loader (automatic fire, or a bolt the shot cycles by itself) is
     // never hand-worked, whatever else turns in its animations.
     const bool self_cycling = e.automatic_mode || (e.fast_return && !e.turn_leads);
-    const bool manual_bolt = !self_cycling && e.cycling_part && e.bolt_turn_deg >= bolt_action_turn_deg;
+    const bool manual_bolt = !self_cycling && e.cycling_part && BoltActionTurn(e.bolt_turn_deg, e.turn_leads);
     if (e.launcher_class)
     {
         m.family = WeaponFamily::Launcher; m.action = ActionKind::Launcher;
@@ -331,23 +344,25 @@ inline bool ActionHonoured(ActionKind action, const ProfileHandling& p)
     default: return !p.pump && !p.chambers && !p.cycling;
     }
 }
-// Keys an audited profile (vr_weapons.ltx) reads at run time; it keeps its
-// own mechanism for every other.
-inline bool AuditedMechanicsKey(const char* key)
-{
-    for (const char* k : {"has_bolt_catch", "has_bolt_release", "has_slide_stop", "has_slide_release", "handle_notch"})
-        if (!std::strcmp(key, k)) return true;
-    return false;
-}
-
 inline bool ApplyMechanicsValue(WeaponMechanics& m, const char* key, const char* value)
 {
     const auto is = [&](const char* k) { return !std::strcmp(key, k); };
+    // Only a real boolean, in any case as the game's ltx reads them (True,
+    // YES): a typo ("ture") is refused (logged as not applied), never read
+    // as false.
+    const auto same = [](const char* a, const char* b)
+    {
+        for (; *a && *b; ++a, ++b)
+            if (std::tolower(static_cast<unsigned char>(*a)) != *b) return false;
+        return !*a && !*b;
+    };
     const auto flag = [&](bool& out)
     {
-        out = !std::strcmp(value, "true") || !std::strcmp(value, "on") || !std::strcmp(value, "1") ||
-            !std::strcmp(value, "yes");
-        return true;
+        for (const char* yes : {"true", "on", "1", "yes"})
+            if (same(value, yes)) { out = true; return true; }
+        for (const char* no : {"false", "off", "0", "no"})
+            if (same(value, no)) { out = false; return true; }
+        return false;
     };
     const auto pick = [&](auto& out, auto name_of, int count)
     {
@@ -365,6 +380,7 @@ inline bool ApplyMechanicsValue(WeaponMechanics& m, const char* key, const char*
     if (is("supports_last_round_hold_open")) return flag(m.supports_last_round_hold_open);
     if (is("has_dust_cover")) return flag(m.has_dust_cover);
     if (is("handle_notch")) return flag(m.handle_notch);
+    if (is("ambidextrous_handle")) return flag(m.ambidextrous_handle);
     if (is("vr_reload_supported")) return flag(m.vr_reload_supported);
     return false;
 }

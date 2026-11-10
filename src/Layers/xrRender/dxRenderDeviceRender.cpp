@@ -387,6 +387,26 @@ void dxRenderDeviceRender::ResourcesDeferredUnload()
 	Resources->DeferredUnload();
 }
 
+void dxRenderDeviceRender::ResourcesBackgroundBegin()
+{
+	Resources->BackgroundBegin();
+}
+
+u32 dxRenderDeviceRender::ResourcesBackgroundEnd()
+{
+	return Resources->BackgroundEnd();
+}
+
+bool dxRenderDeviceRender::ResourcesBackgroundDone(u32 ticket)
+{
+	return !Resources || Resources->BackgroundDone(ticket);
+}
+
+void dxRenderDeviceRender::ResourcesBackgroundWait(u32 ticket)
+{
+	if (Resources) Resources->BackgroundWait(ticket);
+}
+
 void dxRenderDeviceRender::ResourcesPrefetchCreateTexture(LPCSTR name)
 {
 	Resources->_CreateTexture(name);

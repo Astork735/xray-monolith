@@ -39,6 +39,9 @@ public:
 	bool SecondaryButton(int hand) const { return hand >= 0 && hand < 2 && m_secondary_button[hand]; }
 	bool Button(int hand) const { return hand >= 0 && hand < 2 && m_button[hand]; }
 	bool Select(int hand) const { return hand >= 0 && hand < 2 && m_select[hand]; }
+	// The float trigger action is bound and active (not a Boolean-only
+	// select, as on the Khronos simple controller).
+	bool TriggerAnalog(int hand) const { return hand >= 0 && hand < 2 && m_trigger_analog[hand]; }
 	bool MenuButton() const { return m_menu_button; }
 	bool SprintButton() const { return m_sprint_button; }
 	bool JumpButton() const { return m_jump_button; }
@@ -88,6 +91,7 @@ private:
 	bool        m_select[2]{ false, false };
 	bool        m_active[2]{ false, false };
 	float       m_trigger[2]{ 0.f, 0.f };
+	bool        m_trigger_analog[2]{ false, false };
 	float       m_grip[2]{ 0.f, 0.f };
 	XrVector2f  m_thumbstick[2]{ { 0.f, 0.f }, { 0.f, 0.f } };
 

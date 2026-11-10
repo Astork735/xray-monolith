@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tools'))
 from vr_extract_pm_magazines import chunks  # noqa: E402
 profiles = configparser.ConfigParser(interpolation=None)
-profiles.read(ROOT / 'gamedata/configs/vr/vr_weapons.ltx', encoding='utf-8')
+profiles.read(ROOT / 'tests/vr/fixtures/audited_profiles.ltx', encoding='utf-8')
 report = json.loads((ROOT / 'docs/vr-weapon-assets.json').read_text(encoding='utf-8'))
 
 for name, section in (('pm', 'vr_wpn_wpn_pm'),
@@ -93,7 +93,7 @@ else:
 # The SKS pouch asset contains one live cartridge, with no clip, case-only
 # substitute, weapon triangles or dependency on the weapon's animation set.
 # Its 56 mm length is loose_rounds' 0.028 m half length in
-# gamedata/configs/vr/vr_weapon_mechanics.ltx.
+# mods/VR_Settings_MCM/gamedata/configs/vr/vr_weapon_mechanics.ltx.
 round_path = MESHES / 'round_762x39.ogf'
 if not round_path.exists():
     print(f'SKIP: SKS round mesh not extracted in {MESHES}')

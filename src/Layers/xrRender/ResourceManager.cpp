@@ -14,6 +14,10 @@
 #include "blenders\blender.h"
 #include "blenders\blender_recorder.h"
 #include <tbb\parallel_for_each.h>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <thread>
 
 //	Already defined in Texture.cpp
 void fix_texture_name(LPSTR fn);
@@ -377,9 +381,193 @@ void CResourceManager::Delete(const Shader* S)
 	Msg("! ERROR: Failed to find complete shader");
 }
 
+// One worker loading batches of textures in order (BackgroundBegin).
+struct CResourceManager::BackgroundLoader
+{
+	struct Batch
+	{
+		u32 ticket = 0;
+		xr_vector<ref_texture> textures;
+	};
+	std::mutex lock;
+	std::condition_variable wake, finished_signal;
+	std::deque<Batch> queue;
+	// Loaded, their references still held: taken over by the main thread.
+	xr_vector<Batch> finished;
+	u32 next_ticket = 1, done_ticket = 0;
+	bool stop = false;
+	std::thread worker;
+	// Main thread only: loaded batches whose staging textures are still to
+	// be moved to the GPU (the next texture of the first is loaded_next), and
+	// the last batch wholly there.
+	std::deque<Batch> loaded;
+	size_t loaded_next = 0;
+	u32 finalized_ticket = 0;
+	u32 finalize_frame = u32(-1);
+
+	void Run()
+	{
+		for (;;)
+		{
+			Batch batch;
+			{
+				std::unique_lock<std::mutex> guard(lock);
+				wake.wait(guard, [&] { return stop || !queue.empty(); });
+				if (queue.empty()) return;
+				batch = std::move(queue.front());
+				queue.pop_front();
+			}
+			for (ref_texture& texture : batch.textures)
+				texture->Load();
+			{
+				std::lock_guard<std::mutex> guard(lock);
+				done_ticket = batch.ticket;
+				finished.push_back(std::move(batch));
+			}
+			finished_signal.notify_all();
+		}
+	}
+};
+
+void CResourceManager::BackgroundBegin()
+{
+	xrCriticalSectionGuard guard(creationGuard);
+	if (m_background_tracking) return;
+	m_background_deferred = bDeferredLoad;
+	bDeferredLoad = TRUE;
+	m_background_tracking = xr_new<xr_vector<ref_texture>>();
+}
+
+u32 CResourceManager::BackgroundEnd()
+{
+	xr_vector<ref_texture>* tracked;
+	{
+		xrCriticalSectionGuard guard(creationGuard);
+		tracked = m_background_tracking;
+		m_background_tracking = nullptr;
+		if (tracked) bDeferredLoad = m_background_deferred;
+	}
+	if (!tracked) return 0;
+	u32 ticket = 0;
+	if (!tracked->empty() && RDEVICE.b_is_Ready && !m_background_deferred)
+	{
+#if defined(USE_DX10) || defined(USE_DX11)
+		if (!m_background)
+		{
+			m_background = xr_new<BackgroundLoader>();
+			m_background->worker = std::thread([loader = m_background] { loader->Run(); });
+		}
+		{
+			std::lock_guard<std::mutex> guard(m_background->lock);
+			ticket = m_background->next_ticket++;
+			BackgroundLoader::Batch batch;
+			batch.ticket = ticket;
+			batch.textures.swap(*tracked);
+			m_background->queue.push_back(std::move(batch));
+		}
+		m_background->wake.notify_one();
+#else
+		// A DX9 device is not used from other threads here.
+		for (ref_texture& texture : *tracked)
+			texture->Load();
+#endif
+	}
+	// Created while the whole manager defers (a level loading): loaded with
+	// the rest by DeferredUpload.
+	xr_delete(tracked);
+	return ticket;
+}
+
+void CResourceManager::BackgroundFinalize(float budget_mb)
+{
+	if (!m_background) return;
+	BackgroundLoader& loader = *m_background;
+	{
+		std::lock_guard<std::mutex> guard(loader.lock);
+		for (BackgroundLoader::Batch& batch : loader.finished)
+			loader.loaded.push_back(std::move(batch));
+		loader.finished.clear();
+	}
+	// By size: the copy is the GPU's work, a few ms for 16 MB.
+	float moved_mb = 0.f;
+	while (!loader.loaded.empty())
+	{
+		BackgroundLoader::Batch& batch = loader.loaded.front();
+		while (loader.loaded_next < batch.textures.size())
+		{
+			if (budget_mb >= 0.f && moved_mb >= budget_mb) return;
+			ref_texture& texture = batch.textures[loader.loaded_next++];
+#if defined(USE_DX10) || defined(USE_DX11)
+			// Loaded as a staging copy: surface_get makes the GPU texture
+			// and copies it there, as its first Apply would.
+			if (texture->flags.bLoadedAsStaging)
+			{
+				ID3DBaseTexture* surface = texture->surface_get();
+				_RELEASE(surface);
+				moved_mb += float(texture->flags.MemoryUsage) / (1024.f * 1024.f);
+			}
+#endif
+		}
+		// Its references are released here, on the main thread.
+		loader.finalized_ticket = batch.ticket;
+		loader.loaded.pop_front();
+		loader.loaded_next = 0;
+	}
+}
+
+bool CResourceManager::BackgroundDone(u32 ticket)
+{
+	if (!m_background) return true;
+	// Up to 16 MB of textures a frame onto the GPU, so none waits for its
+	// first draw.
+	if (m_background->finalize_frame != RDEVICE.dwFrame)
+	{
+		m_background->finalize_frame = RDEVICE.dwFrame;
+		BackgroundFinalize(16.f);
+	}
+	return ticket <= m_background->finalized_ticket;
+}
+
+void CResourceManager::BackgroundWait(u32 ticket)
+{
+	if (!m_background || !ticket) return;
+	{
+		std::unique_lock<std::mutex> guard(m_background->lock);
+		m_background->finished_signal.wait(guard, [&] { return ticket <= m_background->done_ticket; });
+	}
+	BackgroundFinalize(-1.f);
+}
+
+void CResourceManager::BackgroundWaitAll()
+{
+	if (!m_background) return;
+	u32 last;
+	{
+		std::lock_guard<std::mutex> guard(m_background->lock);
+		last = m_background->next_ticket - 1;
+	}
+	BackgroundWait(last);
+}
+
+void CResourceManager::BackgroundShutdown()
+{
+	if (!m_background) return;
+	// The worker finishes its queue and stops; nothing is moved to the GPU.
+	{
+		std::lock_guard<std::mutex> guard(m_background->lock);
+		m_background->stop = true;
+	}
+	m_background->wake.notify_all();
+	m_background->worker.join();
+	m_background->finished.clear();
+	m_background->loaded.clear();
+	xr_delete(m_background);
+}
+
 void CResourceManager::DeferredUpload()
 {
 	if (!RDEVICE.b_is_Ready) return;
+	BackgroundWaitAll();
 
 	Msg("CResourceManager::DeferredUpload -> START, size = %d", m_textures.size());
 
@@ -395,6 +583,7 @@ void CResourceManager::DeferredUnload()
 {
 	if (!RDEVICE.b_is_Ready)
 		return;
+	BackgroundWaitAll();
 
 	tbb::parallel_for_each(m_textures, [&](auto m_tex) { m_tex.second->Unload(); });
 }

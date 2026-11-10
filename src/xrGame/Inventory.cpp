@@ -28,6 +28,9 @@
 #include "player_hud.h"
 #include "PDA.h"
 
+// VR: what a draw costs the frame it lands in (VrWeaponUpdate.cpp).
+void VrNoteWork(const char* what, const char* object, float ms);
+
 using namespace InventoryUtilities;
 //Alundaio
 #include "../../xrServerEntities/script_engine.h"
@@ -861,7 +864,10 @@ void CInventory::Update()
 					}
 					else
 					{
+						CTimer activate_timer; activate_timer.Start();
 						tmp_next_active->ActivateItem();
+						VrNoteWork("the game's activation of the drawn item", tmp_next_active->object().cNameSect().c_str(),
+						           activate_timer.GetElapsed_sec() * 1000.f);
 					}
 				}
 			}
@@ -874,7 +880,10 @@ void CInventory::Update()
 			auto obj = ActiveItem() ? ActiveItem()->object().lua_game_object() : NULL;
 			if (ai().script_engine().functor("_G.CActor_OnChangedSlot", funct))
 			{
+				CTimer script_timer; script_timer.Start();
 				funct(m_iActiveSlot, obj, prev_slot, prev_obj);
+				VrNoteWork("CActor_OnChangedSlot script callback", ActiveItem() ? ActiveItem()->object().cNameSect().c_str() : "-",
+				           script_timer.GetElapsed_sec() * 1000.f);
 			}
 		}
 		else if ((GetNextActiveSlot() != NO_ACTIVE_SLOT) && ActiveItem() && ActiveItem()->cast_hud_item()->IsHidden())

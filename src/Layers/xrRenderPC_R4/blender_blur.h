@@ -93,6 +93,20 @@ public:
 	virtual ~CBlender_ssfx_rain();
 };
 
+// VR "Simple Water": the stock Anomaly water pass with the repo's own
+// pixel shader (vr_water.ps). The material's base texture is the first
+// texture name; the rest are the stock effects_water.s ones.
+class CBlender_vr_water : public IBlender
+{
+public:
+	virtual LPCSTR getComment() { return "vr_water"; }
+	virtual BOOL canBeDetailed() { return FALSE; }
+	virtual BOOL canBeLMAPped() { return FALSE; }
+	virtual void Compile(CBlender_Compile& C);
+	CBlender_vr_water() { description.CLS = 0; }
+	virtual ~CBlender_vr_water() {}
+};
+
 class CBlender_ssfx_water_blur : public IBlender
 {
 public:

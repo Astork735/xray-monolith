@@ -534,6 +534,12 @@ void CActor::ActorUse()
 		return;
 	}
 
+	// VR: the hand whose trigger used chose its target this frame
+	// (UpdateVrWeapons), after the scheduled UpdateUseTarget cached the
+	// other hand's. Refreshed, the object used is the one that hand names.
+	if (g_vr_owns_present && Level().CurrentControlEntity() == this)
+		UpdateUseTarget();
+
 	if (!psActorFlags.test(AF_MULTI_ITEM_PICKUP))
 		m_bPickupMode = true;
 

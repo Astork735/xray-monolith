@@ -1427,6 +1427,8 @@ const void* CLevel::VrBodyCamera(Fmatrix& world)
     CCameraBase* camera = actor->cam_FirstEye();
     world.identity(); world.c = camera->Position(); world.k = camera->Direction();
     world.c.y += actor->VrCrouchLift(Device.fTimeDelta);
+    // Seated reach maps the real floor onto the ground under the actor.
+    vr::SetGameFloor(actor->Position().y);
     world.k.y = 0;
     if (world.k.square_magnitude() < EPS_S) world.k.set(0,0,1);
     world.k.normalize(); world.i.crossproduct(world.j, world.k);
@@ -1719,12 +1721,15 @@ void CLevel::OnRenderVrExtras()
             bool in_reach=false;
             // In the hand: only once letting go there puts it back
             // (ReleaseWanted), so a lit ring always means it will go.
+            // The holster's own reach (VrHolsterDistance: ahead of a
+            // shoulder counts twice), as drawing and putting back use it: a
+            // hand ahead of the shoulder lit a ring it could not use.
             if (active==weapon)
                 in_reach=weapon->VrHolsterArmed() && vr::HandTransform(weapon->VrWeaponHand(),false,hand) &&
-                    hand.c.distance_to(centre)<=range;
+                    VrHolsterDistance(*actor,centre,hand.c)<=range;
             else if (!active)
                 for (int side=0;side<2 && !in_reach;++side)
-                    in_reach=vr::HandTransform(side,false,hand) && hand.c.distance_to(centre)<=range;
+                    in_reach=vr::HandTransform(side,false,hand) && VrHolsterDistance(*actor,centre,hand.c)<=range;
             if (in_reach) ring(centre,0.1f,0xFF7CFF8E);
         }
         // Body slots: a small ring at the slot a free hand is within reach of.
@@ -1742,10 +1747,11 @@ void CLevel::OnRenderVrExtras()
         vr_world_overlay();
         RenderVrBinoculars(*actor);
     }
-    if (auto* actor=smart_cast<CActor*>(CurrentControlEntity()))
-        for (auto* item:actor->inventory().m_all)
-            if (auto* weapon=item->cast_weapon())
-                weapon->VrRenderBasicMagazines();
+    if (smart_cast<CActor*>(CurrentControlEntity()))
+    {
+        extern void VrRenderWeaponMagazines();
+        VrRenderWeaponMagazines();
+    }
     if (auto* actor=smart_cast<CActor*>(CurrentControlEntity()))
         if (auto* weapon=smart_cast<CWeapon*>(actor->inventory().ActiveItem()))
             weapon->VrRenderSight();

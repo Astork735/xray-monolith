@@ -8,6 +8,17 @@
 namespace vr
 {
 
+// A receiving hand at the handle can wield the weapon; one on the fore-end
+// carries it. Use the existing 12 cm grip reach, but at most 4 cm forward so
+// a nearby magazine well or compact fore-end is not treated as the handle.
+inline bool HandAtWeaponGrip(const V3& hand, const V3& grip, const V3& forward)
+{
+    const V3 offset=hand-grip;
+    const float length=Length(forward);
+    return length>1e-4f && Dot(offset,offset)<=0.12f*0.12f &&
+        Dot(offset,forward)<=0.04f*length;
+}
+
 // --- Letting go of the weapon in the hand -----------------------------------
 
 enum class Release { None, Holster, Drop };
@@ -39,14 +50,23 @@ inline Release ReleaseDecision(HolsterState& state, float distance, float range,
     return Release::None;
 }
 
-// A decided release goes at once, unless the game's own reload or launcher
-// switch runs (never interrupted); a shot's or draw's animation is ended by
-// the weapon's own hide or drop.
-inline bool ReleaseNow(bool at_rest, bool native_busy) { return at_rest || !native_busy; }
+// A same-state firing restart can be queued after an earlier shot finished.
+// Finish native firing, including its animation, before hand/ownership changes.
+inline bool NativeFirePending(bool firing, bool next_firing)
+{ return firing || next_firing; }
+
+// Reload, launcher switching and native firing finish before any ownership
+// change. Other animations can end through the weapon's own hide/drop.
+inline bool ReleaseNow(bool at_rest, bool native_busy, bool fire_pending=false)
+{ return !fire_pending && (at_rest || !native_busy); }
 
 // --- Wielding a weapon taken by hand ----------------------------------------
 
-enum class ActiveItem { None, ThisWeapon, OtherHeld, OtherLeaving };
+// OtherComing: no item is out yet, but another weapon is on its way to a
+// hand (its slot's activation is queued, or a wield is pending for it). It
+// counts as held: one weapon is on its way at a time, so the other hand
+// cannot draw or wield a second one over it.
+enum class ActiveItem { None, ThisWeapon, OtherHeld, OtherLeaving, OtherComing };
 enum class WieldStep
 {
     Wait,       // not in the inventory yet
@@ -62,7 +82,7 @@ enum class WieldStep
 inline WieldStep WieldDecision(bool stow, bool in_inventory, ActiveItem active)
 {
     if (stow) return in_inventory ? WieldStep::Stow : WieldStep::Wait;
-    if (active == ActiveItem::OtherHeld) return WieldStep::Cancel;
+    if (active == ActiveItem::OtherHeld || active == ActiveItem::OtherComing) return WieldStep::Cancel;
     if (!in_inventory) return WieldStep::Wait;
     if (active == ActiveItem::ThisWeapon) return WieldStep::Adopt;
     if (active == ActiveItem::OtherLeaving) return WieldStep::HoldHand;
@@ -79,6 +99,19 @@ inline bool TakeIntoHand(ActiveItem active, bool slot_free)
     if (active == ActiveItem::None) return true;
     if (active == ActiveItem::OtherLeaving) return slot_free;
     return false;
+}
+
+// A hand's claim on a weapon (it took the weapon, which is drawn into that
+// hand) holds only while the weapon is on its way there: its own slot's
+// activation is queued (in_queued_slot: in weapon slot 2 or 3, that slot
+// queued and not yet active), or a wield (not a stow) is pending for it.
+// Once it is active the claim is consumed by the weapon's own update. A
+// weapon in the backpack, whose slot id the inventory leaves stale, or one
+// stowed in its holster, has none: a stale claim drew it in the hand that
+// once took it while it hung on the body.
+inline bool ClaimHolds(bool active, bool in_queued_slot, bool wield_pending)
+{
+    return active || in_queued_slot || wield_pending;
 }
 
 // --- Choosing what a hand takes ---------------------------------------------
