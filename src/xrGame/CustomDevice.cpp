@@ -865,6 +865,10 @@ void CCustomDevice::on_a_hud_attach()
 {
 	inherited::on_a_hud_attach();
 
+	::luabind::functor<void> funct;
+	if (ai().script_engine().functor("_G.CCustomDevice__on_a_hud_attach", funct))
+		funct();
+
 	if (nullptr == m_ui)
 		CreateUI();
 }
@@ -875,6 +879,15 @@ void CCustomDevice::VrSkipAnimation()
 	if ((state != eShowing && state != eHiding) || GetNextState() != state) return;
 	StopCurrentAnimWithoutCallback();
 	OnAnimationEnd(state);
+}
+
+void CCustomDevice::on_b_hud_detach()
+{
+	inherited::on_b_hud_detach();
+
+	::luabind::functor<void> funct;
+	if (ai().script_engine().functor("_G.CCustomDevice__on_b_hud_detach", funct))
+		funct();
 }
 
 bool CCustomDevice::render_item_3d_ui_query()

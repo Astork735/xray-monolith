@@ -80,6 +80,7 @@ public:
 	virtual void _BCL OnFrame();
 	virtual void ImGui_OnRender(LPCSTR name);
     bool VrLoadingPrompt(bool confirm) override;
+	virtual void ImGui_OnShow(bool show);
 	virtual void OnEvent(EVENT E, u64 P1, u64 P2);
 
 	virtual void UpdateGameType();

@@ -208,12 +208,12 @@ void CDialogHolder::CollectHudDialogPieces(xr_vector<CUIWindow*>& out)
 			CUIWindow::CollectHudPieces(*item.wnd, out);
 }
 
-void CDialogHolder::DoRenderDialogs()
+void CDialogHolder::DoRenderDialogs(CUIWindow* skip)
 {
 	xr_vector<dlgItem>::iterator it = m_dialogsToRender.begin();
 	for (; it != m_dialogsToRender.end(); ++it)
 	{
-		if ((*it).enabled && (*it).wnd->IsShown())
+		if ((*it).enabled && (*it).wnd->IsShown() && (*it).wnd != skip)
 		{
 			CUIWindow* wnd = (*it).wnd;
 			const bool hud = CUIWindow::s_vr_hud_inset > 1.f && HudDialog(wnd);

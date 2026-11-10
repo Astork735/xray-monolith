@@ -10,13 +10,13 @@ R_hemi::R_hemi()
 
 void R_hemi::unmap()
 {
-	c_pos_faces = 0;
-	c_neg_faces = 0;
-	c_material = 0;
-	c_hotness = 0; //--DSR-- HeatVision
-	c_glowing = 0; //--DSR-- SilencerOverheat
-	c_blood_count = 0;
-	c_blood_wounds = 0;
+	c_pos_faces = nullptr;
+	c_neg_faces = nullptr;
+	c_material = nullptr;
+	c_hotness = nullptr; //--DSR-- HeatVision
+	c_glowing = nullptr; //--DSR-- SilencerOverheat
+	c_blood_count = nullptr;
+	c_blood_wounds = nullptr;
 }
 
 // Blood on bodies: the drawn object's wounds, two rows each; none clears.

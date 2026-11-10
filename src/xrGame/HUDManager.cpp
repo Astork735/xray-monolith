@@ -26,6 +26,7 @@
 #include "VrBodySlots.h"
 #include "../xrEngine/Vr/vr_gameplay.h"
 #include "script_attachment_manager.h"
+#include "UI3dStatic.h"
 
 extern CUIGameCustom* CurrentGameUI()
 {
@@ -368,6 +369,7 @@ void CHUDManager::RenderUI()
 
 	if (true /*|| psHUD_Flags.is(HUD_DRAW | HUD_DRAW_RT)*/)
 	{
+		CUI3dStatic::PrepareAtlas();
 		HitMarker.Render();
 		if (pUIGame)
 			pUIGame->Render();

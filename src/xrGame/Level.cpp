@@ -350,6 +350,7 @@ CLevel::~CLevel()
 	xr_delete(m_autosave_manager);
     xr_delete(m_debug_renderer);
     delete_data(m_debug_render_queue);
+    delete_data(m_debug_render_queue_immediate);
     if (!g_dedicated_server)
         ai().script_engine().remove_script_process(ScriptEngine::eScriptProcessorLevel);
     xr_delete(game);
@@ -692,6 +693,14 @@ void CLevel::ProcessSpawnEvents()
 		shared_str section;
 		u16 obj_id = GetSpawnInfo(P, parent_id, section);
 
+		// Parent left the level while this spawn waited, so the item would drop where the parent stood
+		if (parent_id != 0xffff)
+		{
+			CObject* parent = Objects.net_Find(parent_id);
+			if (!parent || parent->getDestroy())
+				continue;
+		}
+
 		if (spawn_antifreeze_debug) Msg("[ProcessSpawnEvents] spawning section %s, obj_id %d, parent_id %d, event_id %d", section.c_str(), obj_id, parent_id, dest);
 
 		// demonized: If item is II_BOLT class - go through anyway
@@ -865,6 +874,19 @@ void CLevel::ProcessGameEvents()
 							continue;
 						}
 					}					
+
+					// A child spawned before its postponed parent would drop to the ground where the parent stands
+					if (parent_id != 0xffff && !Objects.net_Find(parent_id))
+					{
+						auto& E = data->E;
+						E.p = P;
+						E.id = obj_id;
+						E.hasAlifeObject = ai().alife().objects().object(obj_id, true) != nullptr;
+
+						events_to_prefetch.push_back(E);
+						it++; // Move to next event
+						continue;
+					}
 				}
 			}
 #endif
@@ -1204,7 +1226,16 @@ void CLevel::OnFrame()
 	}
 
 	for (auto& pair : m_script_attachments)
+    {
 		pair.second->Update();
+        pair.second->UpdateXFORM(nullptr, nullptr);
+    }
+
+	for (auto& light : g_pGamePersistent->ScriptLights)
+		light->Update();
+
+	for (auto& glow : g_pGamePersistent->ScriptGlows)
+		glow->Update();
 
 	if (auto* actor = smart_cast<CActor*>(CurrentControlEntity()))
 		VrSnapHeldItems(*actor);
@@ -1898,6 +1929,16 @@ void CLevel::OnRender()
 
 	ScriptDebugRender();
 
+	for (u32 I = 0; I < Level().Objects.o_count(); I++)
+	{
+		CObject* _O = Level().Objects.o_get_by_iterator(I);
+		CGameObject* obj = smart_cast<CGameObject*>(_O);
+		if (obj) obj->DBGDrawPhysicsShell();
+	}
+
+	for (auto& pair : m_script_attachments)
+		pair.second->DBGDrawPhysicsShell();
+
 #ifdef DEBUG
     draw_wnds_rects();
     physics_world()->OnRender();
@@ -2014,7 +2055,7 @@ void CLevel::OnRender()
 
 void CLevel::ScriptDebugRender()
 {
-	if (!m_debug_render_queue.size())
+	if (!m_debug_render_queue.size() && !m_debug_render_queue_immediate.size())
 		return;
 
 	bool hasVisibleObj = false;
@@ -2027,6 +2068,19 @@ void CLevel::ScriptDebugRender()
 			hasVisibleObj = true;
 			obj->Render();
 		}
+	}
+
+	if (m_debug_render_queue_immediate.size())
+    {
+        hasVisibleObj = true;
+
+        for (auto& obj : m_debug_render_queue_immediate)
+        {
+            obj->Render();
+            xr_delete(obj);
+        }
+
+        m_debug_render_queue_immediate.clear_and_free();
 	}
 
 	// demonized: fix of showing console window when there are no visible gizmos 
@@ -2374,6 +2428,7 @@ void CLevel::OnAlifeSimulatorUnLoaded()
 	MapManager().ResetStorage();
 	GameTaskManager().ResetStorage();
 	delete_data(m_debug_render_queue);
+	delete_data(m_debug_render_queue_immediate);
 }
 
 void CLevel::OnAlifeSimulatorLoaded()
@@ -2381,6 +2436,7 @@ void CLevel::OnAlifeSimulatorLoaded()
 	MapManager().ResetStorage();
 	GameTaskManager().ResetStorage();
 	delete_data(m_debug_render_queue);
+	delete_data(m_debug_render_queue_immediate);
 }
 
 void CLevel::OnSessionTerminate(LPCSTR reason)
